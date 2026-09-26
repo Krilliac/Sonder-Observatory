@@ -63,3 +63,9 @@ See **Krilliac/Sonder-Inference** for the execution-engine research and architec
 ## Status
 
 Research/design foundation. The initial goal is a small, trustworthy live viewer + replay recorder before adding heavier 3D interpretation layers.
+
+## Repository scaffold
+
+See [scaffold status](docs/SCAFFOLD.md), [source workspace](src/README.md),
+and [ecosystem boundaries](docs/BOUNDARIES.md). These are structure and planning
+notes only; no application or dependencies have been implemented.

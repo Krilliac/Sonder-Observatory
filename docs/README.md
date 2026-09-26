@@ -12,3 +12,6 @@
 Machine-readable event envelope: [../protocol/observatory-events.schema.json](../protocol/observatory-events.schema.json)
 
 Design tokens: [../design/tokens.json](../design/tokens.json)
+
+- [Scaffold status](SCAFFOLD.md)
+- [Ecosystem boundaries](BOUNDARIES.md)
