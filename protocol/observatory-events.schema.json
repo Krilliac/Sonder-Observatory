@@ -35,12 +35,19 @@
         "name": { "type": "string" },
         "version": { "type": "string" },
         "node_id": { "type": "string" },
-        "instance_id": { "type": "string", "minLength": 1 },
-        "role": {
-          "type": "string",
-          "description": "Known values: inference, runtime, fixture. Unknown values are kept."
+        "instance_id": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "Producer process instance; event_id is <instance_id>-<sequence>. null means not stated."
         },
-        "synthetic": { "type": "boolean" }
+        "role": {
+          "type": ["string", "null"],
+          "description": "Known values: inference, runtime, fixture. Unknown values are kept. null means not stated."
+        },
+        "synthetic": {
+          "type": ["boolean", "null"],
+          "description": "true only for synthetic data. null means not stated (treated as not synthetic)."
+        }
       },
       "additionalProperties": true
     },

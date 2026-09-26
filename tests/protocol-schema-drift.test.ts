@@ -23,7 +23,7 @@ const schema = JSON.parse(
             const?: string;
             type?: string | string[];
             required?: string[];
-            properties?: Record<string, { enum?: string[]; type?: string; minLength?: number }>;
+            properties?: Record<string, { enum?: string[]; type?: string | string[]; minLength?: number }>;
         }
     >;
 };
@@ -74,7 +74,8 @@ describe("protocol schema mirror", () => {
         const optional = Object.keys(props).filter((k) => !schema.properties.producer!.required!.includes(k));
         expect(Object.keys(PRODUCER_OPTIONAL_FIELDS).sort()).toEqual(optional.sort());
         for (const [key, type] of Object.entries(PRODUCER_OPTIONAL_FIELDS)) {
-            expect(props[key]!.type, `producer.${key}`).toBe(type);
+            // Optional producer fields also accept null ("not stated").
+            expect(props[key]!.type, `producer.${key}`).toEqual([type, "null"]);
         }
         expect(props.instance_id!.minLength).toBe(1);
     });
@@ -94,6 +95,7 @@ describe("protocol schema mirror", () => {
             }).ok;
         expect(event({ instance_id: "rt-0123456789ab", role: "runtime", synthetic: false })).toBe(true);
         expect(event({ role: "some-future-role" })).toBe(true);
+        expect(event({ instance_id: null, role: null, synthetic: null })).toBe(true);
         expect(event({ instance_id: "" })).toBe(false);
         expect(event({ instance_id: 7 })).toBe(false);
         expect(event({ role: 1 })).toBe(false);

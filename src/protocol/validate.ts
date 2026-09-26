@@ -101,8 +101,11 @@ export function validateEvent(value: unknown): ValidationResult {
                 continue;
             }
             const field = value.producer[key];
+            if (field === null) {
+                continue; // "not stated"
+            }
             if (typeof field !== type) {
-                issues.push({ path: `producer.${key}`, message: `must be a ${type}` });
+                issues.push({ path: `producer.${key}`, message: `must be a ${type} or null` });
             } else if (key === "instance_id" && field === "") {
                 issues.push({ path: `producer.${key}`, message: "must be a non-empty string" });
             }

@@ -19,6 +19,20 @@ SSE/NDJSON framing, resume, backpressure, auth, CORS and correlation), is
 - Observatory owns the envelope and the discovery document shapes above.
   Changes are additive within a major version; a rename or removal needs a
   new major (`/2`) and lands here before any producer or consumer uses it.
+- Declared types are enforced. The envelope's optional
+  `producer.instance_id`, `role` and `synthetic` were undeclared additional
+  properties before live producer protocol v1; the schema now declares them
+  (non-empty string, string, boolean), each also accepting `null` for "not
+  stated". An event carrying one of them with another type is rejected. This
+  is a deliberate v1 tightening that producers must honour, recorded in
+  docs/DECISIONS.md.
+- Closed enums in discovery: `producer.role` (`inference`, `runtime`,
+  `fixture`) and `auth.schemes` (`bearer`) are enums pinned by the ecosystem
+  contract, so a v1 consumer refuses a document with any other value. A new
+  producer role or auth scheme therefore needs `sonder.telemetry.producer/2`
+  unless the owners relax these to open strings (open question in
+  docs/DECISIONS.md). The envelope's `producer.role`, by contrast, keeps
+  unknown values.
 - Each producer owns the documentation of its own event vocabulary (event
   types and attributes): Sonder-Inference in its `docs/TELEMETRY.md`, Sonder
   Runtime in its `docs/architecture/observatory-telemetry.md`.

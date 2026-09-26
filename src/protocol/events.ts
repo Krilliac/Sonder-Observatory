@@ -43,7 +43,9 @@ export const PRODUCER_REQUIRED_FIELDS = ["name", "version", "node_id"] as const;
 /**
  * Optional producer fields the schema declares (additive, live producer
  * protocol v1): `instance_id` is a non-empty string, `role` a string
- * (known values in KNOWN_PRODUCER_ROLES) and `synthetic` a boolean.
+ * (known values in KNOWN_PRODUCER_ROLES) and `synthetic` a boolean. Each may
+ * also be null ("not stated"); any other type is rejected (docs/DECISIONS.md,
+ * "Live producer protocol v1").
  */
 export const PRODUCER_OPTIONAL_FIELDS = { instance_id: "string", role: "string", synthetic: "boolean" } as const;
 
@@ -56,11 +58,11 @@ export interface Producer {
     version: string;
     node_id: string;
     /** Producer process instance; event ids are `<instance_id>-<sequence>`. */
-    instance_id?: string;
+    instance_id?: string | null;
     /** "inference" | "runtime" | "fixture" (unknown strings allowed). */
-    role?: string;
+    role?: string | null;
     /** True only for synthetic data (mock backends, fixtures). */
-    synthetic?: boolean;
+    synthetic?: boolean | null;
     /** Additional producer properties are allowed by the schema. */
     [extra: string]: unknown;
 }
