@@ -11,7 +11,7 @@ least-privilege native surface. See `docs/ARCHITECTURE.md`,
 |---|---|
 | `tauri.conf.json` | window, CSP, bundle; `devUrl` = Vite dev server, `frontendDist` = `../dist` |
 | `capabilities/main-window.json` | the **only** permissions granted to the webview |
-| `build.rs` | tauri-build with an explicit app-command manifest; rasterises placeholder icons (same dome mark as `icons/app-icon.svg`) if they are missing |
+| `build.rs` | tauri-build with an explicit app-command manifest |
 | `icons/app-icon.svg` | icon source for `tauri icon` |
 | `src/launch.rs` | CLI contract (`--connect`, `--session`, `--capability-file`, `--open`) + validation, unit-tested |
 | `src/recording.rs` | read grants for user-chosen recordings (path-escape safe), unit-tested |
@@ -20,7 +20,7 @@ least-privilege native surface. See `docs/ARCHITECTURE.md`,
 
 ## Prerequisites
 
-Rust **1.87+** (stable, via rustup) and Node (for the frontend).
+Rust **1.88+** (stable, via rustup) and Node (for the frontend).
 
 **Windows 10/11**
 1. Microsoft C++ Build Tools / Visual Studio 2022 with the *Desktop development with C++* workload (MSVC + Windows SDK).
@@ -59,13 +59,18 @@ cargo test  -j 4
 ## Launch contract
 
 ```text
-sonder-observatory [--connect|--endpoint <ws-url>] [--session <id>]
+sonder-observatory [--connect|--endpoint <url>] [--session <id>]
                    [--capability-file <path> | --capability <token>]
                    [--open <recording>]
 ```
 
-- `--connect` accepts `wss://` (any host) or `ws://` to loopback only
+- `--connect` accepts the same schemes as the renderer's `resolveEndpoint`:
+  `wss://` / `https://` to any host, `ws://` / `http://` to loopback only
   (`127.0.0.1`, `localhost`, `::1`). URLs with embedded credentials are refused.
+- `--session` / `--capability` are applied to the `--connect` connection: the
+  session id is sent as the `session` query parameter; the token as
+  `Authorization: Bearer` on HTTP streams or as a first
+  `{"type":"observatory.auth",...}` frame on WebSocket (never in the URL).
 - `--capability-file` is preferred over `--capability`: process arguments are
   visible to other local processes (docs/INTEGRATION.md). The token is capped at 4 KiB.
 - `--open` accepts a recording file (`events.ndjson`, `*.json`, `*.sobs`) or a
@@ -116,8 +121,8 @@ npm run tauri icon src-tauri/icons/app-icon.svg
 rm -rf src-tauri/icons/android src-tauri/icons/ios   # desktop-only shell
 ```
 
-`build.rs` still rasterises placeholder PNG/ICO files if any are missing; with
-the committed set it does nothing.
+The icons are required: `build.rs` no longer generates placeholders, so a
+missing file in `bundle.icon` fails the build.
 
 ## Licenses
 
@@ -131,8 +136,9 @@ MPL-2.0 is file-level copyleft and only matters if those files are modified.
 
 `Cargo.lock` is committed and CI runs `cargo check/test --locked` on stable.
 It is what `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo
-generate-lockfile` produces. The declared `rust-version` is **1.87** because
-`yoke-derive` 0.8.3 in that lockfile uses `str::from_utf8` (stable in 1.87)
-while claiming an older MSRV (docs/DECISIONS.md, 2026-09-26). To build on an
-older toolchain anyway, run `cargo update -p yoke-derive --precise 0.8.2`
-locally (adds `synstructure` 0.13.2) and do not commit the result.
+generate-lockfile` produces. The declared `rust-version` is **1.88**: `time` 0.3.55
+(dependabot #9) depends on `time-core` 0.1.9 / `time-macros` 0.2.32, which
+require 1.88, and `yoke-derive` 0.8.3 needs 1.87 without declaring it
+(docs/DECISIONS.md, 2026-09-26). To build on an older toolchain anyway, run
+`cargo update -p yoke-derive --precise 0.8.2` and
+`cargo update -p time --precise 0.3.45` locally and do not commit the result.

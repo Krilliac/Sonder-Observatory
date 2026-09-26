@@ -4,7 +4,7 @@
 //! (docs/INTEGRATION.md) pass these arguments:
 //!
 //! ```text
-//! sonder-observatory [--connect <ws-url>] [--session <id>]
+//! sonder-observatory [--connect <url>] [--session <id>]
 //!                    [--capability-file <path> | --capability <token>]
 //!                    [--open <recording>]
 //! ```
@@ -105,7 +105,7 @@ where
 /// Validate the raw arguments into what the frontend may see.
 pub fn validate(raw: &RawLaunchArgs) -> LaunchArgs {
     let mut warnings = raw.warnings.clone();
-    let connect = raw.connect.as_deref().and_then(|u| match validate_ws_url(u) {
+    let connect = raw.connect.as_deref().and_then(|u| match validate_connect_url(u) {
         Ok(url) => Some(url),
         Err(e) => {
             warnings.push(format!("--connect rejected: {e}"));
@@ -131,27 +131,33 @@ pub fn validate(raw: &RawLaunchArgs) -> LaunchArgs {
     LaunchArgs { connect, session, capability, warnings }
 }
 
-/// Live telemetry must be `wss://` (any host) or `ws://` bound to loopback
-/// (docs/SECURITY_PRIVACY.md: loopback by default, remote must be encrypted).
-/// Credentials embedded in the URL are refused.
-pub fn validate_ws_url(input: &str) -> Result<String, String> {
+/// Live endpoint policy, matching the schemes `resolveEndpoint` accepts in the
+/// renderer (src/ingest/live/endpoint.ts): `wss://` / `https://` to any host,
+/// plain `ws://` / `http://` only to loopback (docs/SECURITY_PRIVACY.md:
+/// loopback by default, remote must be encrypted). Credentials embedded in the
+/// URL are refused.
+pub fn validate_connect_url(input: &str) -> Result<String, String> {
     let url = Url::parse(input).map_err(|e| format!("invalid URL ({e})"))?;
     if !url.username().is_empty() || url.password().is_some() {
         return Err("credentials in URL are not allowed".into());
     }
     let host = url.host_str().ok_or("URL has no host")?;
     match url.scheme() {
-        "wss" => {}
-        "ws" => {
-            let loopback = matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1")
-                || host.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| ip.is_loopback());
-            if !loopback {
-                return Err("plain ws:// is only allowed to loopback; use wss:// for remote".into());
+        "wss" | "https" => {}
+        scheme @ ("ws" | "http") => {
+            if !is_loopback(host) {
+                let secure = if scheme == "ws" { "wss" } else { "https" };
+                return Err(format!("plain {scheme}:// is only allowed to loopback; use {secure}:// for remote"));
             }
         }
-        other => return Err(format!("unsupported scheme {other}:// (expected ws/wss)")),
+        other => return Err(format!("unsupported scheme {other}:// (expected ws, wss, http or https)")),
     }
     Ok(url.to_string())
+}
+
+fn is_loopback(host: &str) -> bool {
+    matches!(host, "localhost" | "[::1]" | "::1")
+        || host.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 #[cfg(test)]
@@ -176,15 +182,26 @@ mod tests {
     }
 
     #[test]
-    fn ws_url_policy() {
-        assert!(validate_ws_url("ws://127.0.0.1:1/t").is_ok());
-        assert!(validate_ws_url("ws://localhost:1/t").is_ok());
-        assert!(validate_ws_url("ws://[::1]:1/t").is_ok());
-        assert!(validate_ws_url("wss://node.example:443/t").is_ok());
-        assert!(validate_ws_url("ws://192.168.1.2:1/t").is_err());
-        assert!(validate_ws_url("http://127.0.0.1:1/").is_err());
-        assert!(validate_ws_url("wss://u:p@node.example/").is_err());
-        assert!(validate_ws_url("not a url").is_err());
+    fn connect_url_policy() {
+        assert!(validate_connect_url("ws://127.0.0.1:1/t").is_ok());
+        assert!(validate_connect_url("ws://localhost:1/t").is_ok());
+        assert!(validate_connect_url("ws://[::1]:1/t").is_ok());
+        assert!(validate_connect_url("wss://node.example:443/t").is_ok());
+        assert!(validate_connect_url("ws://192.168.1.2:1/t").is_err());
+        assert!(validate_connect_url("wss://u:p@node.example/").is_err());
+        assert!(validate_connect_url("not a url").is_err());
+        assert!(validate_connect_url("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn http_connect_urls_follow_the_same_loopback_rule() {
+        assert!(validate_connect_url("http://127.0.0.1:1/events").is_ok());
+        assert!(validate_connect_url("http://localhost:1/events?format=ndjson").is_ok());
+        assert!(validate_connect_url("http://[::1]:1/events").is_ok());
+        assert!(validate_connect_url("https://node.example/stream").is_ok());
+        let err = validate_connect_url("http://10.0.0.1/events").unwrap_err();
+        assert!(err.contains("https://"), "{err}");
+        assert!(validate_connect_url("https://u:p@node.example/").is_err());
     }
 
     #[test]
