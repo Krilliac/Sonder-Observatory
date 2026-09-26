@@ -71,7 +71,20 @@ UX decisions:
 - Views that are hidden are not rendered; switching tabs renders them at
   their real size.
 - Shortcuts use single keys and are ignored while typing, with modifiers held,
-  and for Space on controls Space already activates.
+  and for Space on controls Space already activates. Because they are active
+  page-wide, WCAG 2.1.4 (Character Key Shortcuts, level A) requires a way to
+  turn them off: the shortcuts dialog has a **Single-key shortcuts** switch,
+  kept per viewer in localStorage (try/catch). When off, no single-key
+  shortcut runs, including `?`; the header **Shortcuts** button opens the
+  dialog to turn them back on. Remapping is not offered.
+- Live panels are patched in place, never rebuilt per update: producer cards
+  keep their elements (only text and state attributes change; action buttons
+  are replaced only when the set of actions changes) and table rows are
+  reused by event position. A rebuilt element under the pointer loses the
+  click, which at live update rates makes buttons and rows unclickable at
+  human speed.
+- Every URL the page shows (cards, the Sources URL field, probe messages) is
+  shown without credentials or token parameters.
 - Per-viewer conveniences (theme, sidebar, splitter, recent endpoints) live in
   localStorage behind try/catch; tokens never do.
 - At 900 px and below the layout stacks and the sidebar starts collapsed;

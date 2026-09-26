@@ -83,6 +83,35 @@ test.describe("keyboard shortcuts", () => {
         await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     });
 
+    test("single-key shortcuts can be turned off, and the choice persists (WCAG 2.1.4)", async ({ page }) => {
+        const dialog = page.getByRole("dialog", { name: "Keyboard shortcuts" });
+        const enabled = page.getByRole("checkbox", { name: "Single-key shortcuts" });
+        await page.locator("#shortcuts-btn").click();
+        await expect(enabled).toBeChecked();
+        await enabled.uncheck();
+        await dialog.getByRole("button", { name: "Close" }).click();
+        await page.locator("body").click({ position: { x: 5, y: 5 } });
+        for (const key of ["t", "?", "j", " "]) {
+            await page.keyboard.press(key);
+        }
+        await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+        await expect(dialog).toBeHidden();
+        await expect(page.locator("#inspector")).toContainText("Select an event");
+        await expect(page.locator("#play-btn")).toHaveText("Play");
+
+        await page.reload();
+        await page.locator("body").click({ position: { x: 5, y: 5 } });
+        await page.keyboard.press("t");
+        await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+        await page.locator("#shortcuts-btn").click();
+        await expect(enabled).not.toBeChecked();
+        await enabled.check();
+        await page.keyboard.press("Escape");
+        await page.locator("body").click({ position: { x: 5, y: 5 } });
+        await page.keyboard.press("t");
+        await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+    });
+
     test("T toggles the theme", async ({ page }) => {
         await page.locator("body").click({ position: { x: 5, y: 5 } });
         await page.keyboard.press("t");

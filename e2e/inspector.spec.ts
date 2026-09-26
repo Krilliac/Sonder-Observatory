@@ -13,7 +13,16 @@ test.describe("event table + inspector", () => {
     test("selecting a row opens the inspector for that event", async ({ page }, testInfo) => {
         const rows = page.locator("#table-wrap tbody tr");
         expect(await rows.count()).toBeGreaterThan(10);
-        const row = rows.nth(5);
+        // Stop following so the window stays put, then take the row in the middle
+        // of the viewport (not an overscan row that a scroll would repaint) and
+        // address it by its event position, which survives repaints.
+        await page.locator("#follow-check").uncheck();
+        const pos = await page.evaluate(() => {
+            const r = document.getElementById("table-wrap")!.getBoundingClientRect();
+            return document.elementFromPoint(r.left + r.width / 3, r.top + r.height / 2)?.closest("tr.row")?.getAttribute("data-pos") ?? null;
+        });
+        expect(pos).not.toBeNull();
+        const row = page.locator(`#table-wrap tr.row[data-pos="${pos}"]`);
         const eventType = ((await row.locator("td").nth(2).textContent()) ?? "").trim();
         const seq = ((await row.locator("td").nth(0).textContent()) ?? "").trim();
         await row.click();

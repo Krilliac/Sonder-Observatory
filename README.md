@@ -132,7 +132,9 @@ npm run fake-live-producer -- --pace timeline   # http://127.0.0.1:8766 (discove
   (`.sobs`, `.ndjson`, `.jsonl`, `.json`) can also be dropped on the window.
 - **Keyboard**: `?` lists shortcuts: Space play/pause, J/K next/previous
   event, `]`/`[` next/previous error, `/` filter, F follow latest, T theme.
-  They are off while typing in a field.
+  They are off while typing in a field, and the dialog has a **Single-key
+  shortcuts** switch to turn them off (remembered in this browser; the
+  Shortcuts button still opens the list).
 - **Theme**: follows the system; the theme button (or T) switches and is
   remembered in this browser.
 
@@ -149,7 +151,9 @@ URL parameters:
 `token` and `access_token` parameters are ignored with a visible warning and
 removed from the address bar: tokens are typed into the Sources panel (or given
 to the desktop shell with `--token-file`), kept in memory only, and never put
-in URLs, storage or logs.
+in URLs, storage or logs. The same holds inside a `connect`/`ws` value:
+credentials (`user:pass@`) and token parameters of the producer URL are
+removed (with the same warning) before it is connected or shown.
 
 ### Connecting to Sonder Runtime and Sonder-Inference
 

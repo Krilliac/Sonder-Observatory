@@ -85,8 +85,18 @@ test.describe("onboarding", () => {
                     port: 8766,
                     corsOrigins: [new URL(String(testInfo.project.use.baseURL ?? "http://127.0.0.1:4173")).origin],
                 });
-            } catch {
-                producer = null;
+            } catch (error) {
+                // A busy port fails the run: a silent skip would hide that discovery went untested.
+                // Local runs that share the machine with another fake producer may opt out explicitly.
+                if (process.env.E2E_ALLOW_BUSY_PRESET_PORT === "1" && !process.env.CI) {
+                    producer = null;
+                    return;
+                }
+                throw new Error(
+                    `could not start the fake producer on the preset port 8766 (${(error as Error)?.message ?? String(error)}); ` +
+                        "free the port, or set E2E_ALLOW_BUSY_PRESET_PORT=1 to skip this test in a local run",
+                    { cause: error },
+                );
             }
         });
 
@@ -95,7 +105,7 @@ test.describe("onboarding", () => {
         });
 
         test("lists the presets that answered, each with Connect", async ({ page }) => {
-            test.skip(producer === null, "port 8766 is busy on this machine");
+            test.skip(producer === null, "port 8766 is busy and E2E_ALLOW_BUSY_PRESET_PORT=1 is set");
             await page.goto("./?fixture=0");
             await page.locator("#discover-btn").click();
             const status = page.locator("#discover-status");

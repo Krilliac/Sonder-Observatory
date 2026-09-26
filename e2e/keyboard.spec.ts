@@ -140,6 +140,24 @@ test.describe("keyboard navigation", () => {
         await expect(page.locator("#view-overview")).toBeVisible();
     });
 
+    test("the header Open recording control shows keyboard focus", async ({ page }) => {
+        await openFixture(page);
+        const label = page.locator("#file-open");
+        expect(await label.evaluate((el) => getComputedStyle(el).outlineStyle)).toBe("none");
+        for (let i = 0; i < 12; i += 1) {
+            await page.keyboard.press("Tab");
+            if (await page.evaluate(() => document.activeElement?.id === "file-input")) {
+                break;
+            }
+        }
+        expect(await page.evaluate(() => document.activeElement?.id)).toBe("file-input");
+        const outline = await label.evaluate((el) => {
+            const cs = getComputedStyle(el);
+            return { style: cs.outlineStyle, width: cs.outlineWidth };
+        });
+        expect(outline).toEqual({ style: "solid", width: "2px" });
+    });
+
     test("the inspector splitter resizes with the keyboard", async ({ page }) => {
         await openFixture(page, "view=events");
         const handle = page.locator("#split-handle");
