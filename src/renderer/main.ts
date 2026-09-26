@@ -18,8 +18,12 @@ if (!root) {
 // wired as analysis-view tabs inside ObservatoryApp (see app.ts VIEWS).
 const panels: ObservatoryPanel[] = [];
 
-new ObservatoryApp(root, panels).start(new URLSearchParams(window.location.search));
+const app = new ObservatoryApp(root, panels);
+app.start(new URLSearchParams(window.location.search));
 
 // Desktop vs browser mode badge; in the Tauri shell also the native
-// "Open recording…" dialog and the recent-recordings menu (src/integrations/).
-mountDesktopIntegration();
+// "Open recording…" dialog, the recent-recordings menu and the --open /
+// --connect launch arguments (src/integrations/). The app is the host, so
+// recordings load through openRecordingText() and --connect goes through
+// connectLive() (src/ingest/live).
+mountDesktopIntegration(app);

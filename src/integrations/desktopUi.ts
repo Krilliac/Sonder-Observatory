@@ -1,9 +1,9 @@
 /**
- * Desktop integration for the app shell: mode badge, native "Open recording…"
- * and a recent-recordings menu. main.ts calls mountDesktopIntegration() once
- * after ObservatoryApp.start(). Recordings read natively are handed to the app
- * through its existing `#file-input` change handler (fileInputHost), so
- * ObservatoryApp needs no new API.
+ * Desktop integration for the app shell: mode badge, native "Open recording…",
+ * a recent-recordings menu and the --open / --connect launch arguments.
+ * main.ts calls mountDesktopIntegration(app) once after ObservatoryApp.start();
+ * the app is the host (openRecordingText, connectLive). fileInputHost() is the
+ * fallback host that goes through the app's `#file-input` change handler.
  *
  * In a browser nothing changes except the "browser" badge: the existing
  * `<input type="file">` stays the open path and no recent menu is shown.
@@ -14,6 +14,8 @@ import { modeBadge, runtimeMode } from "./mode";
 
 export interface RecordingHost {
     openRecordingText(text: string, label: string): void;
+    /** Starts a live connection (`--connect` launch argument). Optional so file-only hosts still fit. */
+    connectLive?(url: string): void;
 }
 
 /** Subset of the bridge used here, injectable for tests. */
@@ -128,7 +130,13 @@ export class DesktopIntegration {
             }
             const open = info.open;
             if (open) {
+                if (info.connect) {
+                    // One source at a time: the recording wins over --connect.
+                    this.setStatus([...info.warnings, "--open and --connect both given; opened the recording"].join(" · "));
+                }
                 await this.run(() => this.api.readGrantText(open), false);
+            } else if (info.connect && this.host.connectLive) {
+                this.host.connectLive(info.connect);
             }
         } catch (err) {
             this.setStatus(`launch arguments unavailable: ${errorText(err)}`);

@@ -20,7 +20,7 @@ least-privilege native surface. See `docs/ARCHITECTURE.md`,
 
 ## Prerequisites
 
-Rust **1.85+** (stable, via rustup) and Node (for the frontend).
+Rust **1.87+** (stable, via rustup) and Node (for the frontend).
 
 **Windows 10/11**
 1. Microsoft C++ Build Tools / Visual Studio 2022 with the *Desktop development with C++* workload (MSVC + Windows SDK).
@@ -99,25 +99,25 @@ to the webview.
   recent entry that was itself chosen that way);
   entries must be plain relative paths and are re-checked after canonicalisation,
   so `..` and symlinks cannot escape. Listing skips symlinks.
-- CSP: `script-src 'self'`; `connect-src` limited to IPC, loopback `ws://`, and `wss:`.
+- CSP: `script-src 'self'`; `connect-src` limited to IPC, loopback `ws://` and `http://` (live ingest: WebSocket, SSE, NDJSON), and `wss:` / `https:`.
   `withGlobalTauri` is off and `freezePrototype` on.
 
 ## Icons
 
 The artwork is `icons/app-icon.svg` (an observatory dome with an open shutter,
-a telescope beam and a star, in the design-token palette). Generate the full
-set with:
+a telescope beam and a star, in the design-token palette). The generated set
+(32x32, 64x64, 128x128, 128x128@2x, icon.png, icon.ico, icon.icns and the
+Windows Square*/Store logos) is committed. To regenerate it after changing the
+SVG, run the **Generate lockfiles** workflow on a feature branch with
+`icons: true` (and `cargo: false`), or locally:
 
 ```bash
 npm run tauri icon src-tauri/icons/app-icon.svg
 rm -rf src-tauri/icons/android src-tauri/icons/ios   # desktop-only shell
 ```
 
-Until that output is committed, `build.rs` rasterises the same mark into
-`icons/32x32.png`, `128x128.png`, `icon.png` and `icon.ico` when they are
-missing (ignored by Git), so a fresh checkout builds. After committing the real
-set, update `src-tauri/.gitignore` as noted there and add `icons/128x128@2x.png`
-and `icons/icon.icns` to `bundle.icon` in `tauri.conf.json`.
+`build.rs` still rasterises placeholder PNG/ICO files if any are missing; with
+the committed set it does nothing.
 
 ## Licenses
 
@@ -130,10 +130,9 @@ MPL-2.0 is file-level copyleft and only matters if those files are modified.
 ## Dependency note
 
 `Cargo.lock` is committed and CI runs `cargo check/test --locked` on stable.
-It is exactly what `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo
-generate-lockfile` produces, but it does **not** build on the declared
-`rust-version` (1.85): `yoke-derive` 0.8.3 uses `str::from_utf8` (stable in
-1.87) while claiming an older MSRV. On rustc 1.85 run
-`cargo update -p yoke-derive --precise 0.8.2` locally (adds `synstructure`
-0.13.2; that is how this branch was verified on Linux). Long-term fix: commit
-that pin or bump `rust-version` to 1.87.
+It is what `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo
+generate-lockfile` produces. The declared `rust-version` is **1.87** because
+`yoke-derive` 0.8.3 in that lockfile uses `str::from_utf8` (stable in 1.87)
+while claiming an older MSRV (docs/DECISIONS.md, 2026-09-26). To build on an
+older toolchain anyway, run `cargo update -p yoke-derive --precise 0.8.2`
+locally (adds `synstructure` 0.13.2) and do not commit the result.

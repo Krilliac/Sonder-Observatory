@@ -149,6 +149,25 @@ the standard Apache License 2.0 text, and `NOTICE` reads "Sonder-Observatory,
 Copyright 2026 Nate Witkowski". `package.json`, `src-tauri/Cargo.toml` and the
 Tauri bundle metadata say `Apache-2.0`.
 
+## 2026-09-26 — Rust MSRV 1.87
+
+`src-tauri/Cargo.toml` now says `rust-version = "1.87"`. The committed
+`Cargo.lock` already needed 1.87 (`yoke-derive` 0.8.3, see "Lockfiles"), and CI
+builds with stable Rust. This replaces pinning `yoke-derive` to an older
+release.
+
+## 2026-09-26 — Live ingest in the renderer
+
+The renderer connects through `src/ingest/live` (`connectLiveSession`) instead
+of `src/transport/live.ts`'s `LiveConnection`. The endpoint field takes
+`ws(s)://` and `http(s)://` (SSE or NDJSON), checked by `resolveEndpoint`.
+`#live-status` shows `describeStatus()` (reconnecting, dropped counts), and
+renders stay batched in `requestAnimationFrame`. `src/transport/live.ts` stays
+for the `WebSocketLike` types and `DEFAULT_ENDPOINT`. The Tauri CSP
+`connect-src` also allows loopback `http://` and `https:`. In the desktop
+shell, `--connect <ws-url>` starts the same connection through
+`ObservatoryApp.connectLive()`, and `--open` wins when both are given.
+
 ## Open questions
 
 - Protocol package ownership and compatibility/version policy (Milestone 0).
