@@ -142,6 +142,13 @@ Shared readers live in `src/query/attributes.ts`.
   desktop/browser mode badge, so `@tauri-apps/api/core` is in the web bundle
   (this updates the "Runtime dependencies" bullet).
 
+## 2026-09-26 — License changed to Apache-2.0
+
+Supersedes the "License" entry above, at the owner's request. `LICENSE` holds
+the standard Apache License 2.0 text, and `NOTICE` reads "Sonder-Observatory,
+Copyright 2026 Nate Witkowski". `package.json`, `src-tauri/Cargo.toml` and the
+Tauri bundle metadata say `Apache-2.0`.
+
 ## Open questions
 
 - Protocol package ownership and compatibility/version policy (Milestone 0).
