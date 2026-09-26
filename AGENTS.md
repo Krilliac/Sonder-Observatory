@@ -23,8 +23,10 @@ or inference code, producer instrumentation, or 3D views in this phase.
   `src/topology/`, `src/diagnostics/`, `src-tauri/`). They do not edit root
   config (package.json, tsconfig, vite/eslint config, CI, main.ts); list needed
   dependencies, scripts, and panel wiring in the branch's
-  `INTEGRATION_NOTES.md` for the integrator. New views implement
-  `ObservatoryPanel` (src/renderer/panels.ts) and are registered in
+  `INTEGRATION_NOTES.md` for the integrator. Before merging, the integrator
+  moves that file to `docs/integration/<area>.md` so branches do not conflict.
+  Analysis views are tabs in `src/renderer/app.ts` (`VIEWS`); simple panels
+  implement `ObservatoryPanel` (src/renderer/panels.ts) and are registered in
   src/renderer/main.ts.
 
 ## Observatory boundary

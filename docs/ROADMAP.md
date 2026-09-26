@@ -13,7 +13,7 @@
 ## Milestone 1 — smallest useful Observatory
 
 - [x] web renderer (TypeScript + Vite, see [decisions](DECISIONS.md))
-- [ ] Tauri standalone shell — **next step**: needs a Rust toolchain on the build machine; wrap the Vite build (`dist/`) with `@tauri-apps/cli`, keep loopback-only defaults, add a CI job
+- [x] Tauri standalone shell (`src-tauri/`, Tauri v2, least-privilege capabilities; CI runs `cargo check`/`cargo test` on Windows). `tauri dev`/`tauri build` not yet run on a dev machine; the desktop bridge (`src/integrations/desktop.ts`) is not wired into the UI yet
 - [x] connect/disconnect to live WebSocket (configurable URL; plain event frames, no handshake yet)
 - [x] metric cards
 - [x] event timeline
@@ -29,18 +29,26 @@ Success gate: developer can identify request latency, token rate, errors, agent/
 
 Status 2026-09-26: met against the **synthetic** fixture only. Validating the gate against a real Sonder Runtime / Sonder-Inference recording is blocked on producer instrumentation and the open protocol questions in [decisions](DECISIONS.md).
 
-Deferred from Milestone 1: Tauri shell, live reconnect/resume, capability-token handshake, indexed seeking for long recordings (replay currently loads the whole file), recorder quota/rotation, ZIP `.sobs` packaging, event-type filters beyond class/text.
+Deferred from Milestone 1: Tauri bundle/installer and desktop-bridge wiring, live reconnect/resume, capability-token handshake, indexed seeking for long recordings (replay currently loads the whole file), recorder quota/rotation, ZIP `.sobs` packaging, event-type filters beyond class/text.
 
 ## Milestone 2 — Sonder topology
 
-- [ ] agent graph
-- [ ] route/model changes
-- [ ] context transfer
-- [ ] tool and memory nodes
-- [ ] retry/recovery/guard events
+- [x] agent graph (`src/topology/`, "Agents" tab)
+- [x] route/model changes
+- [x] context transfer
+- [x] tool and memory nodes
+- [x] retry/recovery/guard events
 - [ ] token/context budget visualization
 - [ ] compaction visualization
-- [ ] duplicate/no-progress diagnostics
+- [x] duplicate/no-progress diagnostics
+
+Status 2026-09-26: topology is derived only from events at the replay cursor
+and validated against synthetic fixtures; the attribute names it reads are an
+open protocol question (see [topology notes](integration/topology.md)).
+Diagnostics findings (`src/diagnostics/`, "Diagnostics" tab) cover budget
+pressure, compaction, no-progress loops, duplicate workers, retry storms,
+cache thrash, model churn, latency outliers, error bursts and resource
+pressure (see [diagnostics notes](integration/diagnostics.md)).
 
 ## Milestone 3 — inference space
 

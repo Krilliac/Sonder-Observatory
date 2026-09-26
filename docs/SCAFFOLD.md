@@ -26,14 +26,15 @@ preserved.
 - [x] recorder (`.sobs`) and replay with scrubber
 - [x] web renderer: metric cards, timeline, event table, inspector
 - [x] unit test suite and CI workflow
-- [ ] Tauri standalone shell (next step, see [roadmap](ROADMAP.md))
-- [ ] Flutter embedding (`src/integrations/` remains a placeholder)
+- [x] Tauri standalone shell (`src-tauri/`; see [roadmap](ROADMAP.md) for what is not yet run)
+- [x] Milestone 2 topology (`src/topology/`) and diagnostics (`src/diagnostics/`)
+- [ ] Flutter embedding (`src/integrations/` holds only the Tauri desktop bridge)
 
 ## Next design work
 
 1. Resolve protocol ownership and compatibility policy with Runtime and Inference.
 2. Confirm producer attribute names used by metric derivation ([decisions](DECISIONS.md)).
-3. Validate the Tauri shell and project/dependency licenses.
+3. Run `tauri dev`/`tauri build` on Windows, wire the desktop bridge, and settle project/dependency licenses.
 4. Record a real producer session and re-check the Milestone 1 success gate.
 
 Producer instrumentation stays with Runtime/Inference. Observatory must remain

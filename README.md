@@ -73,8 +73,9 @@ Milestone 1 in progress (2026-09-26): a small, trustworthy live viewer + replay
 recorder, web renderer first, before heavier 3D interpretation layers. What
 exists: metric cards, event timeline, event table + evidence inspector, live
 WebSocket connection, `.sobs` recorder, replay with scrubber, and a synthetic
-fixture. Not yet: Tauri standalone shell, Flutter embedding, 3D views, real
-producer integration. See [roadmap](docs/ROADMAP.md) and
+fixture, plus agent topology and diagnostics tabs (Milestone 2) and a Tauri
+desktop shell in `src-tauri/`. Not yet: Tauri bundle, Flutter embedding, 3D
+views, real producer integration. See [roadmap](docs/ROADMAP.md) and
 [decisions](docs/DECISIONS.md).
 
 ## Quickstart
@@ -87,6 +88,7 @@ npm run dev         # http://127.0.0.1:5173 — opens with the synthetic fixture
 npm test            # Vitest unit tests
 npm run lint        # ESLint + TypeScript type check
 npm run build       # type check + production bundle in dist/
+npm run tauri dev   # desktop shell (needs a Rust toolchain; see src-tauri/README.md)
 ```
 
 Live mode with the dev fake producer (replays the fixture over a loopback
