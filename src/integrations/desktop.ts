@@ -137,3 +137,29 @@ export async function openRecordingNative(folder = false): Promise<OpenedRecordi
 export async function openRecentRecordingText(id: string): Promise<OpenedRecording> {
     return readGrantText(await openRecentRecording(id));
 }
+
+/** File-type filter shown in the native save dialog. */
+export interface SaveFilter {
+    name: string;
+    /** Extensions without the dot, e.g. ["html"]. */
+    extensions: string[];
+}
+
+/** Result of a native save: the chosen file name only (never the absolute path). */
+export interface SavedFile {
+    name: string;
+}
+
+/**
+ * Shows the native save dialog (Rust side) and writes `content` as UTF-8 to
+ * the file the user chose. Resolves null when the user cancels. The webview
+ * cannot name a path: the shell only writes to the dialog's result.
+ */
+export async function saveTextNative(suggestedName: string, content: string, filter: SaveFilter): Promise<SavedFile | null> {
+    return invoke<SavedFile | null>("save_export", {
+        suggestedName,
+        content,
+        filterName: filter.name,
+        extensions: filter.extensions,
+    });
+}
