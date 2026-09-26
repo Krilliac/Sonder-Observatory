@@ -37,7 +37,7 @@ sudo apt install pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libs
 From the repo root, once the lead has added `@tauri-apps/cli` and a `"tauri": "tauri"` script (see `INTEGRATION_NOTES.md`):
 
 ```bash
-npm run tauri dev                      # runs `npm run dev`, opens the window on http://localhost:5173
+npm run tauri dev                      # runs `npm run dev`, opens the window on http://127.0.0.1:5173
 npx tauri dev -- -- --connect ws://127.0.0.1:49152/telemetry   # 2nd `--` = app args
 npm run tauri build                    # runs `npm run build`, bundles ../dist
 npm run tauri build -- --debug         # debug bundle, faster

@@ -26,8 +26,12 @@ because the dialog runs from Rust.
 
 `src-tauri/tauri.conf.json` assumes:
 
-- The dev server is on `http://localhost:5173`. Set `server: { port: 5173, strictPort: true }`
-  so Tauri doesn't wait on the wrong port. If you change the port, update `build.devUrl`.
+- The dev server is on `http://127.0.0.1:5173`, matching the current
+  `vite.config.ts` (`server.host = 127.0.0.1`). Using the IP avoids `localhost`
+  resolving to `::1` on Windows. Please add `strictPort: true` so Vite fails
+  instead of silently moving to another port. If you change the host or port,
+  update `build.devUrl`.
+- `base: "./"` (already set) works with Tauri's asset protocol.
 - `npm run build` writes to `dist/` (`build.frontendDist = "../dist"`).
 - `npm run dev` / `npm run build` exist (`beforeDevCommand` / `beforeBuildCommand`).
 - Recommended: `clearScreen: false`, `envPrefix: ['VITE_', 'TAURI_ENV_']`, and
@@ -146,5 +150,5 @@ These were run on Linux (rustc 1.85.1, webkit2gtk 4.1):
   deep-link or IPC handoff can be added then. The current CLI contract already
   carries endpoint, session, and capability.
 - Real icons (see `src-tauri/README.md`).
-- The repo has no LICENSE yet. `Cargo.toml` has no `license` field, and bundle
-  metadata should be updated once one is chosen.
+- There's no LICENSE file yet (`package.json` says `UNLICENSED`). `Cargo.toml`
+  has no `license` field; set it and the bundle metadata once a license is chosen.
