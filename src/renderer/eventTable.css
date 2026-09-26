@@ -31,9 +31,3 @@ table.events.virtual tr.spacer td {
     display: block;
     cursor: crosshair;
 }
-
-/* Muted text on the selected-row background was 4.46:1 (< WCAG AA 4.5:1,
-   docs/integration/e2e.md "UI bugs"); lift it for table rows (5.3:1). */
-table.events.virtual tr.selected td.muted {
-    color: #9aa9c0;
-}
