@@ -83,7 +83,7 @@ views, real producer integration. See [roadmap](docs/ROADMAP.md) and
 Requires Node.js 20.19+ (or 22.12+) and npm.
 
 ```bash
-npm install         # dev dependencies (no lockfile committed yet)
+npm ci              # install from package-lock.json
 npm run dev         # http://127.0.0.1:5173 — opens with the synthetic fixture
 npm test            # Vitest unit tests
 npm run lint        # ESLint + TypeScript type check
@@ -112,3 +112,8 @@ is unresolved with Sonder Runtime / Sonder-Inference.
 
 See [scaffold status](docs/SCAFFOLD.md), [source workspace](src/README.md),
 and [ecosystem boundaries](docs/BOUNDARIES.md).
+
+## License
+
+[MIT](LICENSE). This matches most of Krilliac's other licensed repositories.
+Third-party dependencies keep their own licenses.
