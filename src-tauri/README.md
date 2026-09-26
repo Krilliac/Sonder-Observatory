@@ -105,19 +105,19 @@ to the webview.
 ## Icons
 
 The artwork is `icons/app-icon.svg` (an observatory dome with an open shutter,
-a telescope beam and a star, in the design-token palette). Generate the full
-set with:
+a telescope beam and a star, in the design-token palette). The generated set
+(32x32, 64x64, 128x128, 128x128@2x, icon.png, icon.ico, icon.icns and the
+Windows Square*/Store logos) is committed. To regenerate it after changing the
+SVG, run the **Generate lockfiles** workflow on a feature branch with
+`icons: true` (and `cargo: false`), or locally:
 
 ```bash
 npm run tauri icon src-tauri/icons/app-icon.svg
 rm -rf src-tauri/icons/android src-tauri/icons/ios   # desktop-only shell
 ```
 
-Until that output is committed, `build.rs` rasterises the same mark into
-`icons/32x32.png`, `128x128.png`, `icon.png` and `icon.ico` when they are
-missing (ignored by Git), so a fresh checkout builds. After committing the real
-set, update `src-tauri/.gitignore` as noted there and add `icons/128x128@2x.png`
-and `icons/icon.icns` to `bundle.icon` in `tauri.conf.json`.
+`build.rs` still rasterises placeholder PNG/ICO files if any are missing; with
+the committed set it does nothing.
 
 ## Licenses
 
