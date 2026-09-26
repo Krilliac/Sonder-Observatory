@@ -43,6 +43,13 @@ Observatory is intended to remain a separate repository and process so renderer 
 - `docs/RESEARCH.md` — research and upstream references
 - `design/` — visual-system notes/tokens
 - `docs/assets/concepts/` — generated concept art used as design references
+- `docs/DECISIONS.md` — toolchain, protocol-mirror, ordering, and metric decisions
+- `docs/RECORDING_FORMAT.md` — `.sobs` recording container
+- `protocol/` — event envelope JSON Schema (source of truth)
+- `src/` — Milestone 1 web app (protocol mirror, transport, recording, replay, query, inspector, renderer)
+- `fixtures/` — synthetic telemetry fixture (clearly labeled synthetic)
+- `scripts/` — fixture generator and dev fake producer
+- `tests/` — Vitest unit tests
 
 ## Design principles
 
@@ -62,10 +69,44 @@ See **Krilliac/Sonder-Inference** for the execution-engine research and architec
 
 ## Status
 
-Research/design foundation. The initial goal is a small, trustworthy live viewer + replay recorder before adding heavier 3D interpretation layers.
+Milestone 1 in progress (2026-09-26): a small, trustworthy live viewer + replay
+recorder, web renderer first, before heavier 3D interpretation layers. What
+exists: metric cards, event timeline, event table + evidence inspector, live
+WebSocket connection, `.sobs` recorder, replay with scrubber, and a synthetic
+fixture. Not yet: Tauri standalone shell, Flutter embedding, 3D views, real
+producer integration. See [roadmap](docs/ROADMAP.md) and
+[decisions](docs/DECISIONS.md).
+
+## Quickstart
+
+Requires Node.js 20.19+ (or 22.12+) and npm.
+
+```bash
+npm install         # dev dependencies (no lockfile committed yet)
+npm run dev         # http://127.0.0.1:5173 — opens with the synthetic fixture
+npm test            # Vitest unit tests
+npm run lint        # ESLint + TypeScript type check
+npm run build       # type check + production bundle in dist/
+```
+
+Live mode with the dev fake producer (replays the fixture over a loopback
+WebSocket; the data stays labeled synthetic):
+
+```bash
+npm run fake-producer -- --speed 2          # ws://127.0.0.1:8765
+# then press Connect in the UI, or open http://127.0.0.1:5173/?ws=ws://127.0.0.1:8765
+```
+
+Other options: `?fixture=0` starts empty; **Open recording…** loads a `.sobs`
+or `.ndjson`/`.jsonl` file; **Save** writes the current session as `.sobs`;
+`npm run fixture` regenerates `fixtures/synthetic-session.ndjson`
+deterministically.
+
+The WebSocket client accepts frames containing one protocol event (JSON) or
+several (NDJSON). There is no handshake or resume protocol yet; that contract
+is unresolved with Sonder Runtime / Sonder-Inference.
 
 ## Repository scaffold
 
 See [scaffold status](docs/SCAFFOLD.md), [source workspace](src/README.md),
-and [ecosystem boundaries](docs/BOUNDARIES.md). These are structure and planning
-notes only; no application or dependencies have been implemented.
+and [ecosystem boundaries](docs/BOUNDARIES.md).

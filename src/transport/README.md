@@ -1,5 +1,9 @@
 # Transport
 
-Planned responsibility: Telemetry connection, negotiation, reconnect, and loss reporting.
+Responsibility: Telemetry connection, negotiation, reconnect, and loss reporting.
 
-Reserved directory only. See [source workspace](../README.md).
+- `live.ts` connects/disconnects a WebSocket (configurable URL, loopback by
+  default), accepts JSON or NDJSON text frames, and reports rejected frames.
+
+Negotiation, capability tokens, and reconnect/resume are not implemented
+because the producer contract is unresolved. See [source workspace](../README.md).
