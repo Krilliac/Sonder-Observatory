@@ -33,3 +33,7 @@ node_modules/
 
 # Generated deterministically by scripts/generate-fixture.mjs (npm pre-scripts)
 /fixtures/synthetic-session.ndjson
+
+# Playwright output (npm run test:e2e)
+/test-results/
+/playwright-report/

@@ -1,17 +1,17 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-window",
-  "description": "Least-privilege surface for the main Observatory window: core event/window basics plus the app's own recording/launch commands. No shell, no fs plugin, no webview-side dialog access.",
+  "description": "Least-privilege surface for the main Observatory window: only the app's own launch/recording/recent commands. No core:* plugin permissions (the renderer uses none), no shell, no fs plugin, no webview-side dialog access. Local app content only (no remote URLs).",
+  "local": true,
   "windows": ["main"],
   "platforms": ["windows", "linux", "macOS"],
   "permissions": [
-    "core:app:allow-version",
-    "core:event:allow-listen",
-    "core:event:allow-unlisten",
-    "core:window:allow-set-title",
     "allow-get-launch-args",
     "allow-pick-recording",
+    "allow-list-recording-entries",
     "allow-read-recording-entry",
-    "allow-list-recording-entries"
+    "allow-list-recent-recordings",
+    "allow-open-recent-recording",
+    "allow-clear-recent-recordings"
   ]
 }

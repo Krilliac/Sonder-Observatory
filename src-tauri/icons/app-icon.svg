@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Sonder Observatory app mark: an observatory dome with an open slit and a
+       telescope pointing at a star. Colours from design/tokens.json. Source for
+       `npm run tauri icon src-tauri/icons/app-icon.svg`. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#162238"/>
+      <stop offset="1" stop-color="#070B14"/>
+    </linearGradient>
+    <linearGradient id="dome" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22D3EE"/>
+      <stop offset="1" stop-color="#3B82F6"/>
+    </linearGradient>
+  </defs>
+  <rect x="32" y="32" width="960" height="960" rx="208" fill="url(#bg)"/>
+  <rect x="32" y="32" width="960" height="960" rx="208" fill="none" stroke="#24334A" stroke-width="16"/>
+  <!-- star -->
+  <path d="M760 190 L784 250 L844 274 L784 298 L760 358 L736 298 L676 274 L736 250 Z" fill="#E8F1FF"/>
+  <circle cx="300" cy="230" r="14" fill="#A855F7"/>
+  <circle cx="860" cy="430" r="10" fill="#22D3EE"/>
+  <!-- telescope beam through the slit -->
+  <path d="M520 560 L700 338" stroke="#E8F1FF" stroke-width="30" stroke-linecap="round"/>
+  <!-- dome -->
+  <path d="M232 640 A280 280 0 0 1 792 640 Z" fill="url(#dome)"/>
+  <!-- slit (open shutter) -->
+  <path d="M470 364 L566 364 L566 640 L470 640 Z" fill="#070B14" transform="rotate(38 518 640)"/>
+  <!-- building -->
+  <rect x="252" y="640" width="520" height="190" rx="18" fill="#0F1726" stroke="#22D3EE" stroke-width="16"/>
+  <rect x="468" y="712" width="88" height="118" rx="10" fill="#22D3EE"/>
+  <rect x="200" y="824" width="624" height="28" rx="14" fill="#24334A"/>
+</svg>
