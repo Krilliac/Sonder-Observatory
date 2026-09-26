@@ -1,0 +1,156 @@
+/**
+ * Milestone 1 recording container (".sobs").
+ *
+ * Decision (2026-09-26, see docs/RECORDING_FORMAT.md and docs/DECISIONS.md): a `.sobs` file is
+ * UTF-8 NDJSON. Line 1 is a manifest record whose `format` is
+ * RECORDING_FORMAT; every following line is one unmodified protocol event.
+ * A later ZIP-compatible container can be distinguished by its leading
+ * "PK" bytes, so this debuggable form stays loadable.
+ *
+ * The manifest is Observatory-owned recorder metadata, not part of the
+ * producer protocol. Fields that the producer protocol does not yet carry
+ * (for example a redaction policy) are recorded as "unspecified" rather than
+ * invented.
+ */
+import type { ObservatoryEvent } from "../protocol/events";
+import { parseNdjson, toNdjson, type RejectedLine } from "./ndjson";
+
+export const RECORDING_FORMAT = "sonder.observatory.recording/1";
+export const RECORDING_EXTENSION = ".sobs";
+
+export interface RecordingManifest {
+    format: typeof RECORDING_FORMAT;
+    created_at: string;
+    recorder: { name: string; version: string };
+    /** true when the recording contains a session.ended event for every session. */
+    complete: boolean;
+    event_count: number;
+    schema_versions: string[];
+    producers: { name: string; version: string; node_id: string; synthetic: boolean }[];
+    session_ids: string[];
+    run_ids: string[];
+    sampling_levels: string[];
+    /** Redaction/capture policy as declared by producers; "unspecified" if absent. */
+    capture_policy: string;
+    dropped_events: number;
+    time_origin: { wall_time: string; mono_ns: number } | null;
+    synthetic: boolean;
+}
+
+export interface LoadedRecording {
+    manifest: RecordingManifest | null;
+    events: ObservatoryEvent[];
+    rejected: RejectedLine[];
+}
+
+export function isSyntheticProducer(producer: ObservatoryEvent["producer"]): boolean {
+    return producer.synthetic === true;
+}
+
+function unique<T>(values: Iterable<T>): T[] {
+    return [...new Set(values)];
+}
+
+function droppedCount(event: ObservatoryEvent): number {
+    if (event.event_type !== "telemetry.dropped") {
+        return 0;
+    }
+    const n = event.attributes.dropped_count;
+    return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 1;
+}
+
+export function buildManifest(
+    events: readonly ObservatoryEvent[],
+    createdAt: Date = new Date(),
+): RecordingManifest {
+    const producers = new Map<string, RecordingManifest["producers"][number]>();
+    for (const e of events) {
+        const key = `${e.producer.name}\u0000${e.producer.version}\u0000${e.producer.node_id}`;
+        if (!producers.has(key)) {
+            producers.set(key, {
+                name: e.producer.name,
+                version: e.producer.version,
+                node_id: e.producer.node_id,
+                synthetic: isSyntheticProducer(e.producer),
+            });
+        }
+    }
+    const sessions = unique(events.map((e) => e.session_id));
+    const ended = new Set(
+        events.filter((e) => e.event_type === "session.ended").map((e) => e.session_id),
+    );
+    const policies = unique(
+        events
+            .filter((e) => e.event_type === "session.started")
+            .map((e) => e.attributes.text_capture)
+            .filter((p): p is string => typeof p === "string"),
+    );
+    const first = events[0];
+    return {
+        format: RECORDING_FORMAT,
+        created_at: createdAt.toISOString(),
+        recorder: { name: "sonder-observatory", version: "0.1.0" },
+        complete: sessions.length > 0 && sessions.every((s) => ended.has(s)),
+        event_count: events.length,
+        schema_versions: unique(events.map((e) => e.schema)),
+        producers: [...producers.values()],
+        session_ids: sessions,
+        run_ids: unique(
+            events.map((e) => e.run_id).filter((r): r is string => typeof r === "string"),
+        ),
+        sampling_levels: unique(
+            events
+                .map((e) => e.sampling?.level)
+                .filter((l): l is NonNullable<typeof l> => typeof l === "string"),
+        ),
+        capture_policy: policies.length > 0 ? policies.join(",") : "unspecified",
+        dropped_events: events.reduce((sum, e) => sum + droppedCount(e), 0),
+        time_origin: first ? { wall_time: first.wall_time, mono_ns: first.mono_ns } : null,
+        synthetic: [...producers.values()].some((p) => p.synthetic),
+    };
+}
+
+export function serializeRecording(
+    events: readonly ObservatoryEvent[],
+    createdAt: Date = new Date(),
+): string {
+    return toNdjson([buildManifest(events, createdAt), ...events]);
+}
+
+function isManifestRecord(value: Record<string, unknown>): boolean {
+    return value.format === RECORDING_FORMAT;
+}
+
+/**
+ * Loads a `.sobs` recording or a bare NDJSON/JSONL event log (no manifest).
+ */
+export function loadRecording(text: string): LoadedRecording {
+    if (text.startsWith("PK")) {
+        return {
+            manifest: null,
+            events: [],
+            rejected: [
+                {
+                    line: 1,
+                    reason: "ZIP-packaged .sobs containers are not supported yet (Milestone 1 reads NDJSON)",
+                    raw: "",
+                },
+            ],
+        };
+    }
+    const parsed = parseNdjson(text, { isRecord: isManifestRecord });
+    const rejected = [...parsed.rejected];
+    let manifest: RecordingManifest | null = null;
+    for (const record of parsed.records) {
+        if (record.line !== 1 || manifest !== null) {
+            rejected.push({
+                line: record.line,
+                reason: "manifest record is only allowed on line 1",
+                raw: JSON.stringify(record.value),
+            });
+            continue;
+        }
+        manifest = record.value as unknown as RecordingManifest;
+    }
+    return { manifest, events: parsed.events, rejected };
+}
