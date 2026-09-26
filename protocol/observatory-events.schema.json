@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sonder.local/schemas/observatory-event-v1.json",
+  "title": "Sonder Observatory Event Envelope v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "event_id",
+    "sequence",
+    "event_type",
+    "wall_time",
+    "mono_ns",
+    "session_id",
+    "producer",
+    "attributes"
+  ],
+  "properties": {
+    "schema": { "const": "sonder.observatory.event/1" },
+    "event_id": { "type": "string", "minLength": 1 },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "event_type": { "type": "string", "minLength": 1 },
+    "wall_time": { "type": "string", "format": "date-time" },
+    "mono_ns": { "type": "integer", "minimum": 0 },
+    "session_id": { "type": "string", "minLength": 1 },
+    "run_id": { "type": ["string", "null"] },
+    "request_id": { "type": ["string", "null"] },
+    "agent_id": { "type": ["string", "null"] },
+    "task_id": { "type": ["string", "null"] },
+    "model_instance_id": { "type": ["string", "null"] },
+    "device_id": { "type": ["string", "null"] },
+    "producer": {
+      "type": "object",
+      "required": ["name", "version", "node_id"],
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" },
+        "node_id": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "sampling": {
+      "type": "object",
+      "properties": {
+        "level": { "enum": ["off", "metrics", "standard", "deep"] },
+        "sampled": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "attributes": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
