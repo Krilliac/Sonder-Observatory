@@ -29,9 +29,9 @@ Modified: `src/renderer/app.ts`, limited to the timeline and table code and the 
 - `loadText` and the file input use the chunked or streaming loader for large inputs through a new `loadChunked`, and `applyLoaded` holds the old `loadText` body. `connect()` bumps a load token so a slow load can't overwrite a live session.
 - The unused `svg`, `classifyEvent` and `summarizeAttributes` imports are removed.
 
-Also fixed in passing: `eventTable.css` lifts muted text on the selected row to 5.3:1 contrast. This was the known axe `color-contrast` item for table rows in docs/integration/e2e.md. The diagnostics finding row is not changed.
+The selected-row contrast comes from the upstream fix in `views.css` (#16), and `eventTable.css` does not override it. The virtualized rows keep `tr.row`, `tr.selected`, `td.muted` and `aria-selected`, and `tbody tr` contains only event rows, so the e2e selectors still match.
 
-The e2e suite (`npx playwright test`, main at 048eceb) passes locally on this branch: 21 passed, plus the one expected `test.fail`.
+The e2e suite (`npx playwright test`) passes locally with this branch on top of main e0864e6, which includes #16: 22 passed.
 
 Not touched: diagnostics, topology, `src/integrations`, `src/recording`, `src/transport`, `src/protocol`, `src/replay`, `src/query`, `package.json` and root config.
 
