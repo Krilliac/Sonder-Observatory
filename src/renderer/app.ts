@@ -282,12 +282,26 @@ export class ObservatoryApp {
             this.render();
         });
         byId<HTMLDivElement>("table-wrap").addEventListener("keydown", (ev) => this.onTableKey(ev));
-        for (const v of VIEWS) {
-            byId<HTMLButtonElement>(`tab-${v.id}`).addEventListener("click", () => {
+        VIEWS.forEach((v, i) => {
+            const tab = byId<HTMLButtonElement>(`tab-${v.id}`);
+            tab.addEventListener("click", () => {
                 this.view = v.id;
                 this.render();
             });
-        }
+            // WAI-ARIA tabs pattern (automatic activation): Left/Right wrap, Home/End jump.
+            tab.addEventListener("keydown", (ev) => {
+                const n = VIEWS.length;
+                const target =
+                    ev.key === "ArrowRight" ? (i + 1) % n : ev.key === "ArrowLeft" ? (i - 1 + n) % n : ev.key === "Home" ? 0 : ev.key === "End" ? n - 1 : -1;
+                if (target < 0) {
+                    return;
+                }
+                ev.preventDefault();
+                this.view = VIEWS[target]!.id;
+                this.render();
+                byId(`tab-${this.view}`).focus();
+            });
+        });
     }
 
     // --------------------------------------------------------------- actions
@@ -423,6 +437,8 @@ export class ObservatoryApp {
             const active = v.id === this.view;
             const tab = byId<HTMLButtonElement>(`tab-${v.id}`);
             tab.setAttribute("aria-selected", active ? "true" : "false");
+            // Roving tabindex: only the active tab is in the Tab sequence.
+            tab.tabIndex = active ? 0 : -1;
             tab.classList.toggle("active", active);
             byId(`view-${v.id}`).hidden = !active;
         }
