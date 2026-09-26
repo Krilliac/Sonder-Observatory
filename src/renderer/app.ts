@@ -9,6 +9,7 @@ import { ReplayCursor } from "../replay/controller";
 import { SessionStore } from "../replay/session";
 import { TopologyPanel } from "../topology";
 import { connectLiveSession, describeStatus, resolveEndpoint, type LiveIngestClient, type LiveIngestStatus } from "../ingest/live";
+import type { LiveCredentials } from "../integrations/desktopUi";
 import { DEFAULT_ENDPOINT } from "../transport/live";
 import { CHUNKED_LOAD_THRESHOLD_CHARS, loadRecordingChunked, loadRecordingStream, type ChunkedLoadOptions } from "./chunkedLoad";
 import { byId, h } from "./dom";
@@ -122,9 +123,13 @@ export class ObservatoryApp {
         this.loadText(text, "file", label);
     }
 
-    /** Connects to a live endpoint (desktop `--connect` launch argument). */
-    connectLive(url: string): void {
-        this.connect(url);
+    /**
+     * Connects to a live endpoint (desktop `--connect` launch argument) with the
+     * `--session` / `--capability` launch values. The token only lives in the
+     * client options; it is never shown or logged.
+     */
+    connectLive(url: string, credentials?: LiveCredentials): void {
+        this.connect(url, credentials);
     }
 
     // ---------------------------------------------------------------- layout
@@ -330,7 +335,7 @@ export class ObservatoryApp {
     // --------------------------------------------------------------- actions
 
     /** Connects with src/ingest/live: ws(s):// uses WebSocket, http(s):// uses SSE or NDJSON. */
-    private connect(url: string): void {
+    private connect(url: string, credentials?: LiveCredentials): void {
         this.supersedeLoad();
         byId<HTMLInputElement>("ws-url").value = url;
         this.disconnect();
@@ -346,6 +351,8 @@ export class ObservatoryApp {
         // connectLiveSession resets the store to a live source, then appends in batches.
         const client = connectLiveSession(this.store, {
             url,
+            session: credentials?.session ?? null,
+            capability: credentials?.capability ?? null,
             onAppend: () => {
                 this.rebuildCursor();
                 this.queueRender();
