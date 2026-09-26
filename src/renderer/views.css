@@ -1,0 +1,71 @@
+/* Styles for the analysis views (tabs) and the panels wired into them. */
+
+/* Analysis view tabs */
+.tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 8px;
+    border-bottom: 1px solid var(--color-border, #24334a);
+}
+
+.tab {
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    border-bottom: none;
+}
+
+.tab.active {
+    background: color-mix(in srgb, var(--color-primary, #3b82f6) 30%, var(--color-elevated, #162238));
+}
+
+/* Diagnostics evidence highlighting */
+.tick.evidence {
+    fill: var(--color-warning, #f59e0b);
+    opacity: 1;
+}
+
+table.events tr.evidence td:first-child {
+    box-shadow: inset 3px 0 0 var(--color-warning, #f59e0b);
+}
+
+/* Diagnostics findings list (src/diagnostics/panel.ts) */
+.diag-findings {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    max-height: 40vh;
+    overflow: auto;
+}
+
+.diag-finding {
+    display: block;
+    width: 100%;
+    text-align: left;
+    margin: 2px 0;
+    background: transparent;
+}
+
+.diag-finding.selected {
+    background: color-mix(in srgb, var(--color-primary, #3b82f6) 25%, transparent);
+}
+
+.sev-label {
+    display: inline-block;
+    min-width: 3.5em;
+    font-weight: 600;
+    font-size: 12px;
+}
+
+.sev-label.sev-info { color: var(--color-cyan, #22d3ee); }
+.sev-label.sev-warning { color: var(--color-warning, #f59e0b); }
+.sev-label.sev-critical { color: var(--color-error, #ef4444); }
+
+.diag-kind {
+    font-weight: 600;
+}
+
+.diag-evidence {
+    list-style: none;
+    margin: 2px 0 8px 3.5em;
+    padding: 0;
+}
