@@ -1,7 +1,6 @@
 import tokens from "../../design/tokens.json";
 import { tokensToCssVariables } from "../design/tokens";
-import { isDesktop } from "../integrations/desktop";
-import { modeBadge, runtimeMode } from "../integrations/mode";
+import { mountDesktopIntegration } from "../integrations/desktopUi";
 import { ObservatoryApp } from "./app";
 import type { ObservatoryPanel } from "./panels";
 import "./styles.css";
@@ -21,13 +20,6 @@ const panels: ObservatoryPanel[] = [];
 
 new ObservatoryApp(root, panels).start(new URLSearchParams(window.location.search));
 
-// Desktop vs browser mode badge, next to the other header badges.
-const mode = runtimeMode(isDesktop());
-const { text, title } = modeBadge(mode);
-const badge = document.createElement("span");
-badge.id = "mode-badge";
-badge.className = "badge";
-badge.dataset.mode = mode;
-badge.textContent = text;
-badge.title = title;
-document.getElementById("capture-badge")?.after(badge);
+// Desktop vs browser mode badge; in the Tauri shell also the native
+// "Open recording…" dialog and the recent-recordings menu (src/integrations/).
+mountDesktopIntegration();
