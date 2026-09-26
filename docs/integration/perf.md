@@ -31,7 +31,7 @@ Modified: `src/renderer/app.ts`, limited to the timeline and table code and the 
 
 The selected-row contrast comes from the upstream fix in `views.css` (#16), and `eventTable.css` does not override it. The virtualized rows keep `tr.row`, `tr.selected`, `td.muted` and `aria-selected`, and `tbody tr` contains only event rows, so the e2e selectors still match.
 
-The e2e suite (`npx playwright test`) passes locally with this branch on top of main e0864e6, which includes #16: 22 passed.
+The e2e suite (`npx playwright test`) passes locally with current main merged in (through #18, which includes the #16 a11y fixes and the #17 live ingest wiring): 22 passed.
 
 Not touched: diagnostics, topology, `src/integrations`, `src/recording`, `src/transport`, `src/protocol`, `src/replay`, `src/query`, `package.json` and root config.
 
