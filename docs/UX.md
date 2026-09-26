@@ -37,6 +37,47 @@ When embedded in Sonder Flutter, Observatory appears under **Developer > Observa
 - Open Latest Recording
 - recording/sampling controls
 
+## Implemented versus planned (web renderer, 2026-09-26)
+
+Implemented (src/renderer/, see src/renderer/README.md):
+
+- Shell: header with the app mark, status badges and actions; a collapsible
+  sidebar with **Producers** and **Sources**; views as tabs: **Overview**
+  (metric cards and timeline), **Events** (table), **Diagnostics**,
+  **Agents**; one replay bar for all views; the inspector docked beside every
+  view with a keyboard-resizable splitter.
+- Connection flow: producer URL, transport, in-memory bearer token, **Test**
+  (discovery details, or which setting or token to fix), **Connect**, local
+  presets and eight recent endpoints. Several producers merge into one
+  session; each has a card with state, counters, last error and actions.
+- Empty state with local producer discovery, open/drop recording and the
+  synthetic demo.
+- Timeline legend, a text alternative and keyboard stepping; Previous and
+  Next error; a shortcuts dialog.
+- Light and dark themes from design/tokens.json (AA contrast for every text
+  role, checked by tests and axe), reduced-motion support, visible load
+  progress with cancel, a polite warnings region.
+
+Planned (not built): Live Session scene views, Replay comparison of two runs,
+Models, Memory and Settings views, the Flutter embedded view, 3D views,
+multi-select class chips and event-type facets.
+
+UX decisions:
+
+- Status is text, never colour or hover alone: producer state words and
+  counters are visible on the cards; tone colours only repeat them.
+- The inspector stays docked beside every view so evidence clicked in
+  Diagnostics or Agents is visible without switching tabs.
+- Views that are hidden are not rendered; switching tabs renders them at
+  their real size.
+- Shortcuts use single keys and are ignored while typing, with modifiers held,
+  and for Space on controls Space already activates.
+- Per-viewer conveniences (theme, sidebar, splitter, recent endpoints) live in
+  localStorage behind try/catch; tokens never do.
+- At 900 px and below the layout stacks and the sidebar starts collapsed;
+  nothing scrolls the page sideways at 420 px (wide tables scroll inside
+  their own box).
+
 ## Overview
 
 Primary dashboard:

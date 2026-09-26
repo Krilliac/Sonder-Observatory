@@ -2,9 +2,29 @@
 
 Responsibility: Live/replay views, timeline, and future evidence-grounded spatial views.
 
-Milestone 1 views (DOM + SVG, no 3D): metric cards, class-track timeline with
-request spans and replay cursor, scrubber and playback controls, event table
-with filters, and the inspector panel. Synthetic sessions show a persistent
-banner and badge.
+Web renderer (DOM + SVG/canvas, no 3D). `app.ts` builds the shell and wires
+the modules below; everything shown is derived from received events.
+
+| Module | What it does |
+| --- | --- |
+| `app.ts` | Shell: header, sidebar, view tabs (Overview, Events, Diagnostics, Agents), replay bar, docked inspector; owns the SessionStore and the LiveConnectionManager |
+| `main.ts` | Injects the design-token stylesheet, sets the theme, starts the app and the desktop integration |
+| `connectionPanel.ts` | Sources panel (#connection-panel): URL, transport, in-memory token, Test, presets, recent endpoints |
+| `producersPanel.ts` | Producer cards (#producers) with the contract 8.6 hooks |
+| `onboarding.ts` | Empty state (#onboarding): probe local presets, open recording, synthetic demo |
+| `dropZone.ts` | Window drop target for recordings |
+| `shortcuts.ts` | Key map and the #shortcuts-dialog |
+| `theme.ts` | Light/dark selection (URL, saved choice, system) |
+| `params.ts` | URL parameters (`connect`, `ws`, `fixture`, `view`, `theme`; token params refused) |
+| `navigation.ts` | Error navigation, producers in a session, synthetic banner and timeline summary text |
+| `splitter.ts` | Keyboard/pointer splitter between the views and the inspector |
+| `brand.ts` | Header mark from `src-tauri/icons/app-icon.svg` |
+| `timelineView.ts`, `timelineCanvas.ts`, `timelineModel.ts` | Timeline (SVG for small sessions, canvas with level-of-detail buckets for large ones) |
+| `eventTable.ts`, `virtualWindow.ts` | Virtualized event table and its filter |
+| `chunkedLoad.ts` | Large recordings parsed in slices, with progress and cancel |
+
+Synthetic sessions show a persistent banner naming the synthetic producers,
+a badge, and SYNTHETIC tags on producer cards. Pure helpers are unit-tested in
+`tests/renderer/`; the DOM is covered by the Playwright suite in `e2e/`.
 
 See [source workspace](../README.md).

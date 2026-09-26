@@ -71,11 +71,17 @@ See **Krilliac/Sonder-Inference** for the execution-engine research and architec
 
 Milestone 1 in progress (2026-09-26): a small, trustworthy live viewer + replay
 recorder, web renderer first, before heavier 3D interpretation layers. What
-exists: metric cards, event timeline, event table + evidence inspector, live
-ingest (WebSocket, SSE, NDJSON), `.sobs` recorder, replay with scrubber, and a synthetic
-fixture, plus agent topology and diagnostics tabs (Milestone 2) and a Tauri
-desktop shell in `src-tauri/`. Not yet: Tauri bundle, Flutter embedding, 3D
-views, real producer integration. See [roadmap](docs/ROADMAP.md) and
+exists: Overview (metric cards and event timeline), Events (table and evidence
+inspector), Diagnostics and Agents views; live ingest from several producers at
+once (WebSocket, SSE, NDJSON, with producer discovery and bearer tokens), a
+Sources panel and producer cards, an onboarding empty state, light and dark
+themes, keyboard shortcuts, the `.sobs` recorder, replay with a scrubber, a
+synthetic fixture and a Tauri desktop shell in `src-tauri/`. Not yet: Tauri
+bundle, Flutter embedding, 3D views. The live producer protocol that Sonder Runtime
+and Sonder-Inference implement on their side is
+[docs/TELEMETRY_PROTOCOL.md](docs/TELEMETRY_PROTOCOL.md); this repository tests
+against its synthetic fake producer, not against those producers; what the UI does is in
+[docs/UX.md](docs/UX.md). See [roadmap](docs/ROADMAP.md) and
 [decisions](docs/DECISIONS.md).
 
 ## Quickstart
@@ -88,33 +94,81 @@ npm run dev         # http://127.0.0.1:5173 — opens with the synthetic fixture
 npm test            # Vitest unit tests
 npm run lint        # ESLint + TypeScript type check
 npm run build       # type check + production bundle in dist/
+npm run test:e2e    # Playwright end-to-end suite (docs/integration/e2e.md)
 npm run tauri dev   # desktop shell (needs a Rust toolchain; see src-tauri/README.md)
 ```
 
-Live mode with the dev fake producer (replays the fixture over a loopback
-WebSocket; the data stays labeled synthetic):
+Live mode with the dev fake producer (replays the fixture; the data stays
+labelled synthetic):
 
 ```bash
-npm run fake-producer -- --speed 2          # ws://127.0.0.1:8765
-# then press Connect in the UI, or open http://127.0.0.1:5173/?ws=ws://127.0.0.1:8765
-
-npm run fake-live-producer -- --pace timeline   # one port, three transports:
-# ws://127.0.0.1:8766/ws, http://127.0.0.1:8766/sse, http://127.0.0.1:8766/ndjson
-# add --disconnect-after 100 to watch reconnect + resume in the #live-status badge
+npm run fake-live-producer -- --pace timeline   # http://127.0.0.1:8766 (discovery),
+# /sse, /ndjson and /ws on the same port; --role runtime|inference relabels the
+# stream as that producer, --token-file PATH requires a bearer token,
+# --disconnect-after 100 shows reconnect + resume on the producer card
+# then open http://127.0.0.1:5173/?connect=http://127.0.0.1:8766
 ```
 
-Other options: `?fixture=0` starts empty; **Open recording…** loads a `.sobs`
-or `.ndjson`/`.jsonl` file; **Save** writes the current session as `.sobs`;
-`npm run fixture` regenerates `fixtures/synthetic-session.ndjson`
-deterministically; `npm run fixture:large` writes seeded 10k/100k/1M-event
-recordings to `artifacts/fixtures/` for performance work.
+## Using the viewer
 
-The endpoint field accepts `ws(s)://` (WebSocket frames with one JSON event or
-several NDJSON lines) and `http(s)://` (Server-Sent Events, or NDJSON lines).
-The client reconnects with backoff and asks the producer to resume after the
-last event id; see [live ingest notes](docs/integration/live-ingest.md). There
-is no capability handshake yet, and the resume parameters are proposals; that
-contract is unresolved with Sonder Runtime / Sonder-Inference.
+- **Sources** (sidebar, toggled by the **Sources** button): enter a producer
+  URL, pick a transport (Auto uses the producer's discovery document), add a
+  bearer token if the producer needs one, press **Test** to check it without
+  ingesting, then **Connect**. Presets list the local defaults (Runtime 11435,
+  Inference 11437, fake producer 8766); the last eight URLs are remembered
+  (URL and transport only, in this browser's localStorage).
+- **Producers**: one card per connection with its state (connecting, live,
+  reconnecting, failed, disconnected), counters (received, appended, dropped,
+  rejected, buffered, reconnects), last error and what to change, and
+  Disconnect. Events already received stay after a disconnect. Several
+  producers merge into one session in replay order.
+- **Views**: Overview (cards and timeline with a legend and a text summary),
+  Events (table with a producer column; the filter matches event type, ids,
+  request, run, agent and producer), Diagnostics and Agents. The inspector is
+  docked beside every view and lists related events across producers (same
+  request, parent and child requests, same run, agent, tool call).
+- **No source**: the empty state can look for local producers (1 s per
+  preset), open a recording, or load the synthetic demo. Recordings
+  (`.sobs`, `.ndjson`, `.jsonl`, `.json`) can also be dropped on the window.
+- **Keyboard**: `?` lists shortcuts: Space play/pause, J/K next/previous
+  event, `]`/`[` next/previous error, `/` filter, F follow latest, T theme.
+  They are off while typing in a field.
+- **Theme**: follows the system; the theme button (or T) switches and is
+  remembered in this browser.
+
+URL parameters:
+
+| Parameter | Effect |
+| --- | --- |
+| `?connect=<url>` | Connect a producer; repeat for several. Base URL (discovery), discovery URL or stream URL. |
+| `?ws=<url>` | Legacy alias of `connect`. |
+| `?fixture=0` | Start without the synthetic fixture (onboarding). |
+| `?view=overview\|events\|diagnostics\|agents` | Open that view. |
+| `?theme=light\|dark` | Theme for this load (not saved). |
+
+`token` and `access_token` parameters are ignored with a visible warning and
+removed from the address bar: tokens are typed into the Sources panel (or given
+to the desktop shell with `--token-file`), kept in memory only, and never put
+in URLs, storage or logs.
+
+### Connecting to Sonder Runtime and Sonder-Inference
+
+Both producers publish `/.well-known/sonder-telemetry`, so their base URLs are
+enough: `?connect=http://127.0.0.1:11435&connect=http://127.0.0.1:11437`.
+The browser needs each producer to allow the viewer's origin (for example
+`http://127.0.0.1:5173` for `npm run dev`, `http://127.0.0.1:4173` for
+`vite preview`):
+
+- **Sonder-Inference** allows the Observatory dev, preview and desktop origins
+  by default; add others with `sonder-infer serve --cors-origin <origin>`.
+- **Sonder Runtime** has no default: add the origin to the setting its docs
+  name for telemetry routes (`SONDER_OBSERVATORY_ORIGINS` where available;
+  `SONDER_CORS_ORIGINS` otherwise, which also opens its admin routes to that
+  origin).
+
+When a connection or **Test** fails for one of these reasons, the message names
+the setting to change or says a token is needed. Plain `http://` and `ws://`
+are accepted only for loopback hosts.
 
 ## Repository scaffold
 
