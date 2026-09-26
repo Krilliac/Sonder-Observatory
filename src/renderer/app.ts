@@ -2,19 +2,23 @@ import fixtureText from "../../fixtures/synthetic-session.ndjson?raw";
 import { FindingsController, renderFindingsPanel, runDiagnostics } from "../diagnostics";
 import { renderInspector } from "../inspector/inspector";
 import type { ObservatoryEvent } from "../protocol/events";
-import { classifyEvent, EVENT_CLASSES, isErrorEvent, type EventClass } from "../query/classify";
+import { EVENT_CLASSES, isErrorEvent, type EventClass } from "../query/classify";
 import { deriveMetrics, type Metrics } from "../query/metrics";
 import { loadRecording, RECORDING_EXTENSION, serializeRecording } from "../recording/sobs";
 import { ReplayCursor } from "../replay/controller";
 import { SessionStore } from "../replay/session";
 import { TopologyPanel } from "../topology";
 import { checkEndpoint, DEFAULT_ENDPOINT, LiveConnection, type ConnectionState } from "../transport/live";
-import { byId, h, svg } from "./dom";
-import { fmtBytes, fmtMs, fmtPct, fmtRate, fmtRelNs, summarizeAttributes } from "./format";
+import { CHUNKED_LOAD_THRESHOLD_CHARS, loadRecordingChunked, loadRecordingStream, type ChunkedLoadOptions } from "./chunkedLoad";
+import { byId, h } from "./dom";
+import { EventTable } from "./eventTable";
+import { fmtBytes, fmtMs, fmtPct, fmtRate, fmtRelNs } from "./format";
 import type { ObservatoryPanel } from "./panels";
+import { TimelineView } from "./timelineView";
 
-const TABLE_LIMIT = 400;
 const SPEEDS = [0.25, 0.5, 1, 2, 4, 8];
+/** Largest array handed to SessionStore.append in one call (see applyLoaded). */
+const APPEND_BATCH = 50_000;
 /** Analysis views shown as tabs below the event table. */
 const VIEWS = [
     { id: "diagnostics", title: "Diagnostics" },
@@ -47,6 +51,11 @@ export class ObservatoryApp {
     private diagStamp = "";
     private readonly topology: TopologyPanel;
     private topologyDirty = true;
+    /** Canvas timeline and virtualized table (created in start()). */
+    private timelineView: TimelineView | null = null;
+    private eventTable: EventTable | null = null;
+    /** Bumped per load so a superseded chunked load is discarded. */
+    private loadToken = 0;
 
     constructor(root: HTMLElement, panels: readonly ObservatoryPanel[] = []) {
         this.root = root;
@@ -97,6 +106,13 @@ export class ObservatoryApp {
     start(params: URLSearchParams): void {
         this.root.replaceChildren(this.layout(params.get("ws") ?? DEFAULT_ENDPOINT));
         byId("view-agents").append(this.topology.element);
+        this.timelineView = new TimelineView(byId("timeline"), ({ rel, event }) => {
+            this.setFollow(false);
+            this.cursor.seek(event ? this.cursor.relativeTime(event) : rel);
+            this.selectedId = event ? event.event_id : this.selectedId;
+            this.render();
+        });
+        this.eventTable = new EventTable(byId("table-wrap"), (e) => this.select(e));
         const view = VIEWS.find((v) => v.id === params.get("view"));
         if (view) {
             this.view = view.id;
@@ -236,6 +252,13 @@ export class ObservatoryApp {
             if (!file) {
                 return;
             }
+            if (file.size >= CHUNKED_LOAD_THRESHOLD_CHARS) {
+                // Stream large files: no giant string, UI stays responsive.
+                this.live.disconnect();
+                this.loadChunked((opts) => loadRecordingStream(file.stream(), { ...opts, totalBytes: file.size }), "file", file.name);
+                input.value = "";
+                return;
+            }
             void file.text().then((text) => {
                 this.live.disconnect();
                 this.loadText(text, "file", file.name);
@@ -293,6 +316,7 @@ export class ObservatoryApp {
     // --------------------------------------------------------------- actions
 
     private connect(url: string): void {
+        this.loadToken += 1;
         byId<HTMLInputElement>("ws-url").value = url;
         this.store.reset("live", url);
         this.rebuildCursor();
@@ -303,10 +327,55 @@ export class ObservatoryApp {
     }
 
     private loadText(text: string, source: "fixture" | "file", label: string): void {
-        const loaded = loadRecording(text);
+        if (text.length < CHUNKED_LOAD_THRESHOLD_CHARS) {
+            this.loadToken += 1;
+            this.applyLoaded(loadRecording(text), source, label);
+            return;
+        }
+        this.loadChunked((opts) => loadRecordingChunked(text, opts), source, label);
+    }
+
+    /** Large recordings parse in slices so the UI keeps painting; a newer load or connect wins. */
+    private loadChunked(
+        run: (options: ChunkedLoadOptions) => Promise<ReturnType<typeof loadRecording>>,
+        source: "fixture" | "file",
+        label: string,
+    ): void {
+        const token = ++this.loadToken;
+        const badge = byId("source-badge");
+        badge.textContent = `loading ${label}…`;
+        run({
+            onProgress: (p) => {
+                if (token === this.loadToken) {
+                    const pct = p.totalBytes > 0 ? ` · ${Math.round((p.bytesDone / p.totalBytes) * 100)}%` : "";
+                    badge.textContent = `loading ${label}${pct} · ${p.events} events`;
+                }
+            },
+        }).then(
+            (loaded) => {
+                if (token === this.loadToken) {
+                    this.applyLoaded(loaded, source, label);
+                }
+            },
+            (error: unknown) => {
+                if (token === this.loadToken) {
+                    badge.textContent = `failed to load ${label}: ${(error as Error).message}`;
+                }
+            },
+        );
+    }
+
+    private applyLoaded(loaded: ReturnType<typeof loadRecording>, source: "fixture" | "file", label: string): void {
         this.store.reset(source, label, loaded.manifest);
-        this.store.append(loaded.events);
-        this.store.addRejected(loaded.rejected);
+        // SessionStore.append/addRejected spread their argument into push(),
+        // which overflows the call stack past ~120k items in Chromium. Feed
+        // them in batches until session.ts loops instead (docs/integration/perf.md).
+        for (let i = 0; i < loaded.events.length; i += APPEND_BATCH) {
+            this.store.append(loaded.events.length <= APPEND_BATCH ? loaded.events : loaded.events.slice(i, i + APPEND_BATCH));
+        }
+        for (let i = 0; i < loaded.rejected.length; i += APPEND_BATCH) {
+            this.store.addRejected(loaded.rejected.slice(i, i + APPEND_BATCH));
+        }
         this.rebuildCursor();
         this.selectedId = null;
         this.setFollow(true);
@@ -383,13 +452,10 @@ export class ObservatoryApp {
             return;
         }
         ev.preventDefault();
-        const rows = this.tableRows();
-        if (rows.length === 0) {
-            return;
+        const next = this.eventTable?.neighbor(this.selectedId, ev.key === "ArrowDown" ? 1 : -1);
+        if (next) {
+            this.select(next);
         }
-        const idx = rows.findIndex((e) => e.event_id === this.selectedId);
-        const next = idx < 0 ? rows.length - 1 : Math.min(Math.max(idx + (ev.key === "ArrowDown" ? 1 : -1), 0), rows.length - 1);
-        this.select(rows[next]);
     }
 
     // ------------------------------------------------------------- rendering
@@ -608,156 +674,38 @@ export class ObservatoryApp {
     }
 
     private renderTimeline(m: Metrics): void {
-        const container = byId("timeline");
-        const width = Math.max(container.clientWidth, 320);
-        const labelW = 84;
-        const rowH = 20;
-        const tracks = EVENT_CLASSES;
-        const height = tracks.length * rowH + 8;
-        const plotW = width - labelW - 8;
-        const duration = Math.max(this.cursor.durationNs, 1);
-        const xOf = (relNs: number) => labelW + (relNs / duration) * plotW;
-        const root = svg("svg", { width, height, viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": "Event timeline by class" });
+        // Canvas + level-of-detail buckets (timelineView.ts); cost is bounded by
+        // the plot width, not the event count, and scrubbing reuses the buckets.
         const cursorRel = this.cursor.position;
-
-        tracks.forEach((cls, row) => {
-            const y = 4 + row * rowH;
-            const label = svg("text", { x: 4, y: y + rowH * 0.7, class: "track-label" });
-            label.textContent = cls;
-            root.append(svg("rect", { x: labelW, y: y + 1, width: plotW, height: rowH - 2, class: "track-bg" }), label);
+        this.timelineView?.render({
+            events: this.cursor.events,
+            cursorRel,
+            requests: m.requests,
+            selectedId: this.selectedId,
+            highlighted: this.highlighted,
         });
-
-        // Request spans on the request track.
-        const reqRow = tracks.indexOf("request");
-        for (const r of m.requests) {
-            const x1 = xOf(r.startNs - this.cursor.originNs);
-            const x2 = xOf((r.endNs ?? this.cursor.originNs + cursorRel) - this.cursor.originNs);
-            root.append(
-                svg("rect", {
-                    x: x1,
-                    y: 4 + reqRow * rowH + 4,
-                    width: Math.max(x2 - x1, 1),
-                    height: rowH - 8,
-                    class: `span span-${r.outcome}`,
-                }),
-            );
-        }
-
-        // Event ticks, bucketed per pixel column per track to bound DOM size.
-        const seen = new Set<string>();
-        for (const e of this.cursor.events) {
-            const rel = this.cursor.relativeTime(e);
-            const cls = classifyEvent(e);
-            const x = Math.round(xOf(rel));
-            const key = `${cls}:${x}`;
-            const evidence = this.highlighted.has(e.event_id);
-            if (seen.has(key) && e.event_id !== this.selectedId && !evidence) {
-                continue;
-            }
-            seen.add(key);
-            const row = tracks.indexOf(cls);
-            root.append(
-                svg("rect", {
-                    x: x - 0.5,
-                    y: 4 + row * rowH + 3,
-                    width: e.event_id === this.selectedId ? 3 : 1.5,
-                    height: rowH - 6,
-                    class: `tick cls-${cls}${rel > cursorRel ? " future" : ""}${evidence ? " evidence" : ""}${e.event_id === this.selectedId ? " selected" : ""}`,
-                }),
-            );
-        }
-
-        const cx = xOf(cursorRel);
-        root.append(svg("line", { x1: cx, x2: cx, y1: 0, y2: height, class: "cursor-line" }));
-
-        root.addEventListener("click", (ev) => {
-            const rect = (root as unknown as SVGSVGElement).getBoundingClientRect();
-            const px = ev.clientX - rect.left;
-            if (px < labelW) {
-                return;
-            }
-            const rel = ((px - labelW) / plotW) * duration;
-            const row = Math.floor((ev.clientY - rect.top - 4) / rowH);
-            const cls = tracks[row];
-            // Select the nearest event in the clicked track, if any.
-            let best: ObservatoryEvent | undefined;
-            let bestD = Infinity;
-            for (const e of this.cursor.events) {
-                if (cls && classifyEvent(e) !== cls) {
-                    continue;
-                }
-                const d = Math.abs(this.cursor.relativeTime(e) - rel);
-                if (d < bestD) {
-                    bestD = d;
-                    best = e;
-                }
-            }
-            this.setFollow(false);
-            this.cursor.seek(best && bestD < duration * 0.01 ? this.cursor.relativeTime(best) : rel);
-            this.selectedId = best && bestD < duration * 0.01 ? best.event_id : this.selectedId;
-            this.render();
-        });
-        container.replaceChildren(root);
-
         const scrubber = byId<HTMLInputElement>("scrubber");
         scrubber.value = String(this.cursor.durationNs > 0 ? Math.round((cursorRel / this.cursor.durationNs) * 1000) : 1000);
         byId("cursor-label").textContent = `${fmtRelNs(cursorRel)} / ${fmtRelNs(this.cursor.durationNs)} · ${this.cursor.visibleCount()}/${this.cursor.events.length} events`;
     }
 
-    private tableRows(): ObservatoryEvent[] {
-        const visible = this.cursor.visibleEvents();
-        const rows = visible.filter((e) => {
-            if (this.filterClass !== "all" && classifyEvent(e) !== this.filterClass) {
-                return false;
-            }
-            if (this.filterText) {
-                const hay = `${e.event_type} ${e.event_id} ${e.request_id ?? ""} ${e.agent_id ?? ""}`.toLowerCase();
-                return hay.includes(this.filterText);
-            }
-            return true;
-        });
-        return rows.slice(-TABLE_LIMIT);
-    }
-
     private renderTable(): void {
-        const rows = this.tableRows();
-        const wrap = byId<HTMLDivElement>("table-wrap");
-        const atBottom = wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 4;
-        const body = h("tbody");
-        for (const e of rows) {
-            const cls = classifyEvent(e);
-            const tr = h(
-                "tr",
-                { class: `row cls-${cls}${this.highlighted.has(e.event_id) ? " evidence" : ""}${e.event_id === this.selectedId ? " selected" : ""}`, "aria-selected": e.event_id === this.selectedId ? "true" : "false" },
-                h("td", { class: "mono", text: e.sequence }),
-                h("td", { class: "mono", text: fmtRelNs(this.cursor.relativeTime(e)) }),
-                h("td", {}, h("span", { class: `dot cls-${cls}`, "aria-hidden": "true" }), ` ${e.event_type}`),
-                h("td", { text: cls }),
-                h("td", { class: "mono", text: e.request_id ?? "" }),
-                h("td", { class: "mono", text: e.agent_id ?? "" }),
-                h("td", { class: "muted", text: summarizeAttributes(e.attributes) }),
-            );
-            tr.addEventListener("click", () => this.select(e));
-            body.append(tr);
+        // Virtualized: every filtered event at the cursor is reachable, only the
+        // rows in the viewport are in the DOM (eventTable.ts).
+        if (!this.eventTable) {
+            return;
         }
-        const table = h(
-            "table",
-            { class: "events" },
-            h(
-                "thead",
-                {},
-                h("tr", {}, ...["seq", "t", "event type", "class", "request", "agent", "attributes"].map((c) => h("th", { scope: "col", text: c }))),
-            ),
-            body,
-        );
-        wrap.replaceChildren(table);
-        if (this.follow || atBottom) {
-            wrap.scrollTop = wrap.scrollHeight;
-        } else {
-            wrap.querySelector("tr.selected")?.scrollIntoView({ block: "nearest" });
-        }
-        const total = this.cursor.visibleCount();
-        byId("table-count").textContent = `${rows.length} shown${rows.length === TABLE_LIMIT ? ` (latest ${TABLE_LIMIT})` : ""} · ${total} at cursor`;
+        const counts = this.eventTable.update({
+            events: this.cursor.events,
+            visibleCount: this.cursor.visibleCount(),
+            filterClass: this.filterClass,
+            filterText: this.filterText,
+            selectedId: this.selectedId,
+            highlighted: this.highlighted,
+            follow: this.follow,
+            originNs: this.cursor.originNs,
+        });
+        byId("table-count").textContent = `${counts.shown} shown · ${counts.atCursor} at cursor`;
     }
 
     private renderInspectorPanel(): void {
