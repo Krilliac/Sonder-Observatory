@@ -1,0 +1,36 @@
+{
+  "name": "sonder-observatory",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Visualization, replay, and diagnostics companion for the Sonder ecosystem (Milestone 1 web renderer).",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "predev": "node scripts/generate-fixture.mjs",
+    "dev": "vite",
+    "prebuild": "node scripts/generate-fixture.mjs",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "lint": "eslint . && tsc --noEmit",
+    "pretest": "node scripts/generate-fixture.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "fixture": "node scripts/generate-fixture.mjs",
+    "fake-producer": "node scripts/fake-producer.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.19.0",
+    "@types/ws": "^8.18.1",
+    "eslint": "^10.11.0",
+    "globals": "^17.12.0",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.70.1",
+    "vite": "^8.3.1",
+    "vitest": "^4.1.11",
+    "ws": "^8.21.3"
+  }
+}

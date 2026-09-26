@@ -3,3 +3,14 @@
 .gitignore text eol=lf
 .gitattributes text eol=lf
 .editorconfig text eol=lf
+*.ts text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.json text eol=lf
+*.ndjson text eol=lf
+*.jsonl text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.png binary

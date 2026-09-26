@@ -25,7 +25,11 @@ Thumbs.db
 
 # Frontend/native build output and private recordings
 node_modules/
+/coverage/
 /target/
 /src-tauri/target/
 /recordings/
 *.sobs
+
+# Generated deterministically by scripts/generate-fixture.mjs (npm pre-scripts)
+/fixtures/synthetic-session.ndjson
