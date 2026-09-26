@@ -112,8 +112,10 @@ recordings to `artifacts/fixtures/` for performance work.
 The endpoint field accepts `ws(s)://` (WebSocket frames with one JSON event or
 several NDJSON lines) and `http(s)://` (Server-Sent Events, or NDJSON lines).
 The client reconnects with backoff and asks the producer to resume after the
-last event id; see [live ingest notes](docs/integration/live-ingest.md). There
-is no capability handshake yet, and the resume parameters are proposals; that
+last event id; see [live ingest notes](docs/integration/live-ingest.md). The
+desktop shell's `--session` / `--capability` launch values are sent with the
+connection (query parameter, `Authorization: Bearer`, or a first WebSocket
+frame). Those wire shapes and the resume parameters are proposals; that
 contract is unresolved with Sonder Runtime / Sonder-Inference.
 
 ## Repository scaffold

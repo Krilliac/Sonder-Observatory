@@ -1,82 +1,31 @@
-# Integration notes — `feat/desktop`
+# Desktop integration (`src/integrations/`, `src-tauri/`)
 
-Owner area: `src/integrations/` and `src-tauri/`. This branch wires the Tauri
-bridge into the renderer (mode indicator, native open of `.sobs` recordings,
-recent files) and polishes the shell (icon artwork, least-privilege
-capability, recent-recordings commands).
+Current state of the desktop bridge and Tauri shell. Originally the
+`feat/desktop` integration notes (PR #15); the lead actions listed there are
+all done:
 
-## Lead actions
+| Item | Where |
+|---|---|
+| `src-tauri/target/**`, `src-tauri/gen/**` in the ESLint ignores | PR #17 |
+| Real icon set committed, `bundle.icon` +@2x PNG/ICNS, `.gitignore` | PR #18 (lockfiles workflow `icons` input) |
+| Placeholder icon generator removed from `build.rs` | PR #21 |
+| `rust-version` raised (1.87 in PR #17, 1.88 after dependabot #9's `time` 0.3.55) | `src-tauri/Cargo.toml`, docs/DECISIONS.md |
+| `--connect` wired into the renderer | PR #17 |
+| `--session` / `--capability` applied to live connections; Rust `--connect` accepts http(s) | PR #21 |
 
-### package.json / root config
+`package.json` needs nothing for the desktop: it uses the existing
+`@tauri-apps/api` / `@tauri-apps/cli` dependencies and the `tauri` script. No
+`@tauri-apps/plugin-dialog` or `@tauri-apps/plugin-fs` JS packages are used
+(see "File access").
 
-**No changes required.** Everything uses existing dependencies
-(`@tauri-apps/api`, `@tauri-apps/cli`) and scripts (`tauri`, `test`, `lint`,
-`build`). In particular, no `@tauri-apps/plugin-dialog` or
-`@tauri-apps/plugin-fs` JS packages are added (see "File access" below).
+## Renderer hook
 
-Optional, root-owned: add `"src-tauri/target/**"` and `"src-tauri/gen/**"` to
-the ESLint ignores in `eslint.config.js`. After a local `cargo build`, tauri's
-generated `target/**/__global-api-script.js` makes `npm run lint` fail locally
-(CI is unaffected because it never builds into `src-tauri/target`).
-
-### Binary icons (needs a git push, not possible through the GitHub API tools)
-
-**Done (integrator, 2026-09-26):** the lockfiles workflow gained an `icons`
-input that runs the steps below in CI and commits the set; `.gitignore` and
-`bundle.icon` were updated as described. The ESLint ignores above and the
-`rust-version = "1.87"` bump (Cargo.lock section) landed in PR #17.
-
-The GitHub MCP `push_files` / `create_or_update_file` tools only take text
-content, so the PNG/ICO/ICNS set generated on the box could not be committed
-byte-for-byte (and retyping binaries is not an option). This branch therefore
-commits the source `src-tauri/icons/app-icon.svg` and makes `build.rs`
-rasterise the same mark as the placeholder icons. To land the real set, from a
-checkout of this branch:
-
-```bash
-npm ci
-npm run tauri icon src-tauri/icons/app-icon.svg
-rm -rf src-tauri/icons/android src-tauri/icons/ios
-# src-tauri/.gitignore: replace "/icons/*" and "!/icons/app-icon.svg"
-# with "/icons/android/" and "/icons/ios/"
-git add src-tauri/icons src-tauri/.gitignore
-```
-
-and add `"icons/128x128@2x.png"` and `"icons/icon.icns"` to `bundle.icon` in
-`src-tauri/tauri.conf.json`. That produces 32x32, 64x64, 128x128,
-128x128@2x, icon.png (512), icon.ico, icon.icns and the Windows Square*/Store
-logos (~225 KB total; verified on the box). The placeholder generator in
-`build.rs` can be deleted afterwards.
-
-### Cargo.lock
-
-Unchanged on this branch. Regenerating it on the box
-(`CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo generate-lockfile`,
-cargo 1.85.1) reproduces main's `Cargo.lock` byte-for-byte, and no crate was
-added. However that lockfile does **not** build on the declared
-`rust-version = "1.85"`: `yoke-derive` 0.8.3 uses `str::from_utf8` (stable in
-1.87) while claiming an older MSRV. CI uses stable, so it is not affected. For
-the Linux verification below the box used `cargo update -p yoke-derive
---precise 0.8.2` (adds `synstructure` 0.13.2, nothing else changes). Lead
-decision: commit that pin (e.g. run it after the lockfiles workflow and push),
-or bump `rust-version` to 1.87.
-
-### UI edits outside `src/integrations/` (minimal hook)
-
-Only `src/renderer/main.ts`: the inline mode-badge block (and its two imports)
-moved into `src/integrations/desktopUi.ts`; main.ts now ends with a single
-`mountDesktopIntegration();` call after `ObservatoryApp.start(...)`.
-
-`src/renderer/app.ts` is **unchanged**. Natively read recordings are handed to
-the app through its existing `#file-input` change handler: `fileInputHost()`
-wraps the text in a `File`, assigns it via `DataTransfer` and dispatches
-`change`, so the app loads it exactly like a browser-picked file (and
-disconnects live mode first). If you would rather have an explicit API, add
-`openRecordingText(text, label)` to `ObservatoryApp` and pass the app to
-`mountDesktopIntegration(app)`; the `RecordingHost` interface already matches.
-
-No CSS changes; the new controls reuse the existing `select`, `.badge` and
-`.muted` styles.
+`src/renderer/main.ts` calls `mountDesktopIntegration(app)` once after
+`ObservatoryApp.start(...)`. The app is the `RecordingHost`:
+`openRecordingText(text, label)` loads a natively read recording (and
+disconnects live mode first), and `connectLive(url, { session, capability })`
+starts a live connection from the launch arguments. `fileInputHost()` remains
+as a fallback host that goes through the `#file-input` change handler.
 
 ## Behaviour
 
@@ -86,6 +35,7 @@ No CSS changes; the new controls reuse the existing `select`, `.badge` and
 | "Open recording…" | existing `<input type="file">` (unchanged) | native dialog (filters: `.sobs`, then `.ndjson/.jsonl/.json`, then all files) |
 | Recent menu `#recent-select` | not shown | last 10 recordings, missing ones disabled, "Clear recent" |
 | `--open <path>` launch arg | n/a | loaded at startup; launch warnings shown in `#desktop-status` |
+| `--connect <url>` (+ `--session`, `--capability[-file]`) | n/a | live connection at startup via `ObservatoryApp.connectLive()`; `--open` wins when both are given |
 
 Session folders (a folder or its `manifest.json`) load the first of
 `events.sobs`, `events.ndjson`, `events.jsonl`, `recording.sobs`.
@@ -111,53 +61,46 @@ recorded. The webview sees `{ id, name, kind, available }` with an opaque
 FNV-1a id and can only re-open ids from that list, so recent files do not widen
 the read surface.
 
-## Tauri changes
+## Tauri shell
 
-- New commands `list_recent_recordings`, `open_recent_recording`,
-  `clear_recent_recordings` (registered in `build.rs` `APP_COMMANDS`).
-- `capabilities/main-window.json`: now only the 7 app commands, `local: true`.
-  Removed `core:app:allow-version`, `core:event:allow-listen/unlisten`,
-  `core:window:allow-set-title` (nothing in `src/` uses them; re-add
-  individually if a feature needs them).
+- Seven app commands, registered in `build.rs` `APP_COMMANDS`:
+  `get_launch_args`, `pick_recording`, `list_recording_entries`,
+  `read_recording_entry`, `list_recent_recordings`, `open_recent_recording`,
+  `clear_recent_recordings`.
+- `capabilities/main-window.json` grants only those commands, `local: true`,
+  and no `core:*` permissions (nothing in `src/` uses them; add individually
+  if a feature needs them).
 - Icons: `src-tauri/icons/app-icon.svg` (observatory dome with open shutter,
-  telescope beam and star, token colours). `build.rs` now rasterises this same
-  mark (4x4 supersampled) for the placeholder icons instead of the old
-  ring; see "Binary icons" above for committing the real `tauri icon` set.
-- `src-tauri/.gitignore`: still ignores generated icons, but keeps
-  `icons/app-icon.svg`.
-- `tauri.conf.json`, `recording.rs`, `Cargo.toml`, `Cargo.lock`: unchanged.
+  telescope beam and star, token colours) is the source. The full set
+  (32x32, 64x64, 128x128, 128x128@2x, icon.png, icon.ico, icon.icns and the
+  Windows Square*/Store logos) is generated by `tauri icon` through the
+  lockfiles workflow's `icons` input (PR #18) and committed; `bundle.icon`
+  lists 32x32, 128x128, 128x128@2x, icon.icns and icon.ico. `build.rs` no
+  longer generates placeholder icons.
+- `src-tauri/.gitignore` ignores only the mobile outputs (`/icons/android/`,
+  `/icons/ios/`).
+- Launch arguments (`src/launch.rs`): `--connect` accepts the same schemes as
+  the renderer's `resolveEndpoint` (wss/https to any host, ws/http to loopback
+  only); `--session` and `--capability` are passed to the live connection.
 
-## Verification (box, Linux, rustc/cargo 1.85.1 + webkit2gtk 4.1, Node 20.19)
+## Verification
 
-- `src-tauri/`: `cargo check --locked`, `cargo test --locked` (10 tests: 4
-  launch, 2 recording, 4 new recent-list tests), `cargo build --locked`; no
-  warnings. Run with the local yoke-derive 0.8.2 pin (see Cargo.lock above),
-  both with the `tauri icon` set present and with only the SVG (placeholder
-  path).
-- `npm run lint` (with `src-tauri/target` excluded), `npm test` (27 files,
-  200 tests), `npm run build`.
-- New Vitest suites with Tauri mocked (`vi.mock("@tauri-apps/api/core")`):
-  `tests/desktop.test.ts` (9 tests: browser inertness, launch info, chunked
-  reads, native open, cancel, folder grants, missing events, recent
-  list/open/clear, errors) and `tests/desktopUi.test.ts` (6 tests: menu model,
-  browser vs desktop wiring, native open replacing the file-input click,
-  recent open/clear, `--open` + warnings + error status).
-- GUI smoke test under Xvfb with `npm run dev` + the debug binary:
-  `--open x.sobs --bogus` shows the `desktop` badge, loads the recording
-  (source badge "recording · x.sobs", via the file-input hook), shows the
-  `--bogus` warning, and writes `recent-recordings.json`; clicking
-  "Open recording…" opens the native GTK dialog with the
-  "Observatory recording (.sobs)" filter. IPC works with the reduced
-  capability.
+- CI: `cargo check --locked` / `cargo test --locked` on Windows (stable Rust),
+  Node 20/22 lint + Vitest + build, Playwright e2e.
+- Rust unit tests: launch parsing/validation (including http(s) `--connect`),
+  recording grants, recent-list persistence.
+- Vitest with Tauri mocked: `tests/desktop.test.ts`, `tests/desktopUi.test.ts`
+  (menu model, browser vs desktop wiring, native open, recent open/clear,
+  `--open` + warnings, `--connect` with session/capability).
+- Earlier GUI smoke test under Xvfb (PR #15): `--open x.sobs --bogus` shows the
+  `desktop` badge, loads the recording, shows the warning and writes
+  `recent-recordings.json`; "Open recording…" opens the native GTK dialog.
 
-Not verified: Windows/macOS runtime and `tauri build` bundling (the Windows CI
-job covers `cargo check/test`).
+Not verified: Windows/macOS runtime and `tauri build` bundling.
 
-## Follow-ups (not in this branch)
+## Follow-ups
 
-- `--connect` is applied since PR #17 (`ObservatoryApp.connectLive()`, `--open`
-  wins when both are given). `--session/--capability` from launch info are not
-  yet applied to the live connection, and the Rust `--connect` validation still
-  accepts only `ws(s)://`.
 - Drag-and-drop of recordings onto the window (HTML5 DnD works because
   `dragDropEnabled` is false; needs an app hook).
+- The capability/session wire shapes are proposals until a producer contract
+  exists (docs/DECISIONS.md).

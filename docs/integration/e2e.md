@@ -17,7 +17,7 @@ headless Chromium against `vite preview` of a production build.
 | `e2e/diagnostics.spec.ts` | Diagnostics is the default tab and lists findings with text severity labels and synthetic provenance; clicking a finding selects it, expands its evidence list, highlights evidence ticks/rows, disables follow, moves the cursor and inspects the first evidence event; clicking another evidence id inspects it |
 | `e2e/agents.spec.ts` | `?view=agents` renders nodes, edges and legend (counts match the SVG `aria-label`); tab switching; graph follows the replay cursor (fewer nodes+edges early, full graph at the end); node click lists evidence, highlights it and the evidence link inspects the event |
 | `e2e/keyboard.spec.ts` | table ArrowUp/ArrowDown selection; scrubber Home/End/Arrow; tabs via Enter/Space; findings ArrowUp/ArrowDown/Escape with focus retained; topology Enter/Escape; Tab order reaches the main controls |
-| `e2e/a11y.spec.ts` | axe-core WCAG 2.0/2.1 A+AA scan of the Diagnostics view (finding selected, inspector populated) and the Agents view. Known violations below are allow-listed **by rule and by target selector**; any new rule or new failing element fails the test |
+| `e2e/a11y.spec.ts` | axe-core WCAG 2.0/2.1/2.2 A+AA scan (tags `wcag2a`, `wcag2aa`, `wcag21a`, `wcag21aa`, `wcag22aa`) of the Diagnostics view (finding selected, inspector populated) and the Agents view. The allowlist is empty; an entry would match **by rule and by target selector**, so any new rule or new failing element fails the test |
 
 Screenshots (full page) are written by `shot()` in `e2e/helpers.ts` to
 `$E2E_SHOTS_DIR` (default `test-results/shots/`): `timeline-default`,
@@ -90,12 +90,15 @@ All four bugs found by the first version of this suite (#12) are fixed on
    `tabindex` (active tab 0, others -1); ArrowLeft/ArrowRight (wrapping),
    Home/End move focus and activate the tab (automatic activation).
 
-The axe allowlist in `e2e/a11y.spec.ts` is now empty; both views scan clean
-for WCAG 2.0/2.1 A+AA.
+Follow-up (#21): the suite now also scans with the `wcag22aa`
+tag, which reported one more issue:
 
-Remaining, out of scope: with the extra `wcag22aa` tag axe reports
-`target-size` (24x24 px minimum) for the small evidence link buttons
-(`.link`) in the findings/topology lists. The suite does not scan WCAG 2.2.
+5. **Target size (WCAG 2.2, 2.5.8).** The evidence link buttons (`.link`) in
+   the findings/topology lists were below 24x24 px. Fix: `button.link` in
+   styles.css gets `min-height`/`min-width: 24px` (inline-flex, centred).
+
+The axe allowlist in `e2e/a11y.spec.ts` is empty; both views scan clean for
+WCAG 2.0/2.1/2.2 A+AA.
 
 ## Notes
 

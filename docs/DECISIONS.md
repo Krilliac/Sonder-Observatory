@@ -156,6 +156,10 @@ Tauri bundle metadata say `Apache-2.0`.
 builds with stable Rust. This replaces pinning `yoke-derive` to an older
 release.
 
+Update (same day): raised to `rust-version = "1.88"` after dependabot #9 moved
+`time` to 0.3.55, whose `time-core` 0.1.9 / `time-macros` 0.2.32 declare Rust
+1.88.
+
 ## 2026-09-26 — Live ingest in the renderer
 
 The renderer connects through `src/ingest/live` (`connectLiveSession`) instead
@@ -165,15 +169,30 @@ of `src/transport/live.ts`'s `LiveConnection`. The endpoint field takes
 renders stay batched in `requestAnimationFrame`. `src/transport/live.ts` stays
 for the `WebSocketLike` types and `DEFAULT_ENDPOINT`. The Tauri CSP
 `connect-src` also allows loopback `http://` and `https:`. In the desktop
-shell, `--connect <ws-url>` starts the same connection through
+shell, `--connect <url>` starts the same connection through
 `ObservatoryApp.connectLive()`, and `--open` wins when both are given.
+
+## 2026-09-26 — Desktop launch credentials on live connections
+
+`--session` and `--capability` (or `--capability-file`) now reach the live
+client (`LiveIngestOptions.session` / `.capability`). The session id is sent as
+the `session` query parameter on every transport. The capability token is sent
+as `Authorization: Bearer <token>` on HTTP (SSE/NDJSON) and, because browsers
+cannot set WebSocket handshake headers and URLs end up in logs, as the first
+WebSocket text frame `{"type":"observatory.auth","capability":"…","session":"…"}`.
+The token is never put in a URL, the status object or the UI. Both wire
+shapes are **proposals** like the resume parameter: no producer contract
+exists yet (see Open questions). The Rust `--connect` check now accepts the
+same schemes as `resolveEndpoint` (ws/wss/http/https), keeping plaintext
+loopback-only.
 
 ## Open questions
 
 - Protocol package ownership and compatibility/version policy (Milestone 0).
 - Producer attribute names for token counts, memory/compute samples, tool
   call ids and dropped-event counts.
-- Live transport handshake: capability token, resume-from-sequence, and
-  producer capability advertisement at session start.
+- Live transport handshake: the capability-token and session wire shapes
+  (proposed above), resume-from-sequence, and producer capability
+  advertisement at session start.
 - Redaction/capture policy field in `session.started` (the manifest reads
   `attributes.text_capture` if present, otherwise records `unspecified`).
