@@ -247,6 +247,45 @@ describe("LiveConnectionManager", () => {
         expect(changes.length).toBeGreaterThan(2);
     });
 
+    it("leaves a loaded recording untouched when add() fails or is refused", async () => {
+        const loaded = [0, 1, 2].map((seq) => event("fx-1", "recording", "fixture", seq));
+        const { fetch } = fakeFetch({
+            [`${RT}/.well-known/sonder-telemetry`]: () => new Response("not found", { status: 404 }),
+            [`${INF}/.well-known/sonder-telemetry`]: () =>
+                Response.json({ ...discoveryDoc("sonder-inference", "inference", "tel-1"), schema: "sonder.telemetry.producer/2" }),
+            "http://127.0.0.1:11438/.well-known/sonder-telemetry": () =>
+                Response.json(discoveryDoc("sonder-inference", "inference", "tel-2", [{ transport: "websocket", url: "/ws" }])),
+        });
+        const store = new SessionStore();
+        store.reset("file", "my-recording.sobs");
+        store.append(loaded);
+        const sockets: string[] = [];
+        const m = manager(store, {
+            fetch,
+            webSocketFactory: (url) => {
+                sockets.push(url);
+                return new FakeSocket(url);
+            },
+        });
+        const attempts = [
+            { url: "http://127.0.0.1:1" }, // unreachable (network error)
+            { url: RT }, // 404, no discovery document
+            { url: INF }, // refused schema major
+            { url: "http://127.0.0.1:11438", token: "abc" }, // only a websocket stream, token given
+            { url: "ws://127.0.0.1:8765", token: "abc" }, // token over ws
+            { url: "ws://127.0.0.1:8765", transport: "sse" as const }, // transport the URL cannot carry
+            { url: "http://10.0.0.1:11435" }, // policy refusal
+        ];
+        for (const input of attempts) {
+            const conn = await m.add(input);
+            expect(conn.status.state, input.url).toBe("failed");
+            expect(store.source, input.url).toBe("file");
+            expect(store.sourceLabel, input.url).toBe("my-recording.sobs");
+            expect(store.events, input.url).toHaveLength(3);
+        }
+        expect(sockets).toEqual([]);
+    });
+
     it("remove() stops a producer and keeps its events", async () => {
         const { fetch } = fakeFetch({ ...inferenceRoutes(), ...runtimeRoutes() });
         const store = new SessionStore();

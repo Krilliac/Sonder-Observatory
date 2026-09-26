@@ -322,8 +322,6 @@ export class LiveConnectionManager {
             this.fail(entry, classified.message ?? "invalid URL");
             return;
         }
-        this.ensureLiveStore(input.url);
-
         let streamUrl = input.url;
         let transport: TransportPreference = input.transport ?? "auto";
         if (classified.kind !== "stream") {
@@ -353,6 +351,17 @@ export class LiveConnectionManager {
             transport = selected.transport;
         }
         entry.connection.streamUrl = streamUrl;
+        // Same checks the client applies in start(), made here so that a
+        // refused stream fails before the store is touched.
+        const endpoint = resolveEndpoint(streamUrl, transport);
+        if (!endpoint.ok || endpoint.kind === null) {
+            this.fail(entry, endpoint.message ?? "invalid stream URL");
+            return;
+        }
+        if (endpoint.kind === "websocket" && token !== undefined) {
+            this.fail(entry, TOKEN_REFUSED_WS);
+            return;
+        }
 
         const client = new LiveIngestClient({
             url: streamUrl,
@@ -376,6 +385,10 @@ export class LiveConnectionManager {
                 this.notify();
             }
         });
+        // Only now, with the stream about to open, does a non-live store (a
+        // loaded recording or fixture) give way to the live session: a failed
+        // or refused add() leaves whatever the viewer had loaded untouched.
+        this.ensureLiveStore(streamUrl);
         this.updateSourceLabel();
         client.start();
     }
@@ -388,7 +401,10 @@ export class LiveConnectionManager {
         this.notify();
     }
 
-    /** Resets the store to a live source once, when the first producer arrives over a non-live source. */
+    /**
+     * Resets the store to a live source once, when the first producer's
+     * stream is about to open over a non-live source.
+     */
     private ensureLiveStore(url: string): void {
         if (this.store.source !== "live") {
             this.store.reset("live", url);
