@@ -3,7 +3,8 @@
 //! The shell only hosts the web renderer and adds a deliberately small native
 //! surface (see `capabilities/main-window.json`):
 //!
-//! - `get_launch_args`      validated `--connect/--session/--capability(-file)/--open`
+//! - `get_launch_args`      validated `--connect` (repeatable) / `--token-file` /
+//!                          `--session` / `--capability(-file)` / `--open`
 //! - `pick_recording`       native open dialog (tauri-plugin-dialog, Rust side) -> read grant
 //! - `list_recording_entries` / `read_recording_entry`  read-only access to granted recordings
 //! - `list_recent_recordings` / `open_recent_recording` / `clear_recent_recordings`
