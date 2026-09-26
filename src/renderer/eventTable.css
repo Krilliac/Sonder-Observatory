@@ -2,14 +2,17 @@
    widths so rows can be windowed without the layout jumping. */
 table.events.virtual {
     table-layout: fixed;
+    /* Narrow viewports scroll the table inside .table-wrap, never the page. */
+    min-width: 760px;
 }
 
-table.events.virtual .col-0 { width: 64px; }
-table.events.virtual .col-1 { width: 84px; }
-table.events.virtual .col-2 { width: 28%; }
-table.events.virtual .col-3 { width: 76px; }
-table.events.virtual .col-4 { width: 120px; }
-table.events.virtual .col-5 { width: 110px; }
+table.events.virtual .col-0 { width: 48px; }
+table.events.virtual .col-1 { width: 72px; }
+table.events.virtual .col-2 { width: 26%; }
+table.events.virtual .col-3 { width: 70px; }
+table.events.virtual .col-4 { width: 124px; }
+table.events.virtual .col-5 { width: 92px; }
+table.events.virtual .col-6 { width: 80px; }
 
 table.events.virtual tr.row td {
     height: 22px;
