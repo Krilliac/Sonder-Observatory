@@ -116,6 +116,32 @@ Supersedes the "Lockfile" bullet above. `package-lock.json` and
 - To refresh: create a feature branch, run the workflow with that branch name,
   then open a PR.
 
+## 2026-09-26 — Sonder-Inference event shapes
+
+See [telemetry schema](telemetry-schema.md). Observatory now accepts the
+shapes Sonder-Inference `b2170c0` emits without changing the envelope schema.
+Shared readers live in `src/query/attributes.ts`.
+
+- Sequence streams are keyed by producer instance when the event reveals it
+  (`producer.instance_id`, or an `<instance>-<sequence>` event id), because
+  Inference numbers all of its sessions from one counter. This refines the
+  "Replay ordering" entry.
+- Memory: `used_bytes`/`total_bytes`, or `total_bytes - available_bytes`, or
+  `used_fraction`. Dropped telemetry: `dropped_count` or `dropped_events`.
+  This refines the "Metrics provenance" entry.
+- Token metrics still count `inference.token.generated` events. Inference
+  emits one per streamed chunk, so backend-reported counts
+  (`request.*.completion_tokens` with `token_counts_from_backend: true`) are
+  kept separately as `RequestSpan.backendTokens` and `tokens.backendReported`.
+  The token card doesn't show them yet.
+- model-churn ignores `model.load.completed` events that carry a
+  `request_id` (request-scoped load reports such as Ollama `load_duration`).
+- `engine.*` events are in the `session` timeline class. `session.created`
+  may declare `text_capture`, like `session.started`.
+- Since PR #8 the renderer imports `src/integrations/desktop.ts` for the
+  desktop/browser mode badge, so `@tauri-apps/api/core` is in the web bundle
+  (this updates the "Runtime dependencies" bullet).
+
 ## Open questions
 
 - Protocol package ownership and compatibility/version policy (Milestone 0).
