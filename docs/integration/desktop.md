@@ -21,6 +21,11 @@ generated `target/**/__global-api-script.js` makes `npm run lint` fail locally
 
 ### Binary icons (needs a git push, not possible through the GitHub API tools)
 
+**Done (integrator, 2026-09-26):** the lockfiles workflow gained an `icons`
+input that runs the steps below in CI and commits the set; `.gitignore` and
+`bundle.icon` were updated as described. The ESLint ignores above and the
+`rust-version = "1.87"` bump (Cargo.lock section) landed in PR #17.
+
 The GitHub MCP `push_files` / `create_or_update_file` tools only take text
 content, so the PNG/ICO/ICNS set generated on the box could not be committed
 byte-for-byte (and retyping binaries is not an option). This branch therefore
@@ -150,8 +155,9 @@ job covers `cargo check/test`).
 
 ## Follow-ups (not in this branch)
 
-- `--connect/--session/--capability` from launch info are not yet applied to
-  the live connection (needs a transport hook; `ObservatoryApp.start` only reads
-  `?ws=`).
+- `--connect` is applied since PR #17 (`ObservatoryApp.connectLive()`, `--open`
+  wins when both are given). `--session/--capability` from launch info are not
+  yet applied to the live connection, and the Rust `--connect` validation still
+  accepts only `ws(s)://`.
 - Drag-and-drop of recordings onto the window (HTML5 DnD works because
   `dragDropEnabled` is false; needs an app hook).
