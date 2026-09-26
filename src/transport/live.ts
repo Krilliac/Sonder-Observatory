@@ -2,12 +2,14 @@
  * Live telemetry client over WebSocket.
  *
  * Wire format (Milestone 1): each text frame carries one protocol event as
- * JSON, or several events as NDJSON lines. There is no handshake, resume or
- * capability-token exchange yet because the producer contract for those is
- * not settled with Sonder Runtime / Sonder-Inference (docs/INTEGRATION.md).
- * A token may be passed in the URL query if a producer requires it.
+ * JSON, or several events as NDJSON lines. This is the minimal WebSocket
+ * client; src/ingest/live adds SSE/NDJSON, resume, discovery and bearer
+ * auth (docs/integration/live-ingest.md). Tokens are never put in URLs:
+ * checkEndpoint refuses credentials and token/access_token query
+ * parameters, and plain ws:// to a non-loopback host.
  */
 import type { ObservatoryEvent } from "../protocol/events";
+import { endpointPolicyViolation, isLoopbackHost } from "../ingest/live/endpoint";
 import { parseNdjson, type RejectedLine } from "../recording/ndjson";
 
 export type ConnectionState = "disconnected" | "connecting" | "connected" | "error";
@@ -31,8 +33,6 @@ export interface LiveHandlers {
 
 export const DEFAULT_ENDPOINT = "ws://127.0.0.1:8765";
 
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
-
 export interface EndpointCheck {
     ok: boolean;
     loopback: boolean;
@@ -50,13 +50,15 @@ export function checkEndpoint(url: string): EndpointCheck {
     if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
         return { ok: false, loopback: false, message: "must use ws:// or wss://" };
     }
-    const loopback = LOOPBACK_HOSTS.has(parsed.hostname);
+    const loopback = isLoopbackHost(parsed.hostname);
+    const violation = endpointPolicyViolation(parsed);
+    if (violation !== null) {
+        return { ok: false, loopback, message: violation };
+    }
     return {
         ok: true,
         loopback,
-        message: loopback
-            ? undefined
-            : "remote endpoint: telemetry may be sensitive; use wss:// and an authenticated producer",
+        message: loopback ? undefined : "remote endpoint: telemetry may be sensitive; use an authenticated producer",
     };
 }
 

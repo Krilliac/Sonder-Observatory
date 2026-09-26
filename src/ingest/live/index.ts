@@ -8,7 +8,42 @@ export {
     type LiveIngestStatus,
     type LiveState,
 } from "./client";
-export { resolveEndpoint, type LiveEndpoint, type TransportKind, type TransportPreference } from "./endpoint";
+export {
+    classifyProducerUrl,
+    corsHint,
+    fetchDiscovery,
+    selectStream,
+    type ClassifiedProducerUrl,
+    type DiscoveryFetchResult,
+    type ProducerUrlKind,
+    type SelectedStream,
+} from "./discovery";
+export {
+    endpointPolicyViolation,
+    isLoopbackHost,
+    resolveEndpoint,
+    type LiveEndpoint,
+    type TransportKind,
+    type TransportPreference,
+} from "./endpoint";
+export {
+    LOCAL_PRESETS,
+    LiveConnectionManager,
+    probeProducer,
+    type LiveConnectionManagerOptions,
+    type ProbeOptions,
+    type ProbeResult,
+    type ProducerConnection,
+    type ProducerEndpointInput,
+    type ProducerIdentity,
+} from "./manager";
 export { connectLiveSession, type LiveSessionOptions } from "./session";
 export { LineSplitter, SseParser, type SseMessage } from "./sse";
-export { describeStatus, type StatusTone, type StatusView } from "./status";
+export {
+    describeStatus,
+    producerState,
+    type ProducerState,
+    type StatusTone,
+    type StatusView,
+} from "./status";
+export type { FetchLike } from "./transports";

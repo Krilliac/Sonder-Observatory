@@ -43,6 +43,13 @@ describe("checkEndpoint", () => {
         expect(checkEndpoint("http://127.0.0.1").ok).toBe(false);
         expect(checkEndpoint("nope").ok).toBe(false);
     });
+
+    it("refuses plain remote ws and tokens or credentials in the URL", () => {
+        expect(checkEndpoint("ws://192.168.0.9:8765").ok).toBe(false);
+        expect(checkEndpoint("ws://127.0.0.1:8765/?token=abc").ok).toBe(false);
+        expect(checkEndpoint("wss://example.com/t?access_token=abc").ok).toBe(false);
+        expect(checkEndpoint("wss://u:p@example.com/t").ok).toBe(false);
+    });
 });
 
 describe("LiveConnection", () => {

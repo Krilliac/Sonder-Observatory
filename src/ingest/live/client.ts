@@ -19,7 +19,7 @@ import type { WebSocketFactory, WebSocketLike } from "../../transport/live";
 import { normalizeAdapted, type EventAdapter } from "./adapter";
 import { Backoff, type BackoffOptions } from "./backoff";
 import { BoundedBuffer, type OverflowPolicy } from "./buffer";
-import { resolveEndpoint, type TransportKind, type TransportPreference } from "./endpoint";
+import { resolveEndpoint, type LiveEndpoint, type TransportKind, type TransportPreference } from "./endpoint";
 import {
     openHttpStream,
     openWebSocket,
@@ -103,10 +103,32 @@ export interface LiveIngestOptions {
     resumeParam?: string;
     webSocketFactory?: WebSocketFactory;
     fetch?: FetchLike;
+    /**
+     * Extra headers for HTTP transports, for example
+     * `{ Authorization: "Bearer <token>" }`. Never logged or reported in
+     * status. A WebSocket URL with an Authorization header is refused,
+     * because a browser cannot send it on the handshake.
+     */
+    headers?: Readonly<Record<string, string>>;
     onStatus?: (status: LiveIngestStatus) => void;
 }
 
+function hasAuthorization(headers: Readonly<Record<string, string>> | undefined): boolean {
+    return headers !== undefined && Object.keys(headers).some((k) => k.toLowerCase() === "authorization");
+}
+
+const WS_TOKEN_REFUSED = "a bearer token cannot be sent over WebSocket; use the producer's SSE or NDJSON stream";
+
 const MAX_REJECTED_KEPT = 1000;
+
+/** resolveEndpoint plus the rule that a token never travels over WebSocket. */
+function checkedEndpoint(options: LiveIngestOptions): LiveEndpoint {
+    const endpoint = resolveEndpoint(options.url, options.transport ?? "auto");
+    if (endpoint.ok && endpoint.kind === "websocket" && hasAuthorization(options.headers)) {
+        return { ...endpoint, ok: false, kind: null, message: WS_TOKEN_REFUSED };
+    }
+    return endpoint;
+}
 
 export class LiveIngestClient {
     private readonly options: LiveIngestOptions;
@@ -142,7 +164,7 @@ export class LiveIngestClient {
         this.flushIntervalMs = Math.max(0, options.flushIntervalMs ?? 50);
         this.highWater = Math.max(1, Math.floor(capacity * 0.75));
         this.lowWater = Math.floor(capacity * 0.25);
-        const endpoint = resolveEndpoint(options.url, options.transport ?? "auto");
+        const endpoint = checkedEndpoint(options);
         this.kind = endpoint.kind;
         this.statusValue = {
             state: "idle",
@@ -187,7 +209,7 @@ export class LiveIngestClient {
         if (!this.stopped) {
             return;
         }
-        const endpoint = resolveEndpoint(this.options.url, this.options.transport ?? "auto");
+        const endpoint = checkedEndpoint(this.options);
         if (!endpoint.ok || endpoint.kind === null) {
             this.update({ state: "failed", lastError: endpoint.message ?? "invalid endpoint" });
             return;
@@ -287,6 +309,7 @@ export class LiveIngestClient {
             kind: this.kind,
             lastEventId,
             resumeParam: this.options.resumeParam ?? "last_event_id",
+            headers: this.options.headers,
         };
         if (this.kind === "websocket") {
             const factory =
