@@ -128,7 +128,7 @@ streams `inference-stream.ndjson`, `runtime-stream.ndjson`,
 `playwright.log`, `playwright-results.json`, `playwright-report/index.html`,
 `test-results/` (traces of failures); `screenshots/` (`e2e-inspector`,
 `e2e-connected-events`, `e2e-connected-overview`, `e2e-producers`,
-`e2e-replay`); `ecosystem.sobs` and `recording-manifest.json`;
+`e2e-replay`, `e2e-negative-cors`); `ecosystem.sobs` and `recording-manifest.json`;
 `negative-closed-port/`; `flutter.log`. A rerun in the same work dir moves
 the previous run's files to `previous-run-<time>/` (the Inference build is
 kept for `--skip-build`).

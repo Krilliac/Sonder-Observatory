@@ -261,12 +261,13 @@ test.describe("Sonder ecosystem (live Runtime + Sonder-Inference)", () => {
         expect(pageErrors, "uncaught page errors").toEqual([]);
     });
 
-    test("negative control: a Runtime without the viewer's origin fails with CORS advice", async ({ page }) => {
+    test("negative control: a Runtime without the viewer's origin fails with CORS advice", async ({ page }, testInfo) => {
         test.skip(NO_ORIGIN_RUNTIME === "", "E2E_RUNTIME_NO_ORIGIN_URL is not set");
         await page.goto(`./?fixture=0&connect=${encodeURIComponent(NO_ORIGIN_RUNTIME)}`);
         const failed = page.locator("[data-testid=producer-card]").first();
         await expect(failed.locator("[data-testid=producer-state]")).toHaveText("failed", { timeout: LIVE_TIMEOUT });
         await expect(failed).toContainText("SONDER_OBSERVATORY_ORIGINS");
         await expect(failed).toContainText("SONDER_CORS_ORIGINS");
+        await shot(page, testInfo, "e2e-negative-cors");
     });
 });
