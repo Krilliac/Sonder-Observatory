@@ -28,8 +28,12 @@ test.describe("Diagnostics tab", () => {
 
         const selected = page.locator("#view-diagnostics .diag-finding.selected");
         await expect(selected).toHaveCount(1);
-        await expect(selected).toHaveAttribute("aria-selected", "true");
-        const evidenceButtons = page.locator("#view-diagnostics ul.diag-evidence button");
+        await expect(selected).toHaveAttribute("aria-current", "true");
+        await expect(selected).toHaveAttribute("aria-expanded", "true");
+        await expect(page.locator("#view-diagnostics .diag-finding[aria-current]")).toHaveCount(1);
+        const evidenceList = page.locator("#view-diagnostics ul.diag-evidence");
+        await expect(evidenceList).toHaveAttribute("id", (await selected.getAttribute("aria-controls"))!);
+        const evidenceButtons = evidenceList.locator("button");
         await expect(evidenceButtons).toHaveCount(evidenceCount);
 
         // Evidence is highlighted in the timeline (all of it) and table (up to the cursor).

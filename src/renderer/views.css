@@ -49,6 +49,13 @@ table.events tr.evidence td:first-child {
     background: color-mix(in srgb, var(--color-primary, #3b82f6) 25%, transparent);
 }
 
+/* Muted text on selected findings and event-table rows: --muted is 4.46:1 on
+   the selected background (#1a325a); this mix (#a6b3c7) is 6.0:1 (WCAG AA). */
+.diag-finding.selected .muted,
+table.events tr.selected .muted {
+    color: color-mix(in srgb, var(--muted) 70%, var(--text));
+}
+
 .sev-label {
     display: inline-block;
     min-width: 3.5em;

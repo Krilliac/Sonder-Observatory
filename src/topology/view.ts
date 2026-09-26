@@ -44,7 +44,8 @@ export class TopologyPanel {
         this.legend = h("div", { class: "topology-legend", role: "list", "aria-label": "Topology legend" });
         this.element = h(
             "section",
-            { class: "topology-panel", "aria-label": "Sonder agent topology" },
+            // tabindex -1: focus fallback (keeps Escape working) when a focused node disappears while scrubbing.
+            { class: "topology-panel", "aria-label": "Sonder agent topology", tabindex: -1 },
             h("div", { class: "panel-head" }, h("h2", { text: "Agent topology" })),
             h(
                 "p",
@@ -96,9 +97,32 @@ export class TopologyPanel {
         // Preserve selection while its identity remains valid (UX.md replay).
         const activeSelection = selectionValid(graph, this.selection) ? this.selection : null;
         const scene = buildScene(graph, this.layout, { selection: activeSelection, atMonoNs: this.at });
+        // Re-rendering replaces the SVG; remember which node/edge had keyboard focus so it keeps it.
+        const focused = this.focusedItem();
         this.canvas.replaceChildren(scene.nodes.length === 0 ? this.empty() : this.drawSvg(scene));
+        if (focused) {
+            this.restoreFocus(focused);
+        }
         this.legend.replaceChildren(...scene.legend.map(legendItem));
         this.side.replaceChildren(...this.sideContent(graph, activeSelection));
+    }
+
+    /** The node/edge (by selection identity) that currently has focus inside the graph, if any. */
+    private focusedItem(): TopologySelection | null {
+        const active = this.element.ownerDocument.activeElement;
+        if (!active || !this.canvas.contains(active)) {
+            return null;
+        }
+        const kind = active.getAttribute("data-topo-kind");
+        const id = active.getAttribute("data-topo-id");
+        return (kind === "node" || kind === "edge") && id !== null ? { kind, id } : null;
+    }
+
+    private restoreFocus(item: TopologySelection): void {
+        const match = Array.from(this.canvas.querySelectorAll<SVGElement>("[data-topo-kind]")).find(
+            (el) => el.getAttribute("data-topo-kind") === item.kind && el.getAttribute("data-topo-id") === item.id,
+        );
+        (match ?? this.element).focus({ preventScroll: true });
     }
 
     private empty(): HTMLElement {
@@ -131,6 +155,8 @@ export class TopologyPanel {
                 "aria-pressed": String(e.selected),
                 "aria-label": e.ariaLabel,
                 opacity: e.opacity,
+                "data-topo-kind": "edge",
+                "data-topo-id": e.id,
             });
             // wide transparent hit area
             g.append(svg("path", { d: e.path, fill: "none", stroke: "transparent", "stroke-width": 12 }));
@@ -163,6 +189,8 @@ export class TopologyPanel {
                 "aria-pressed": String(n.selected),
                 "aria-label": n.ariaLabel,
                 opacity: n.opacity,
+                "data-topo-kind": "node",
+                "data-topo-id": n.id,
             });
             g.append(
                 svg("path", {

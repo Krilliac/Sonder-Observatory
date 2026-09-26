@@ -166,4 +166,47 @@ describe("DesktopIntegration", () => {
         expect(status.textContent).toMatch(/could not open recording: permission denied/);
         expect(status.hidden).toBe(false);
     });
+
+    it("starts a live connection for --connect at launch", async () => {
+        const { doc } = fakeDoc();
+        const host = { openRecordingText: vi.fn(), connectLive: vi.fn() };
+        const info: LaunchInfo = {
+            connect: "ws://127.0.0.1:8766/ws",
+            session: null,
+            capability: null,
+            open: null,
+            warnings: [],
+        };
+        await new DesktopIntegration(host, doc, fakeBridge({ getLaunchInfo: async () => info })).mount();
+        expect(host.connectLive).toHaveBeenCalledWith("ws://127.0.0.1:8766/ws");
+        expect(host.openRecordingText).not.toHaveBeenCalled();
+    });
+
+    it("prefers --open over --connect and says so", async () => {
+        const { doc, input } = fakeDoc();
+        const host = { openRecordingText: vi.fn(), connectLive: vi.fn() };
+        const info: LaunchInfo = {
+            connect: "ws://127.0.0.1:8766/ws",
+            session: null,
+            capability: null,
+            open: { id: "rec-1", name: "launch.sobs", kind: "file" },
+            warnings: [],
+        };
+        await new DesktopIntegration(
+            host,
+            doc,
+            fakeBridge({ getLaunchInfo: async () => info, readGrantText: async (g) => ({ text: "l", label: g.name }) }),
+        ).mount();
+        expect(host.openRecordingText).toHaveBeenCalledWith("l", "launch.sobs");
+        expect(host.connectLive).not.toHaveBeenCalled();
+        expect(input.siblingsAfter[1]!.textContent).toMatch(/--open and --connect/);
+    });
+
+    it("ignores --connect when the host cannot connect", async () => {
+        const { doc } = fakeDoc();
+        const host = { openRecordingText: vi.fn() };
+        const info: LaunchInfo = { connect: "ws://127.0.0.1:1/", session: null, capability: null, open: null, warnings: [] };
+        await expect(new DesktopIntegration(host, doc, fakeBridge({ getLaunchInfo: async () => info })).mount()).resolves.toBeUndefined();
+        expect(host.openRecordingText).not.toHaveBeenCalled();
+    });
 });

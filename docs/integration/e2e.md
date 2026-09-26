@@ -1,8 +1,8 @@
 # Integration notes — feat/e2e (Playwright end-to-end tests)
 
 Owned paths: `e2e/**`, `playwright.config.ts`, `.github/workflows/e2e.yml`,
-this file. Nothing else was changed (no edits to package.json, ci.yml,
-tsconfig, eslint/vite config or `src/`).
+this file. No edits to package.json, ci.yml, tsconfig or eslint/vite config.
+The follow-up `feat/a11y-fixes` changes `src/` only for the bugs listed below.
 
 ## What is covered
 
@@ -36,7 +36,10 @@ E2E_BASE_URL=http://127.0.0.1:5173 npx playwright test   # against a running `np
 ```
 
 Env: `E2E_PORT` (preview port, default 4173), `E2E_BASE_URL` (skip the
-built-in web server), `E2E_SHOTS_DIR` (screenshot folder).
+built-in web server), `E2E_SHOTS_DIR` (screenshot folder),
+`E2E_REUSE_SERVER=1` (reuse a server already on `E2E_PORT` instead of failing
+when the port is busy; off by default so a stale or foreign server is never
+tested by accident).
 
 ## Requests for the integrator (root config I did not touch)
 
@@ -59,43 +62,43 @@ built-in web server), `E2E_SHOTS_DIR` (screenshot folder).
 - vitest is unaffected (`tests/**/*.test.ts` only; e2e files are `*.spec.ts`
   under `e2e/`).
 
-## UI bugs found
+## UI bugs found (fixed in feat/a11y-fixes)
 
-1. **Topology drops keyboard focus on selection (Escape can't clear).**
-   `TopologyPanel.render()` (src/topology/view.ts) rebuilds the whole SVG on
-   every selection, so the focused `<g role="button">` is detached and focus
-   falls back to `<body>`. The Escape handler is on the panel section, so after
-   Tab + Enter, Escape does nothing and the next Tab restarts from the top of
-   the page. Same happens on every replay tick while a node is focused.
-   Repro: open `/?view=agents`, Tab to a node, press Enter (selected), press
-   Escape → selection remains; `document.activeElement` is `BODY`.
-   Tracked by the `test.fail` test "topology keeps focus on the node after
-   Enter so Escape clears" (it will start failing, i.e. "unexpectedly pass",
-   once fixed; then remove `test.fail`). Fix: after render, re-focus the
-   element whose selection id matches (as the diagnostics panel already does).
-2. **Diagnostics findings list has invalid ARIA structure** (axe critical
-   `aria-required-children`, `aria-required-parent`; serious `listitem`).
-   src/diagnostics/panel.ts renders `<ul role="listbox"> <li> <button
-   role="option">`, and nests the evidence `<ul>` inside the listbox. Repro:
-   load `/`, run axe on `.diag-findings`. Fix: give the `<li>` `role="none"`/
-   `presentation` (and move the evidence list out of the listbox), or drop
-   the listbox/option roles and keep a plain list of buttons with
-   `aria-pressed`/`aria-current`.
-3. **Colour contrast of muted text on selected rows** (axe serious
-   `color-contrast`): `.muted` (#8a9ab3) on the selected row / selected
-   finding background (#1a325a) is 4.46:1, just under 4.5:1. Repro: select a
-   finding; the "(n evidence events, derived)" suffix and the selected table
-   row's attributes cell fail. Fix: lighten `--muted` slightly or the
-   selected background in styles.css/views.css.
-4. Minor (not asserted): the Diagnostics/Agents tabs use `role="tab"` but do
-   not implement the ARIA tabs keyboard pattern (Left/Right arrows, roving
-   `tabindex`); both tabs are separate Tab stops. They are operable with
-   Enter/Space, which the suite checks.
+All four bugs found by the first version of this suite (#12) are fixed on
+`feat/a11y-fixes`, and the suite now asserts the fixed behaviour.
 
-The Agents view had no axe violations.
+1. **Topology dropped keyboard focus on selection.** `TopologyPanel.render()`
+   replaced the SVG and the focused `<g role="button">` was detached (focus
+   fell to `<body>`, so Tab + Enter then Escape did nothing). Fix
+   (src/topology/view.ts): nodes/edges carry `data-topo-kind`/`data-topo-id`;
+   `render()` records the focused item and re-focuses the matching element in
+   the new SVG (`preventScroll`). If it no longer exists at the cursor, focus
+   moves to the panel section (`tabindex="-1"`) so Escape still works. The
+   former `test.fail` is now a normal regression test (also checks focus
+   survives a scrub-driven re-render).
+2. **Findings list ARIA.** `<ul role="listbox"> > <li> > <button role="option">`
+   with a nested evidence list (axe `aria-required-children`,
+   `aria-required-parent`, `listitem`). Fix (src/diagnostics/panel.ts): a
+   plain list of buttons; the selected finding has `aria-current="true"`,
+   `aria-expanded="true"` and `aria-controls` pointing at its evidence list.
+   Arrow-key/Escape behaviour is unchanged.
+3. **Muted text on selected rows/findings** was 4.46:1. Fix: one CSS rule in
+   views.css (`.diag-finding.selected .muted, table.events tr.selected .muted`)
+   uses `color-mix(in srgb, var(--muted) 70%, var(--text))` = #a6b3c7, 6.0:1
+   on #1a325a (axe-measured).
+4. **Tabs keyboard pattern.** Fix (src/renderer/app.ts, tab code only): roving
+   `tabindex` (active tab 0, others -1); ArrowLeft/ArrowRight (wrapping),
+   Home/End move focus and activate the tab (automatic activation).
+
+The axe allowlist in `e2e/a11y.spec.ts` is now empty; both views scan clean
+for WCAG 2.0/2.1 A+AA.
+
+Remaining, out of scope: with the extra `wcag22aa` tag axe reports
+`target-size` (24x24 px minimum) for the small evidence link buttons
+(`.link`) in the findings/topology lists. The suite does not scan WCAG 2.2.
 
 ## Notes
 
 - All data shown in tests and screenshots is the synthetic fixture.
-- Local run (headless chromium 1.63.0, Node 20.19): 21 tests pass (one is an
-  expected failure for bug 1).
+- Local run (headless chromium 1.63.0, Node 20.19): 22 tests pass, no
+  expected failures.
