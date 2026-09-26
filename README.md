@@ -115,5 +115,5 @@ and [ecosystem boundaries](docs/BOUNDARIES.md).
 
 ## License
 
-[MIT](LICENSE). This matches most of Krilliac's other licensed repositories.
-Third-party dependencies keep their own licenses.
+Licensed under the [Apache License, Version 2.0](LICENSE). See
+[NOTICE](NOTICE). Third-party dependencies keep their own licenses.

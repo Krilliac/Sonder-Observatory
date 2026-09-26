@@ -1,5 +1,6 @@
 import tokens from "../../design/tokens.json";
 import { tokensToCssVariables } from "../design/tokens";
+import { mountDesktopIntegration } from "../integrations/desktopUi";
 import { ObservatoryApp } from "./app";
 import type { ObservatoryPanel } from "./panels";
 import "./styles.css";
@@ -18,3 +19,7 @@ if (!root) {
 const panels: ObservatoryPanel[] = [];
 
 new ObservatoryApp(root, panels).start(new URLSearchParams(window.location.search));
+
+// Desktop vs browser mode badge; in the Tauri shell also the native
+// "Open recording…" dialog and the recent-recordings menu (src/integrations/).
+mountDesktopIntegration();

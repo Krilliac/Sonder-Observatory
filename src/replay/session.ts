@@ -46,11 +46,17 @@ export class SessionStore {
         return this.manifest?.synthetic === true || this.events.some((e) => isSyntheticProducer(e.producer));
     }
 
-    /** Text capture policy declared at session start, if any. */
+    /**
+     * Text capture policy declared at session start, if any
+     * (`session.started` or Sonder-Inference's `session.created`).
+     */
     get capturePolicy(): string {
         const policies = new Set<string>();
         for (const e of this.events) {
-            if (e.event_type === "session.started" && typeof e.attributes.text_capture === "string") {
+            if (
+                (e.event_type === "session.started" || e.event_type === "session.created") &&
+                typeof e.attributes.text_capture === "string"
+            ) {
                 policies.add(e.attributes.text_capture);
             }
         }

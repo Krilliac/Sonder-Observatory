@@ -1,0 +1,69 @@
+name: E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned here until the integrator adds them to package.json devDependencies
+  # (see docs/integration/e2e.md). Keep in sync with the lockfile once added.
+  PLAYWRIGHT_VERSION: 1.63.0
+  AXE_PLAYWRIGHT_VERSION: 4.13.0
+
+jobs:
+  e2e:
+    name: Playwright (chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      # Ad hoc install so this workflow does not depend on package.json.
+      # Skipped automatically once the packages are real devDependencies.
+      - name: Install Playwright + axe (ad hoc, no-save)
+        run: |
+          if node -e "require.resolve('@playwright/test/package.json'); require.resolve('@axe-core/playwright/package.json')" 2>/dev/null; then
+            echo "Playwright deps already installed from package.json"
+          else
+            npm install --no-save --no-audit --no-fund --legacy-peer-deps \
+              "@playwright/test@${PLAYWRIGHT_VERSION}" "@axe-core/playwright@${AXE_PLAYWRIGHT_VERSION}"
+          fi
+          npx playwright --version
+      - name: Install chromium
+        run: npx playwright install --with-deps chromium
+      - name: Run e2e tests
+        run: npx playwright test
+        env:
+          CI: "true"
+          E2E_SHOTS_DIR: ${{ github.workspace }}/test-results/shots
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: test-results/shots/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload Playwright report and traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/e2e/
+          if-no-files-found: ignore
+          retention-days: 14
