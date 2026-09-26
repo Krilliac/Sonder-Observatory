@@ -30,6 +30,26 @@ export interface TransportRequest {
     lastEventId: string | null;
     /** Query parameter used to request resume on WebSocket. */
     resumeParam: string;
+    /** Session id to scope the stream to; sent as the `sessionParam` query parameter. */
+    session?: string | null;
+    /** Query parameter carrying `session`. Default "session". */
+    sessionParam?: string;
+    /**
+     * Short-lived capability token. HTTP: `Authorization: Bearer <token>`.
+     * WebSocket: first text frame after open (see capabilityFrame). Never put
+     * in the URL, never logged.
+     */
+    capability?: string | null;
+}
+
+/** Frame a WebSocket client sends first when it holds a capability token (proposal). */
+export function capabilityFrame(capability: string, session: string | null | undefined): string {
+    return JSON.stringify({ type: "observatory.auth", capability, ...(session ? { session } : {}) });
+}
+
+/** Applies the session query parameter, if any. */
+export function sessionUrl(request: TransportRequest): string {
+    return request.session ? withQueryParam(request.url, request.sessionParam ?? "session", request.session) : request.url;
 }
 
 export interface TransportHandle {
@@ -38,6 +58,9 @@ export interface TransportHandle {
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
+/** Browser WebSockets (and `ws`) can send; test fakes may not. */
+type SendableSocket = WebSocketLike & { send?(data: string): void };
+
 export function openWebSocket(
     request: TransportRequest,
     callbacks: TransportCallbacks,
@@ -45,11 +68,10 @@ export function openWebSocket(
 ): TransportHandle {
     // Browsers cannot set headers on a WebSocket handshake, so resume is
     // requested with a query parameter the producer may honour or ignore.
-    const url = request.lastEventId
-        ? withQueryParam(request.url, request.resumeParam, request.lastEventId)
-        : request.url;
+    const base = sessionUrl(request);
+    const url = request.lastEventId ? withQueryParam(base, request.resumeParam, request.lastEventId) : base;
     let closed = false;
-    let socket: WebSocketLike;
+    let socket: SendableSocket;
     try {
         socket = factory(url);
     } catch (error) {
@@ -58,10 +80,32 @@ export function openWebSocket(
     }
     let opened = false;
     socket.onopen = () => {
-        if (!closed) {
-            opened = true;
-            callbacks.onOpen("websocket");
+        if (closed) {
+            return;
         }
+        if (request.capability) {
+            // Browsers cannot set headers on the handshake and a token in the
+            // URL ends up in logs, so the token is the first frame instead.
+            if (typeof socket.send !== "function") {
+                closed = true;
+                try {
+                    socket.close(1008, "capability not supported");
+                } catch {
+                    // already closing
+                }
+                callbacks.onClose("cannot send capability: socket has no send()", true);
+                return;
+            }
+            try {
+                socket.send(capabilityFrame(request.capability, request.session));
+            } catch (error) {
+                closed = true;
+                callbacks.onClose(`cannot send capability: ${(error as Error).message}`, true);
+                return;
+            }
+        }
+        opened = true;
+        callbacks.onOpen("websocket");
     };
     socket.onmessage = (ev) => {
         if (closed) {
@@ -122,7 +166,10 @@ export function openHttpStream(
         if (request.lastEventId) {
             headers["Last-Event-ID"] = request.lastEventId;
         }
-        const response = await fetchImpl(request.url, {
+        if (request.capability) {
+            headers.Authorization = `Bearer ${request.capability}`;
+        }
+        const response = await fetchImpl(sessionUrl(request), {
             headers,
             signal: controller.signal,
             cache: "no-store",
