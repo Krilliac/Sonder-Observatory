@@ -8,6 +8,11 @@
  *   transport (WS | SSE | NDJSON) -> payload text -> JSON.parse -> adapter
  *   -> validateEvent -> BoundedBuffer -> batched sink.append()
  *
+ * A producer base URL (http(s) with an empty path or "/") or discovery URL
+ * is resolved through the producer's discovery document first
+ * (/.well-known/sonder-telemetry, live producer protocol v1), so the
+ * single-URL connect path accepts the same URLs as LiveConnectionManager.
+ *
  * Duplicate delivery after a reconnect (a producer that ignores the resume
  * request and replays) is harmless: SessionStore.append deduplicates by
  * event_id and reports `duplicates`.
@@ -19,6 +24,7 @@ import type { WebSocketFactory, WebSocketLike } from "../../transport/live";
 import { normalizeAdapted, type EventAdapter } from "./adapter";
 import { Backoff, type BackoffOptions } from "./backoff";
 import { BoundedBuffer, type OverflowPolicy } from "./buffer";
+import { classifyProducerUrl, fetchDiscovery, selectStream } from "./discovery";
 import { resolveEndpoint, type LiveEndpoint, type TransportKind, type TransportPreference } from "./endpoint";
 import {
     openHttpStream,
@@ -110,6 +116,12 @@ export interface LiveIngestOptions {
      * because a browser cannot send it on the handshake.
      */
     headers?: Readonly<Record<string, string>>;
+    /**
+     * Resolve a producer base URL or discovery URL through the discovery
+     * document before streaming. Default true. LiveConnectionManager passes
+     * false: it resolves discovery itself and hands over the stream URL.
+     */
+    discover?: boolean;
     onStatus?: (status: LiveIngestStatus) => void;
 }
 
@@ -121,8 +133,32 @@ const WS_TOKEN_REFUSED = "a bearer token cannot be sent over WebSocket; use the 
 
 const MAX_REJECTED_KEPT = 1000;
 
-/** resolveEndpoint plus the rule that a token never travels over WebSocket. */
+/** The bearer token in an Authorization header, if any. */
+function bearerToken(headers: Readonly<Record<string, string>> | undefined): string | undefined {
+    const entry = Object.entries(headers ?? {}).find(([k]) => k.toLowerCase() === "authorization");
+    const match = entry ? /^Bearer (.+)$/.exec(entry[1]) : null;
+    return match ? match[1] : undefined;
+}
+
+/** Where the discovery document lives when `options.url` needs discovery, else null. */
+function discoveryUrlFor(options: LiveIngestOptions): string | null {
+    if (options.discover === false) {
+        return null;
+    }
+    const classified = classifyProducerUrl(options.url);
+    return classified.ok && classified.kind !== "stream" ? classified.discoveryUrl : null;
+}
+
+/**
+ * resolveEndpoint plus the rule that a token never travels over WebSocket.
+ * A URL that needs discovery is checked against the policy only: its
+ * transport is known once discovery picked a stream.
+ */
 function checkedEndpoint(options: LiveIngestOptions): LiveEndpoint {
+    if (discoveryUrlFor(options) !== null) {
+        const endpoint = resolveEndpoint(options.url, "auto");
+        return { ...endpoint, kind: endpoint.ok ? endpoint.kind : null };
+    }
     const endpoint = resolveEndpoint(options.url, options.transport ?? "auto");
     if (endpoint.ok && endpoint.kind === "websocket" && hasAuthorization(options.headers)) {
         return { ...endpoint, ok: false, kind: null, message: WS_TOKEN_REFUSED };
@@ -142,6 +178,10 @@ export class LiveIngestClient {
     private readonly statusValue: LiveIngestStatus;
     private handle: TransportHandle | null = null;
     private kind: TransportKind | null = null;
+    /** Discovery URL for base/discovery URLs; null for stream URLs. */
+    private readonly discoveryUrl: string | null;
+    /** The stream discovery selected (kept across reconnects). */
+    private streamUrl: string | null = null;
     private stopped = true;
     private everOpened = false;
     private failures = 0;
@@ -164,12 +204,13 @@ export class LiveIngestClient {
         this.flushIntervalMs = Math.max(0, options.flushIntervalMs ?? 50);
         this.highWater = Math.max(1, Math.floor(capacity * 0.75));
         this.lowWater = Math.floor(capacity * 0.25);
+        this.discoveryUrl = discoveryUrlFor(options);
         const endpoint = checkedEndpoint(options);
-        this.kind = endpoint.kind;
+        this.kind = this.discoveryUrl === null ? endpoint.kind : null;
         this.statusValue = {
             state: "idle",
             url: options.url,
-            transport: endpoint.kind,
+            transport: this.kind,
             loopback: endpoint.loopback,
             warning: endpoint.ok ? (endpoint.message ?? null) : null,
             attempts: 0,
@@ -214,7 +255,9 @@ export class LiveIngestClient {
             this.update({ state: "failed", lastError: endpoint.message ?? "invalid endpoint" });
             return;
         }
-        this.kind = endpoint.kind;
+        if (this.discoveryUrl === null) {
+            this.kind = endpoint.kind;
+        }
         this.stopped = false;
         this.connect();
     }
@@ -249,7 +292,8 @@ export class LiveIngestClient {
     // --- connection lifecycle ------------------------------------------------
 
     private connect(): void {
-        if (this.stopped || this.kind === null) {
+        const needsDiscovery = this.discoveryUrl !== null && this.streamUrl === null;
+        if (this.stopped || (this.kind === null && !needsDiscovery)) {
             return;
         }
         const generation = ++this.generation;
@@ -263,6 +307,55 @@ export class LiveIngestClient {
             retryInMs: null,
             resumeRequested: lastEventId !== null,
         });
+        if (needsDiscovery) {
+            void this.discover(generation, lastEventId);
+            return;
+        }
+        this.open(generation, lastEventId);
+    }
+
+    /**
+     * Fetches the discovery document and picks the stream (SSE, then NDJSON,
+     * then WebSocket unless a transport is forced). An unreachable producer
+     * is retried like a failed stream; a refused document or a producer
+     * without a usable stream is final.
+     */
+    private async discover(generation: number, lastEventId: string | null): Promise<void> {
+        const discoveryUrl = this.discoveryUrl!;
+        const token = bearerToken(this.options.headers);
+        const fetched = await fetchDiscovery(discoveryUrl, { token, fetch: this.options.fetch });
+        if (generation !== this.generation || this.stopped) {
+            return;
+        }
+        if (!fetched.ok || !fetched.discovery) {
+            const reason = fetched.error ?? "discovery failed";
+            if (fetched.status !== null && fetched.status >= 200 && fetched.status < 300) {
+                this.stopped = true;
+                this.update({ state: "failed", lastError: reason, retryInMs: null });
+                return;
+            }
+            this.onDisconnected(reason, true);
+            return;
+        }
+        const selected = selectStream(fetched.discovery, discoveryUrl, {
+            transport: this.options.transport,
+            hasToken: token !== undefined || hasAuthorization(this.options.headers),
+        });
+        if (!selected.ok || selected.url === null || selected.transport === null) {
+            this.stopped = true;
+            this.update({ state: "failed", lastError: selected.message ?? "no usable stream", retryInMs: null });
+            return;
+        }
+        this.streamUrl = selected.url;
+        this.kind = selected.transport;
+        this.update({ transport: selected.transport });
+        this.open(generation, lastEventId);
+    }
+
+    private open(generation: number, lastEventId: string | null): void {
+        if (this.kind === null) {
+            return;
+        }
         const current = () => generation === this.generation && !this.stopped;
         const callbacks: TransportCallbacks = {
             onOpen: (kind) => {
@@ -305,7 +398,7 @@ export class LiveIngestClient {
             waitForCapacity: () => this.waitForCapacity(),
         };
         const request = {
-            url: this.options.url,
+            url: this.streamUrl ?? this.options.url,
             kind: this.kind,
             lastEventId,
             resumeParam: this.options.resumeParam ?? "last_event_id",

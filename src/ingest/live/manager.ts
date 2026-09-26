@@ -26,9 +26,9 @@ import { producerInstance } from "../../query/attributes";
 import type { SessionStore } from "../../replay/session";
 import type { WebSocketFactory } from "../../transport/live";
 import { LiveIngestClient, type LiveIngestStatus } from "./client";
-import { classifyProducerUrl, fetchDiscovery, selectStream } from "./discovery";
+import { DEFAULT_DISCOVERY_TIMEOUT_MS, classifyProducerUrl, corsHint, fetchDiscovery, selectStream } from "./discovery";
 import { isLoopbackHost, resolveEndpoint, type TransportPreference } from "./endpoint";
-import type { FetchLike } from "./transports";
+import { NO_REDIRECTS, describeHttpFailure, isRedirect, type FetchLike } from "./transports";
 
 export type { FetchLike } from "./transports";
 
@@ -169,9 +169,58 @@ function identityFromEvent(event: ObservatoryEvent): ProducerIdentity {
 }
 
 /**
- * Checks a producer URL without connecting a stream: validates the URL
- * policy, fetches and validates the discovery document for base and
- * discovery URLs, and reports the stream that would be opened. Never throws.
+ * Asks an http(s) stream URL for its response headers and hangs up: enough to
+ * tell a reachable stream from a 401/403/404, a redirect or a network (CORS)
+ * failure without consuming events.
+ */
+async function probeHttpStream(
+    url: string,
+    kind: "sse" | "ndjson",
+    token: string | undefined,
+    opts: ProbeOptions,
+): Promise<{ error: string | null; corsSuspected: boolean }> {
+    const fetchImpl: FetchLike = opts.fetch ?? ((input, init) => globalThis.fetch(input, init));
+    const timeoutMs = opts.timeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const headers: Record<string, string> = {
+        Accept: kind === "ndjson" ? "application/x-ndjson" : "text/event-stream",
+        "Cache-Control": "no-store",
+    };
+    if (token !== undefined) {
+        headers.Authorization = `Bearer ${token}`;
+    }
+    try {
+        const response = await fetchImpl(url, { headers, signal: controller.signal, cache: "no-store", redirect: NO_REDIRECTS });
+        if (isRedirect(response)) {
+            return { error: describeHttpFailure(response.type === "opaqueredirect" ? 0 : response.status), corsSuspected: false };
+        }
+        if (!response.ok) {
+            return { error: describeHttpFailure(response.status), corsSuspected: false };
+        }
+        return { error: null, corsSuspected: false };
+    } catch (error) {
+        if ((error as { name?: string })?.name === "AbortError") {
+            return { error: `no answer from ${url} within ${timeoutMs} ms`, corsSuspected: false };
+        }
+        return {
+            error: `could not reach ${url} (${(error as Error)?.message ?? String(error)}); ${corsHint()}`,
+            corsSuspected: true,
+        };
+    } finally {
+        clearTimeout(timer);
+        // Hang up once the headers are in: the probe never reads events.
+        controller.abort();
+    }
+}
+
+/**
+ * Checks a producer URL without ingesting events: validates the URL policy,
+ * fetches and validates the discovery document for base and discovery URLs
+ * and reports the stream that would be opened. An http(s) stream URL is
+ * requested and dropped as soon as its response headers arrive; a ws(s)
+ * stream URL is only checked against the policy (it is not contacted).
+ * Never throws.
  */
 export async function probeProducer(url: string, opts: ProbeOptions = {}): Promise<ProbeResult> {
     const token = normalizedToken(opts.token);
@@ -197,6 +246,12 @@ export async function probeProducer(url: string, opts: ProbeOptions = {}): Promi
         }
         if (endpoint.kind === "websocket" && token !== undefined) {
             return fail(TOKEN_REFUSED_WS);
+        }
+        if (endpoint.kind === "sse" || endpoint.kind === "ndjson") {
+            const probed = await probeHttpStream(url, endpoint.kind, token, opts);
+            if (probed.error !== null) {
+                return fail(probed.error, probed.corsSuspected);
+            }
         }
         return { ok: true, discovery: null, streamUrl: url, error: null, corsSuspected: false };
     }
@@ -367,6 +422,8 @@ export class LiveConnectionManager {
             url: streamUrl,
             transport,
             headers: token !== undefined ? { Authorization: `Bearer ${token}` } : undefined,
+            // Discovery (if any) already ran above; streamUrl is the stream itself.
+            discover: false,
             fetch: this.options.fetch,
             webSocketFactory: this.options.webSocketFactory,
             sink: {

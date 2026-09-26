@@ -15,7 +15,7 @@ import {
 } from "../../protocol/discovery";
 import { formatIssues } from "../../protocol/validate";
 import { endpointPolicyViolation, type TransportPreference } from "./endpoint";
-import type { FetchLike } from "./transports";
+import { NO_REDIRECTS, REDIRECT_REFUSED, isRedirect, type FetchLike } from "./transports";
 
 export type ProducerUrlKind = "base" | "discovery" | "stream";
 
@@ -31,6 +31,9 @@ export interface ClassifiedProducerUrl {
 export const TRANSPORT_ORDER: readonly StreamTransport[] = ["sse", "ndjson", "websocket"];
 
 export const DEFAULT_DISCOVERY_TIMEOUT_MS = 5000;
+
+/** Largest discovery document read; a bigger one is refused unread. */
+export const MAX_DISCOVERY_BYTES = 64 * 1024;
 
 export function classifyProducerUrl(url: string): ClassifiedProducerUrl {
     let parsed: URL;
@@ -82,19 +85,59 @@ export function viewerOrigin(): string {
 
 /**
  * Operator guidance when a producer refused (or did not answer) a
- * cross-origin request: which allowlist to change, per producer.
+ * cross-origin request: which allowlist to change, per producer. The
+ * Runtime-wide SONDER_CORS_ORIGINS fallback is named with its cost: it opens
+ * every Runtime route, admin routes included in local-open mode, to that
+ * origin (and the dev, preview and Tauri origins are shared with other apps).
  */
 export function corsHint(origin: string = viewerOrigin()): string {
     return (
         `if the producer is running, allow ${origin}: Sonder Runtime lists it in SONDER_OBSERVATORY_ORIGINS ` +
-        `(or SONDER_CORS_ORIGINS on runtimes without the telemetry-scoped setting); ` +
-        `Sonder-Inference takes --cors-origin ${origin}`
+        `(telemetry routes only; on runtimes without that setting SONDER_CORS_ORIGINS works too, but it also ` +
+        `allows that origin to call admin routes); Sonder-Inference takes --cors-origin ${origin}`
     );
+}
+
+type BoundedRead = { ok: true; text: string } | { ok: false; error: string };
+
+/** Reads a response body as text, refusing more than `limit` bytes. */
+async function readBoundedText(response: Response, limit: number): Promise<BoundedRead> {
+    const tooLarge = { ok: false as const, error: `larger than ${Math.round(limit / 1024)} KiB` };
+    const declared = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > limit) {
+        await response.body?.cancel().catch(() => undefined);
+        return tooLarge;
+    }
+    if (!response.body) {
+        const text = await response.text();
+        return new TextEncoder().encode(text).length > limit ? tooLarge : { ok: true, text };
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let size = 0;
+    let text = "";
+    for (;;) {
+        const { value, done } = await reader.read();
+        if (done) {
+            break;
+        }
+        size += value.byteLength;
+        if (size > limit) {
+            await reader.cancel().catch(() => undefined);
+            return tooLarge;
+        }
+        text += decoder.decode(value, { stream: true });
+    }
+    return { ok: true, text: text + decoder.decode() };
 }
 
 async function readErrorCode(response: Response): Promise<string | null> {
     try {
-        const body = (await response.json()) as { error?: { code?: unknown } };
+        const read = await readBoundedText(response, 4096);
+        if (!read.ok) {
+            return null;
+        }
+        const body = JSON.parse(read.text) as { error?: { code?: unknown } };
         return typeof body?.error?.code === "string" ? body.error.code : null;
     } catch {
         return null;
@@ -121,12 +164,16 @@ export async function fetchDiscovery(url: string, options: DiscoveryFetchOptions
     try {
         let response: Response;
         try {
-            response = await fetchImpl(url, { headers, signal: controller.signal, cache: "no-store" });
+            response = await fetchImpl(url, { headers, signal: controller.signal, cache: "no-store", redirect: NO_REDIRECTS });
         } catch (error) {
             if ((error as { name?: string })?.name === "AbortError") {
                 return fail(`discovery timed out after ${timeoutMs} ms at ${url}`);
             }
             return fail(`could not reach ${url} (${(error as Error)?.message ?? String(error)}); ${corsHint()}`, null, true);
+        }
+        if (isRedirect(response)) {
+            await response.body?.cancel().catch(() => undefined);
+            return fail(`discovery at ${url}: ${REDIRECT_REFUSED}`, response.status || null);
         }
         if (response.status === 401) {
             return fail(
@@ -154,8 +201,15 @@ export async function fetchDiscovery(url: string, options: DiscoveryFetchOptions
         }
         let body: unknown;
         try {
-            body = await response.json();
-        } catch {
+            const read = await readBoundedText(response, MAX_DISCOVERY_BYTES);
+            if (!read.ok) {
+                return fail(`the discovery document at ${url} is ${read.error}; refused`, response.status);
+            }
+            body = JSON.parse(read.text);
+        } catch (error) {
+            if ((error as { name?: string })?.name === "AbortError") {
+                return fail(`discovery timed out after ${timeoutMs} ms at ${url}`);
+            }
             return fail(`the discovery document at ${url} is not JSON`, response.status);
         }
         const parsed = parseDiscovery(body);
@@ -226,7 +280,7 @@ export function selectStream(
         }
         return { ok: true, url: resolved.toString(), transport, message: null };
     }
-    const wanted = forced ? `a ${forced} stream` : "a usable stream";
+    const wanted = forced ? `${forced} stream` : "usable stream";
     return {
         ok: false,
         url: null,

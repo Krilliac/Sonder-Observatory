@@ -11,6 +11,8 @@ import {
     probeProducer,
     type ProducerConnection,
 } from "../../../src/ingest/live/manager";
+import type { LiveIngestClient } from "../../../src/ingest/live/client";
+import { connectLiveSession } from "../../../src/ingest/live/session";
 import { producerState } from "../../../src/ingest/live/status";
 import type { ProducerDiscovery } from "../../../src/protocol/discovery";
 import type { ObservatoryEvent } from "../../../src/protocol/events";
@@ -20,6 +22,7 @@ import type { WebSocketLike } from "../../../src/transport/live";
 interface Call {
     url: string;
     headers: Record<string, string>;
+    redirect: RequestRedirect | undefined;
 }
 
 function event(instance: string, name: string, role: string, seq: number, extra: Partial<ObservatoryEvent> = {}): ObservatoryEvent {
@@ -81,13 +84,19 @@ function fakeFetch(routes: Record<string, Route>) {
     const calls: Call[] = [];
     const fetch = async (input: string, init?: RequestInit): Promise<Response> => {
         const headers = { ...(init?.headers as Record<string, string> | undefined) };
-        const call = { url: input, headers };
+        const call = { url: input, headers, redirect: init?.redirect };
         calls.push(call);
         const route = routes[input];
         if (!route) {
             throw new TypeError("Failed to fetch");
         }
-        return route(call, init?.signal ?? undefined);
+        const response = await route(call, init?.signal ?? undefined);
+        const location = response.headers.get("location");
+        if (response.status >= 300 && response.status < 400 && location && (init?.redirect ?? "follow") === "follow") {
+            // What a real fetch does by default: follow, dropping Authorization cross-origin.
+            return fetch(new URL(location, input).toString(), { ...init, headers: {} });
+        }
+        return response;
     };
     return { fetch, calls };
 }
@@ -399,6 +408,57 @@ describe("LiveConnectionManager", () => {
         expect(calls).toEqual([]);
     });
 
+    it("never follows a redirect, so a producer cannot bypass the endpoint policy", async () => {
+        const remote = "http://192.0.2.2:11435";
+        const { fetch, calls } = fakeFetch({
+            [`${RT}/.well-known/sonder-telemetry`]: () =>
+                new Response(null, { status: 302, headers: { location: `${remote}/.well-known/sonder-telemetry` } }),
+            [`${remote}/.well-known/sonder-telemetry`]: () =>
+                Response.json(discoveryDoc("sonder-runtime", "runtime", "rt-remote", [{ transport: "sse", url: "/sse" }])),
+            [`${remote}/sse`]: (_c, signal) => openStream(sse(rtEvents), "text/event-stream", signal),
+            [`${INF}/events/sse`]: () => new Response(null, { status: 307, headers: { location: `${remote}/sse` } }),
+        });
+        const store = new SessionStore();
+        const m = manager(store, { fetch });
+        const viaDiscovery = await m.add({ url: RT, token: "secret" });
+        expect(viaDiscovery.status.state).toBe("failed");
+        expect(viaDiscovery.status.lastError).toMatch(/redirect, which is not followed/);
+        expect(viaDiscovery.identity).toBeNull();
+
+        const viaStream = await m.add({ url: `${INF}/events/sse` });
+        await waitFor(() => m.list()[1]!.status.lastError !== null, "stream redirect refusal");
+        expect(m.list()[1]!.status.lastError).toMatch(/HTTP 307: .*redirect, which is not followed/);
+        expect(viaStream.id).toBeDefined();
+        expect(store.events).toEqual([]);
+        expect(calls.every((c) => c.redirect === "manual")).toBe(true);
+        expect(calls.some((c) => c.url.startsWith(remote))).toBe(false);
+        // A browser reports a manual redirect as an opaque response with status 0.
+        const opaque = Object.defineProperty(new Response(null, { status: 200 }), "type", { value: "opaqueredirect" });
+        const r = await probeProducer(RT, { fetch: async () => opaque });
+        expect(r.error).toMatch(/redirect, which is not followed/);
+    });
+
+    it("refuses a discovery document larger than 64 KiB", async () => {
+        const big = { ...discoveryDoc("sonder-runtime", "runtime", "rt-1"), padding: "x".repeat(70 * 1024) };
+        const body = JSON.stringify(big);
+        const chunked = () =>
+            new Response(
+                new ReadableStream<Uint8Array>({
+                    start(controller) {
+                        controller.enqueue(new TextEncoder().encode(body));
+                        controller.close();
+                    },
+                }),
+                { status: 200, headers: { "content-type": "application/json" } },
+            );
+        const declared = () => new Response(body, { status: 200, headers: { "content-type": "application/json", "content-length": String(body.length) } });
+        for (const route of [chunked, declared]) {
+            const r = await probeProducer(RT, { fetch: fakeFetch({ [`${RT}/.well-known/sonder-telemetry`]: route }).fetch });
+            expect(r.ok).toBe(false);
+            expect(r.error).toMatch(/larger than 64 KiB; refused/);
+        }
+    });
+
     it("refuses a discovered stream on another origin when a token is given", () => {
         const doc = discoveryDoc("sonder-runtime", "runtime", "rt-1", [
             { transport: "sse", url: "https://other.example/events" },
@@ -452,13 +512,44 @@ describe("probeProducer", () => {
         expect(r.error).toMatch(/timed out/);
     });
 
-    it("accepts stream URLs without fetching and applies the policy", async () => {
+    it("checks ws(s) stream URLs against the policy only, without contacting them", async () => {
         const { fetch, calls } = fakeFetch({});
         expect(await probeProducer("ws://127.0.0.1:8765", { fetch })).toMatchObject({ ok: true, streamUrl: "ws://127.0.0.1:8765" });
         expect((await probeProducer("ws://127.0.0.1:8765", { fetch, token: "t" })).ok).toBe(false);
         expect((await probeProducer("http://10.1.1.1/sse", { fetch })).ok).toBe(false);
         expect((await probeProducer(RT, { fetch, token: "has space" })).error).toMatch(/printable ASCII/);
         expect(calls).toEqual([]);
+    });
+
+    it("contacts an http(s) stream URL and hangs up once its headers arrive", async () => {
+        let aborted = false;
+        const { fetch, calls } = fakeFetch({
+            [`${INF}/events/sse`]: (_c, signal) => {
+                signal?.addEventListener("abort", () => (aborted = true));
+                return openStream(sse(infEvents), "text/event-stream", signal);
+            },
+            [`${INF}/missing`]: () => new Response("no", { status: 404 }),
+        });
+        const live = await probeProducer(`${INF}/events/sse`, { fetch, token: "tok" });
+        expect(live).toMatchObject({ ok: true, streamUrl: `${INF}/events/sse`, error: null });
+        expect(aborted).toBe(true);
+        expect(calls[0]!.headers).toMatchObject({ Accept: "text/event-stream", Authorization: "Bearer tok" });
+        expect(await probeProducer(`${INF}/missing`, { fetch })).toMatchObject({ ok: false, corsSuspected: false });
+        expect((await probeProducer(`${INF}/missing`, { fetch })).error).toMatch(/HTTP 404/);
+        const dead = await probeProducer("http://127.0.0.1:9/sse", { fetch });
+        expect(dead).toMatchObject({ ok: false, corsSuspected: true });
+        expect(dead.error).toMatch(/could not reach/);
+    });
+
+    it("words stream selection failures plainly and warns about the global Runtime allowlist", async () => {
+        const doc = discoveryDoc("sonder-runtime", "runtime", "rt-1", [{ transport: "ndjson", url: "/n" }]);
+        const url = "http://127.0.0.1:11435/.well-known/sonder-telemetry";
+        expect(selectStream(doc, url, { transport: "sse" }).message).toBe("the producer offers no sse stream");
+        expect(selectStream({ ...doc, streams: [{ transport: "websocket", url: "/ws" }] }, url, { hasToken: true }).message).toBe(
+            "the producer offers no usable stream (the websocket stream cannot carry a bearer token)",
+        );
+        const r = await probeProducer(RT, { fetch: fakeFetch({}).fetch });
+        expect(r.error).toMatch(/SONDER_CORS_ORIGINS works too, but it also allows that origin to call admin routes/);
     });
 });
 
@@ -488,5 +579,52 @@ describe("producer URL classification and presets", () => {
         expect(["idle", "connecting", "open", "reconnecting", "closed", "failed"].map((state) =>
             producerState({ state: state as Parameters<typeof producerState>[0]["state"] }),
         )).toEqual(["disconnected", "connecting", "live", "reconnecting", "disconnected", "failed"]);
+    });
+});
+
+describe("connectLiveSession with a producer base URL (single-URL and desktop --connect path)", () => {
+    const clients: LiveIngestClient[] = [];
+    afterEach(async () => {
+        await Promise.all(clients.splice(0).map((c) => c.stop()));
+    });
+    const connect = (store: SessionStore, url: string, fetch: ReturnType<typeof fakeFetch>["fetch"], headers?: Record<string, string>) => {
+        const client = connectLiveSession(store, { url, fetch, headers, backoff: { initialMs: 5, maxMs: 10 } });
+        clients.push(client);
+        return client;
+    };
+
+    it("resolves the base URL through discovery and streams from the SSE stream", async () => {
+        const { fetch, calls } = fakeFetch(runtimeRoutes());
+        const store = new SessionStore();
+        const client = connect(store, RT, fetch, { Authorization: "Bearer tok" });
+        await waitFor(() => store.events.length === 2, "events");
+        expect(calls.map((c) => c.url)).toEqual([`${RT}/.well-known/sonder-telemetry`, `${RT}/v1/observability/events`]);
+        expect(calls.every((c) => c.headers.Authorization === "Bearer tok")).toBe(true);
+        expect(client.status).toMatchObject({ state: "open", transport: "sse", url: RT });
+    });
+
+    it("retries an unreachable producer and fails on a refused discovery document", async () => {
+        const down = fakeFetch({});
+        const retrying = connect(new SessionStore(), RT, down.fetch);
+        await waitFor(() => down.calls.length >= 2, "a discovery retry");
+        expect(retrying.status.state).not.toBe("failed");
+        expect(retrying.status.lastError).toMatch(/could not reach/);
+
+        const refused = fakeFetch({
+            [`${RT}/.well-known/sonder-telemetry`]: () =>
+                Response.json({ ...discoveryDoc("sonder-runtime", "runtime", "rt-1"), schema: "sonder.telemetry.producer/2" }),
+        });
+        const client = connect(new SessionStore(), RT, refused.fetch);
+        await waitFor(() => client.status.state === "failed", "failed");
+        expect(client.status.lastError).toMatch(/unsupported discovery schema major/);
+        expect(refused.calls).toHaveLength(1);
+    });
+
+    it("opens a stream URL directly, as before", async () => {
+        const { fetch, calls } = fakeFetch(inferenceRoutes());
+        const store = new SessionStore();
+        connect(store, `${INF}/events/sse`, fetch);
+        await waitFor(() => store.events.length === 2, "events");
+        expect(calls.map((c) => c.url)).toEqual([`${INF}/events/sse`]);
     });
 });
