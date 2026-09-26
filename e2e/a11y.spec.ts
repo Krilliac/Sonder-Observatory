@@ -3,19 +3,13 @@ import { expect, test } from "@playwright/test";
 import { openFixture } from "./helpers";
 
 /**
- * axe-core WCAG 2.x A/AA scan. Known violations (documented in
- * docs/integration/e2e.md, "UI bugs found") are allowed so the suite
- * stays green while they are fixed in their owning branches; any NEW rule
- * violation fails the test. Remove entries here as they are fixed.
+ * axe-core WCAG 2.x A/AA scan. The allowlist is empty: the findings-list ARIA
+ * and selected-row contrast violations found in #12 were fixed in
+ * feat/a11y-fixes (docs/integration/e2e.md). If a violation must ever be
+ * tolerated temporarily, add it here with a target pattern and a note; it is
+ * matched by rule AND by every failing element, so anything new still fails.
  */
-const KNOWN_VIOLATIONS: Record<string, { targets: RegExp; note: string }> = {
-    // src/diagnostics/panel.ts: <ul role="listbox"> > <li> > <button role="option">.
-    "aria-required-children": { targets: /\.diag-findings/, note: "listbox contains <li> instead of options" },
-    "aria-required-parent": { targets: /diag-finding/, note: "option is not a direct child of the listbox" },
-    listitem: { targets: /\.diag-findings > li/, note: "<li> whose parent has role=listbox" },
-    // Muted text (#8a9ab3) on the selected-row/finding background (#1a325a) is 4.46:1 (< 4.5:1).
-    "color-contrast": { targets: /(\.selected.*> \.muted|\.muted.*\.selected)/, note: "muted text on selected background" },
-};
+const KNOWN_VIOLATIONS: Record<string, { targets: RegExp; note: string }> = {};
 
 const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"];
 

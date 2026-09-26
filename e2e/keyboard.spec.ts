@@ -52,14 +52,14 @@ test.describe("keyboard navigation", () => {
         const findings = page.locator("#view-diagnostics .diag-finding");
         await findings.first().focus();
         await page.keyboard.press("ArrowDown"); // nothing selected -> first
-        await expect(findings.nth(0)).toHaveAttribute("aria-selected", "true");
+        await expect(findings.nth(0)).toHaveAttribute("aria-current", "true");
         if ((await findings.count()) > 1) {
             await page.keyboard.press("ArrowDown");
-            await expect(findings.nth(1)).toHaveAttribute("aria-selected", "true");
+            await expect(findings.nth(1)).toHaveAttribute("aria-current", "true");
             // Focus survives the re-render and stays on the selected finding.
             await expect(findings.nth(1)).toBeFocused();
             await page.keyboard.press("ArrowUp");
-            await expect(findings.nth(0)).toHaveAttribute("aria-selected", "true");
+            await expect(findings.nth(0)).toHaveAttribute("aria-current", "true");
         }
         await page.keyboard.press("Escape");
         await expect(page.locator("#view-diagnostics .diag-finding.selected")).toHaveCount(0);
@@ -81,18 +81,57 @@ test.describe("keyboard navigation", () => {
         await expect(page.locator("#view-agents g.topology-node[aria-pressed=true]")).toHaveCount(0);
     });
 
-    // Known bug (docs/integration/e2e.md, "UI bugs" #1): TopologyPanel.render()
-    // replaces the whole SVG, so the focused node is detached and focus falls
-    // back to <body>; Tab + Enter + Escape therefore does not clear the
-    // selection. test.fail() flips to an error once this is fixed, so remove it then.
+    // Regression test for the former "UI bugs" #1 (docs/integration/e2e.md):
+    // TopologyPanel re-renders its SVG but restores focus to the same node.
     test("topology keeps focus on the node after Enter so Escape clears", async ({ page }) => {
-        test.fail(true, "known bug: topology re-render drops keyboard focus");
         await openFixture(page, "view=agents");
-        await page.locator("#view-agents g.topology-node").first().focus();
+        const first = page.locator("#view-agents g.topology-node").first();
+        const id = await first.getAttribute("data-topo-id");
+        await first.focus();
         await page.keyboard.press("Enter");
-        await expect(page.locator("#view-agents g.topology-node").first()).toBeFocused({ timeout: 2_000 });
+        const node = page.locator(`#view-agents g.topology-node[data-topo-id="${id}"]`);
+        await expect(node).toHaveAttribute("aria-pressed", "true");
+        await expect(node).toBeFocused();
         await page.keyboard.press("Escape");
-        await expect(page.locator("#view-agents g.topology-node[aria-pressed=true]")).toHaveCount(0, { timeout: 2_000 });
+        await expect(page.locator("#view-agents g.topology-node[aria-pressed=true]")).toHaveCount(0);
+        await expect(node).toBeFocused();
+        // Focus also survives cursor-driven re-renders (scrub without moving focus).
+        const before = await page.locator("#view-agents svg.topology-svg").elementHandle();
+        await page.evaluate(() => {
+            const scrubber = document.getElementById("scrubber") as HTMLInputElement;
+            scrubber.value = "900";
+            scrubber.dispatchEvent(new Event("input", { bubbles: true }));
+        });
+        await expect(page.locator("#follow-check")).not.toBeChecked();
+        expect(await before!.evaluate((el) => el.isConnected)).toBe(false); // SVG was replaced
+        await expect(node).toBeFocused();
+    });
+
+    test("analysis tabs follow the WAI-ARIA tabs keyboard pattern", async ({ page }) => {
+        await openFixture(page);
+        const diag = page.getByRole("tab", { name: "Diagnostics" });
+        const agents = page.getByRole("tab", { name: "Agents" });
+        // Roving tabindex: only the active tab is a Tab stop.
+        await expect(diag).toHaveAttribute("tabindex", "0");
+        await expect(agents).toHaveAttribute("tabindex", "-1");
+        await diag.focus();
+        await page.keyboard.press("ArrowRight");
+        await expect(agents).toBeFocused();
+        await expect(agents).toHaveAttribute("aria-selected", "true");
+        await expect(agents).toHaveAttribute("tabindex", "0");
+        await expect(diag).toHaveAttribute("tabindex", "-1");
+        await expect(page.locator("#view-agents")).toBeVisible();
+        await page.keyboard.press("ArrowRight"); // wraps
+        await expect(diag).toBeFocused();
+        await expect(diag).toHaveAttribute("aria-selected", "true");
+        await page.keyboard.press("ArrowLeft"); // wraps back
+        await expect(agents).toHaveAttribute("aria-selected", "true");
+        await page.keyboard.press("Home");
+        await expect(diag).toBeFocused();
+        await expect(page.locator("#view-diagnostics")).toBeVisible();
+        await page.keyboard.press("End");
+        await expect(agents).toBeFocused();
+        await expect(page.locator("#view-diagnostics")).toBeHidden();
     });
 
     test("Tab order reaches the main controls", async ({ page }) => {
