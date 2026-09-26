@@ -8,7 +8,8 @@ import { loadRecording, RECORDING_EXTENSION, serializeRecording } from "../recor
 import { ReplayCursor } from "../replay/controller";
 import { SessionStore } from "../replay/session";
 import { TopologyPanel } from "../topology";
-import { checkEndpoint, DEFAULT_ENDPOINT, LiveConnection, type ConnectionState } from "../transport/live";
+import { connectLiveSession, describeStatus, resolveEndpoint, type LiveIngestClient, type LiveIngestStatus } from "../ingest/live";
+import { DEFAULT_ENDPOINT } from "../transport/live";
 import { byId, h, svg } from "./dom";
 import { fmtBytes, fmtMs, fmtPct, fmtRate, fmtRelNs, summarizeAttributes } from "./format";
 import type { ObservatoryPanel } from "./panels";
@@ -26,9 +27,12 @@ export class ObservatoryApp {
     private readonly root: HTMLElement;
     private readonly store = new SessionStore();
     private cursor = new ReplayCursor([]);
-    private readonly live: LiveConnection;
-    private connState: ConnectionState = "disconnected";
-    private connDetail = "";
+    /** Live ingest client (src/ingest/live); null when not connected. */
+    private live: LiveIngestClient | null = null;
+    private unsubscribeLive: (() => void) | null = null;
+    private liveStatus: LiveIngestStatus | null = null;
+    /** Endpoint validation error from the last Connect attempt. */
+    private liveError: string | null = null;
     private follow = true;
     private playing = false;
     private speed = 1;
@@ -76,22 +80,6 @@ export class ObservatoryApp {
             },
             relativeTime: (event) => fmtRelNs(this.cursor.relativeTime(event)),
         });
-        this.live = new LiveConnection({
-            onEvents: (events) => {
-                this.store.append(events);
-                this.rebuildCursor();
-                this.queueRender();
-            },
-            onRejected: (lines) => {
-                this.store.addRejected(lines);
-                this.queueRender();
-            },
-            onState: (state, detail) => {
-                this.connState = state;
-                this.connDetail = detail ?? "";
-                this.queueRender();
-            },
-        });
     }
 
     start(params: URLSearchParams): void {
@@ -112,6 +100,17 @@ export class ObservatoryApp {
         this.render();
     }
 
+    /** Loads recording text as a file source (desktop native open and recent menu). */
+    openRecordingText(text: string, label: string): void {
+        this.disconnect();
+        this.loadText(text, "file", label);
+    }
+
+    /** Connects to a live endpoint (desktop `--connect` launch argument). */
+    connectLive(url: string): void {
+        this.connect(url);
+    }
+
     // ---------------------------------------------------------------- layout
 
     private layout(endpoint: string): HTMLElement {
@@ -128,10 +127,10 @@ export class ObservatoryApp {
                 h(
                     "div",
                     { class: "controls" },
-                    h("label", { for: "ws-url", class: "sr-only", text: "WebSocket endpoint" }),
-                    h("input", { id: "ws-url", type: "text", value: endpoint, spellcheck: "false", size: 26, "aria-label": "WebSocket endpoint" }),
+                    h("label", { for: "ws-url", class: "sr-only", text: "Live endpoint (ws://, wss://, http:// or https://)" }),
+                    h("input", { id: "ws-url", type: "text", value: endpoint, spellcheck: "false", size: 26, "aria-label": "Live endpoint (ws://, wss://, http:// or https://)" }),
                     h("button", { id: "connect-btn", type: "button", text: "Connect" }),
-                    h("span", { id: "conn-state", class: "conn", role: "status" }),
+                    h("span", { id: "live-status", class: "badge conn", role: "status", "data-tone": "idle" }),
                     h("label", { class: "button-like", for: "file-input", text: "Open recording…" }),
                     h("input", { id: "file-input", type: "file", accept: `${RECORDING_EXTENSION},.ndjson,.jsonl,.json`, class: "sr-only" }),
                     h("button", { id: "fixture-btn", type: "button", text: "Load synthetic fixture" }),
@@ -224,8 +223,9 @@ export class ObservatoryApp {
 
     private bindControls(): void {
         byId<HTMLButtonElement>("connect-btn").addEventListener("click", () => {
-            if (this.connState === "connected" || this.connState === "connecting") {
-                this.live.disconnect();
+            if (this.liveActive()) {
+                this.disconnect();
+                this.render();
             } else {
                 this.connect(byId<HTMLInputElement>("ws-url").value.trim());
             }
@@ -237,13 +237,13 @@ export class ObservatoryApp {
                 return;
             }
             void file.text().then((text) => {
-                this.live.disconnect();
+                this.disconnect();
                 this.loadText(text, "file", file.name);
                 input.value = "";
             });
         });
         byId<HTMLButtonElement>("fixture-btn").addEventListener("click", () => {
-            this.live.disconnect();
+            this.disconnect();
             this.loadText(fixtureText, "fixture", "synthetic fixture (fixtures/synthetic-session.ndjson)");
         });
         byId<HTMLButtonElement>("save-btn").addEventListener("click", () => this.saveRecording());
@@ -292,14 +292,53 @@ export class ObservatoryApp {
 
     // --------------------------------------------------------------- actions
 
+    /** Connects with src/ingest/live: ws(s):// uses WebSocket, http(s):// uses SSE or NDJSON. */
     private connect(url: string): void {
         byId<HTMLInputElement>("ws-url").value = url;
-        this.store.reset("live", url);
-        this.rebuildCursor();
+        this.disconnect();
+        const endpoint = resolveEndpoint(url);
+        if (!endpoint.ok) {
+            this.liveError = endpoint.message ?? "invalid endpoint";
+            this.render();
+            return;
+        }
+        this.liveError = null;
         this.selectedId = null;
         this.setFollow(true);
-        this.live.connect(url);
+        // connectLiveSession resets the store to a live source, then appends in batches.
+        const client = connectLiveSession(this.store, {
+            url,
+            onAppend: () => {
+                this.rebuildCursor();
+                this.queueRender();
+            },
+        });
+        this.live = client;
+        this.unsubscribeLive = client.subscribe((status) => {
+            this.liveStatus = status;
+            this.queueRender();
+        });
+        this.rebuildCursor();
         this.render();
+    }
+
+    /** Stops the live client (no reconnect). Keeps the events received so far. */
+    private disconnect(): void {
+        const client = this.live;
+        if (!client) {
+            return;
+        }
+        this.live = null;
+        this.unsubscribeLive?.();
+        this.unsubscribeLive = null;
+        this.liveStatus = { ...client.status, state: "closed", retryInMs: null };
+        void client.stop();
+    }
+
+    /** True while the client is connecting, open or waiting to reconnect. */
+    private liveActive(): boolean {
+        const state = this.live?.status.state;
+        return state !== undefined && state !== "closed" && state !== "failed";
     }
 
     private loadText(text: string, source: "fixture" | "file", label: string): void {
@@ -504,15 +543,21 @@ export class ObservatoryApp {
         byId("synthetic-banner").hidden = !synthetic;
         byId("capture-badge").textContent = `text capture: ${s.capturePolicy}`;
         const connBtn = byId<HTMLButtonElement>("connect-btn");
-        connBtn.textContent = this.connState === "connected" || this.connState === "connecting" ? "Disconnect" : "Connect";
-        const stateEl = byId("conn-state");
-        stateEl.textContent = `${this.connState}${this.connDetail && this.connState !== "connected" ? ` (${this.connDetail})` : ""}`;
-        stateEl.dataset.state = this.connState;
+        connBtn.textContent = this.liveActive() ? "Disconnect" : "Connect";
+        const statusEl = byId("live-status");
+        const view = this.liveError
+            ? { label: "invalid endpoint", tone: "error", detail: this.liveError }
+            : this.liveStatus
+              ? describeStatus(this.liveStatus)
+              : { label: "not connected", tone: "idle", detail: "No live connection" };
+        statusEl.textContent = view.label;
+        statusEl.dataset.tone = view.tone;
+        statusEl.title = view.detail;
         const save = byId<HTMLButtonElement>("save-btn");
         save.disabled = s.events.length === 0;
         save.textContent = s.source === "live" ? `Save live session (${s.events.length} events)` : `Save recording (${RECORDING_EXTENSION})`;
         byId<HTMLButtonElement>("play-btn").textContent = this.playing ? "Pause" : "Play";
-        const endpoint = checkEndpoint(byId<HTMLInputElement>("ws-url").value.trim());
+        const endpoint = resolveEndpoint(byId<HTMLInputElement>("ws-url").value.trim());
         byId("ws-url").title = endpoint.message ?? "loopback endpoint";
     }
 
@@ -533,7 +578,7 @@ export class ObservatoryApp {
         if (s.manifest && !s.manifest.complete) {
             items.push("recording manifest marks this session as incomplete");
         }
-        const endpoint = checkEndpoint(byId<HTMLInputElement>("ws-url").value.trim());
+        const endpoint = resolveEndpoint(byId<HTMLInputElement>("ws-url").value.trim());
         if (s.source === "live" && endpoint.ok && !endpoint.loopback) {
             items.push(endpoint.message ?? "remote endpoint");
         }
