@@ -37,10 +37,30 @@ export const NULLABLE_ID_FIELDS = [
 
 export type NullableIdField = (typeof NULLABLE_ID_FIELDS)[number];
 
+/** Required producer fields, in schema order. */
+export const PRODUCER_REQUIRED_FIELDS = ["name", "version", "node_id"] as const;
+
+/**
+ * Optional producer fields the schema declares (additive, live producer
+ * protocol v1): `instance_id` is a non-empty string, `role` a string
+ * (known values in KNOWN_PRODUCER_ROLES) and `synthetic` a boolean.
+ */
+export const PRODUCER_OPTIONAL_FIELDS = { instance_id: "string", role: "string", synthetic: "boolean" } as const;
+
+/** Documented producer roles; other role strings are kept, not rejected. */
+export const KNOWN_PRODUCER_ROLES = ["inference", "runtime", "fixture"] as const;
+export type ProducerRole = (typeof KNOWN_PRODUCER_ROLES)[number];
+
 export interface Producer {
     name: string;
     version: string;
     node_id: string;
+    /** Producer process instance; event ids are `<instance_id>-<sequence>`. */
+    instance_id?: string;
+    /** "inference" | "runtime" | "fixture" (unknown strings allowed). */
+    role?: string;
+    /** True only for synthetic data (mock backends, fixtures). */
+    synthetic?: boolean;
     /** Additional producer properties are allowed by the schema. */
     [extra: string]: unknown;
 }

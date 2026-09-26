@@ -1,5 +1,7 @@
 import {
     NULLABLE_ID_FIELDS,
+    PRODUCER_OPTIONAL_FIELDS,
+    PRODUCER_REQUIRED_FIELDS,
     SAMPLING_LEVELS,
     SCHEMA_ID,
     type ObservatoryEvent,
@@ -87,11 +89,22 @@ export function validateEvent(value: unknown): ValidationResult {
     } else if (!isPlainObject(value.producer)) {
         issues.push({ path: "producer", message: "must be an object" });
     } else {
-        for (const key of ["name", "version", "node_id"] as const) {
+        for (const key of PRODUCER_REQUIRED_FIELDS) {
             if (!(key in value.producer)) {
                 issues.push({ path: `producer.${key}`, message: "is required" });
             } else if (typeof value.producer[key] !== "string") {
                 issues.push({ path: `producer.${key}`, message: "must be a string" });
+            }
+        }
+        for (const [key, type] of Object.entries(PRODUCER_OPTIONAL_FIELDS)) {
+            if (!(key in value.producer)) {
+                continue;
+            }
+            const field = value.producer[key];
+            if (typeof field !== type) {
+                issues.push({ path: `producer.${key}`, message: `must be a ${type}` });
+            } else if (key === "instance_id" && field === "") {
+                issues.push({ path: `producer.${key}`, message: "must be a non-empty string" });
             }
         }
     }
