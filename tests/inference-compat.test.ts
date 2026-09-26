@@ -113,6 +113,71 @@ describe("Sonder-Inference fixture", () => {
     });
 });
 
+/**
+ * Sonder-Inference 912503a: a recorded 46-event run of the CLI with the MOCK
+ * backend (`sonder-infer` generate, mock:tiny, 8 tokens). Synthetic: the mock
+ * backend performs no inference, so the numbers are not a quality or
+ * performance signal. 912503a predates producer.role / producer.synthetic
+ * (contract section 7.1); tests/README.md labels the file.
+ */
+describe("Sonder-Inference 912503a mock run (recorded)", () => {
+    const text912 = readFileSync(new URL("./fixtures/sonder-inference-912503a.jsonl", import.meta.url), "utf8");
+    const load912 = (): ObservatoryEvent[] => {
+        const parsed = parseNdjson(text912);
+        expect(parsed.rejected).toEqual([]);
+        return orderEvents(parsed.events).events;
+    };
+
+    it("validates all 46 envelopes from one producer instance without gaps", () => {
+        const parsed = parseNdjson(text912);
+        expect(parsed.rejected).toEqual([]);
+        expect(parsed.events).toHaveLength(46);
+        const ordered = orderEvents(parsed.events);
+        expect(ordered.gaps).toEqual([]);
+        expect(ordered.duplicates).toBe(0);
+        expect(new Set(parsed.events.map(producerInstance))).toEqual(new Set(["tel-cd5730d4b371a49d"]));
+        expect(ordered.events.map((e) => e.sequence)).toEqual([...Array(46).keys()]);
+    });
+
+    it("is a mock-backend run", () => {
+        const events = load912();
+        const load = events.find((e) => e.event_type === "model.load.completed")!;
+        expect(load.attributes).toMatchObject({ backend: "mock", model: "mock:tiny" });
+        expect(events.find((e) => e.event_type === "session.created")!.attributes.text_capture).toBe("off");
+        // 912503a has no producer.role / producer.synthetic yet (added by the serve work, contract 7.1).
+        expect(events.every((e) => !("role" in e.producer) && !("synthetic" in e.producer))).toBe(true);
+    });
+
+    it("derives one completed request with streamed and backend-reported tokens", () => {
+        const m = deriveMetrics(load912());
+        expect(m.requests).toHaveLength(1);
+        expect(m.requests[0]).toMatchObject({ outcome: "completed", producer: "sonder-inference", tokens: 8, backendTokens: 8 });
+        expect(m.tokens.total).toBe(8);
+        expect(m.tokens.backendReported).toBe(8);
+        expect(m.requestLatencyByProducer["sonder-inference"]!.count).toBe(1);
+        expect(m.timeToFirstToken.count).toBe(1);
+        expect(m.droppedEvents).toBe(0);
+        expect(m.errors.total).toBe(0);
+    });
+
+    it("classifies the scheduler and engine events and raises no diagnostics", () => {
+        const events = load912();
+        const byType = new Map(events.map((e) => [e.event_type, classifyEvent(e)]));
+        expect(byType.get("engine.started")).toBe("session");
+        expect(byType.get("request.completed")).toBe("request");
+        expect(runDiagnostics(events)).toEqual([]);
+    });
+
+    it("replays through a SessionStore and records the producer", () => {
+        const store = new SessionStore();
+        store.reset("file", "sonder-inference-912503a.jsonl");
+        store.append(parseNdjson(text912).events);
+        expect(store.events).toHaveLength(46);
+        expect(store.gaps).toEqual([]);
+        expect(store.capturePolicy).toBe("off");
+    });
+});
+
 describe("Ollama timing helper shapes (ollama_telemetry.cpp)", () => {
     const ctx = { session_id: "sess-1", request_id: "req-1", model_instance_id: "model-1" };
     const load = (ms: number) =>
