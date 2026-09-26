@@ -130,15 +130,16 @@ button:disabled {
     color: var(--muted);
 }
 
-.conn[data-state="connected"]::before {
+/* #live-status: data-tone comes from describeStatus() in src/ingest/live. */
+.conn[data-tone="ok"]::before {
     color: var(--semantic-healthy, #10b981);
 }
 
-.conn[data-state="connecting"]::before {
+.conn[data-tone="warn"]::before {
     color: var(--semantic-warning, #f59e0b);
 }
 
-.conn[data-state="error"]::before {
+.conn[data-tone="error"]::before {
     color: var(--semantic-error, #ef4444);
 }
 
