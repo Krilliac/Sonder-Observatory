@@ -18,6 +18,10 @@ import { SEVERITY_RANK, resolveConfig } from "./types";
 import { sortEvents } from "./util";
 
 export * from "./types";
+export { FindingsController } from "./controller";
+export type { DiagnosticsSelectionHost, FindingsFilter } from "./controller";
+export { renderFindingsPanel } from "./panel";
+export type { FindingsPanelOptions } from "./panel";
 
 export const DETECTORS: Record<FindingKind, Detector> = {
     "budget-pressure": detectBudgetPressure,
