@@ -6,9 +6,9 @@
 - [x] define architecture and telemetry taxonomy
 - [x] define Flutter/standalone integration concept
 - [x] capture UX/design direction
-- [x] settle protocol package ownership between Runtime/Inference/Observatory (Observatory owns the envelope and discovery shapes in `protocol/`; each producer owns its vocabulary doc; see [decisions](DECISIONS.md), pending owner review)
+- [ ] settle protocol package ownership between Runtime/Inference/Observatory. Proposed, pending owner review: Observatory owns the envelope and discovery shapes in `protocol/`; each producer owns its vocabulary doc; see [decisions](DECISIONS.md).
 - [x] choose recording extension/container name (provisional: `.sobs` NDJSON + manifest, see [recording format](RECORDING_FORMAT.md))
-- [x] define compatibility/version policy (additive within a major; renames/removals bump the major and land in `protocol/` first; see [protocol README](../protocol/README.md))
+- [ ] define compatibility/version policy. Proposed, pending owner review: additive within a major; renames/removals and new closed-enum values in discovery bump the major and land in `protocol/` first; see [protocol README](../protocol/README.md).
 
 ## Milestone 1 — smallest useful Observatory
 

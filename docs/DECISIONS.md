@@ -220,6 +220,29 @@ questions that were open below.
   sequence gaps).
 - **Conformance.** `tests/conformance/` checks a running producer
   (`SONDER_CONFORMANCE_URLS`); the fake producer's `--role` modes conform.
+  CORS answers must echo the origin exactly with `Vary: Origin` (a wildcard
+  fails), the first SSE line must be `retry: 2000`, and
+  `SONDER_CONFORMANCE_DENIED_ORIGIN` checks that another origin gets 403
+  `forbidden_origin`.
+- **Envelope producer fields.** Declaring `producer.instance_id`, `role` and
+  `synthetic` in the envelope schema is a deliberate v1 tightening, not a
+  purely additive change: before, any value was accepted as an additional
+  property; now `null` ("not stated") or the declared type is accepted and
+  any other type rejects the event. Producers must honour these types.
+- **No redirects.** Discovery and stream requests never follow redirects,
+  so the endpoint policy (loopback-only plain http/ws, no credentials or
+  token parameters) cannot be bypassed by a producer redirecting elsewhere.
+  Discovery documents are capped at 64 KiB.
+- **Single-URL path resolves discovery.** `LiveIngestClient` (and so
+  `connectLiveSession` and the desktop `--connect` launch through the
+  current renderer) resolves a base or discovery URL through the discovery
+  document, so a Runtime or Inference base URL works before the renderer
+  moves to `LiveConnectionManager`.
+- **Tokens and argv.** Only file-sourced tokens (`--token-file` /
+  `--capability-file`) authenticate launched URLs; the legacy argv
+  `--capability` is passed through for old frontends but never used as a
+  bearer token. Tokens are printable ASCII without spaces, checked the same
+  way in the shell and in the manager.
 
 ## Open questions
 
@@ -231,3 +254,9 @@ questions that were open below.
 - A discovery field for per-subscriber loss counts (for example
   `subscriber_dropped_events`); not pinned by the v1 contract.
 - Cross-host clock alignment (v1 merges producers on one host only).
+- Discovery `producer.role` and `auth.schemes` are closed enums in the pinned
+  contract, so a new producer kind or auth scheme (for example a
+  Runtime-issued telemetry capability) forces `sonder.telemetry.producer/2`.
+  Owners to decide: keep them closed (new values need /2), or relax them to
+  strings with known values documented, consumers ignoring unknown schemes
+  and roles.

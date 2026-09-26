@@ -220,7 +220,10 @@ and correlates their events itself; no producer relays another's telemetry.
 
 - Required: `schema`, `producer` (all six fields), `event_schema`, `streams`
   (at least one), `resume`, `auth`, `clock`. `role` is `inference`, `runtime`
-  or `fixture`. Optional: `sampling_level`, `text_capture`, `links`,
+  or `fixture` and `auth.schemes` lists only `bearer`: in v1 both are closed
+  enums, so a document with another role or scheme is refused as a whole, and
+  adding a value needs `sonder.telemetry.producer/2` (an open question for the
+  owners, see docs/DECISIONS.md). Optional: `sampling_level`, `text_capture`, `links`,
   `vocabularies` (event-vocabulary majors, e.g. `{"sonder.runtime.events": 1}`).
 - Stream URLs are absolute or relative to the discovery URL.
 - Unknown keys are allowed everywhere and ignored.
@@ -237,7 +240,9 @@ A URL given to Observatory is resolved as follows: an http(s) URL with an
 empty path or `/` is a base URL (discovery is fetched from it); a URL ending in
 `/.well-known/sonder-telemetry` is a discovery URL; anything else is a stream
 URL. From discovery Observatory opens SSE, then NDJSON, then WebSocket, unless
-a transport is forced.
+a transport is forced. Observatory does not follow HTTP redirects on
+discovery or stream requests (a redirect is reported as an error), and
+refuses discovery documents over 64 KiB; producers serve both directly.
 
 ### Framing
 
@@ -259,7 +264,11 @@ a transport is forced.
   producer instance from 0. Events dropped before sequencing take no number.
 - `producer.role` (`inference`, `runtime`, `fixture`) and `producer.synthetic`
   (true only for synthetic data such as a mock backend) are additive optional
-  envelope fields; `producer.instance_id` names the sequence stream.
+  envelope fields; `producer.instance_id` names the sequence stream. Each of
+  the three may be absent or `null` ("not stated"; `synthetic: null` counts
+  as not synthetic). Present with another type (for example
+  `"synthetic": "true"`), the event is rejected: the v1 schema declares these
+  types, which were undeclared before (see docs/DECISIONS.md).
 - Instance ids: Inference `tel-…`; Runtime `rt-<12 hex>` per process, with
   process session id `rts-<same hex>`.
 - `mono_ns` is the host monotonic clock (`clock.mono_ns: "host-monotonic"`):

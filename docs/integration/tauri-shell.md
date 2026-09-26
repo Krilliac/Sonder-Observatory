@@ -54,7 +54,7 @@ export interface LaunchInfo {
   connectAll?: string[];      // every validated --connect URL, in order
   connectTokens?: (string | null)[]; // bearer token per connectAll entry; memory only, never log
   session: string | null;
-  capability: string | null;  // token not bound to a URL; keep it in memory and never log it
+  capability: string | null;  // legacy unbound token (file or --capability argv); memory only, never log; not a bearer token source
   open: RecordingGrant | null;
   warnings: string[];         // show these in the UI
 }
@@ -95,6 +95,9 @@ At startup:
    as a bearer token (`launchProducers(info)` builds the
    `LiveConnectionManager.add()` inputs). Launch argument rules: see
    [desktop notes](desktop.md), "Launch arguments for several producers".
+   Until the renderer wiring lands (obs-ux-upgrade), the frontend's
+   `desktopUi.ts` still opens only `info.connect` through the single-URL
+   path (which resolves a base URL through discovery, without a token).
 3. If `info.open` is set, load it. For a folder grant, read `manifest.json`, then `events.ndjson`.
 4. Surface `info.warnings`.
 

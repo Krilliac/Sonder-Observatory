@@ -26,7 +26,9 @@ npx vitest run tests/conformance
 ```
 
 `SONDER_CONFORMANCE_TOKEN` adds `Authorization: Bearer <token>` (never
-printed). `tests/ingest/live/conformance.test.ts` proves the checks pass on
+printed). CORS answers must echo `SONDER_CONFORMANCE_ORIGIN` exactly with
+`Vary: Origin`; `SONDER_CONFORMANCE_DENIED_ORIGIN` (optional) must be refused
+with 403 `forbidden_origin`. The first SSE line must be `retry: 2000`. `tests/ingest/live/conformance.test.ts` proves the checks pass on
 the fake producer and fail on broken producers.
 
 ## Fixtures (all synthetic or mock; none is a quality or performance signal)

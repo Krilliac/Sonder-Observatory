@@ -61,8 +61,9 @@ Settings:
 
 v1 (live producer protocol, docs/TELEMETRY_PROTOCOL.md). Observatory connects
 to each producer directly; Runtime does not relay Inference telemetry. Steps 1
-and 2 are the Sonder Runtime / Flutter side (contract sections 9 and 10,
-implemented in the Runtime repo); steps 3 and 4 are Observatory's
+and 2 are the Sonder Runtime / Flutter side (contract sections 9 and 10; they
+are specified there and are not part of any merged Runtime release this
+document can point to yet); steps 3 and 4 are Observatory's
 (`LiveConnectionManager`, docs/integration/live-ingest.md).
 
 1. The Flutter app reads `GET /v1/sonder/ecosystem` from the runtime (admin
@@ -84,7 +85,13 @@ implemented in the Runtime repo); steps 3 and 4 are Observatory's
      an explanation: producer telemetry is loopback on the runtime host.
 3. For each URL, Observatory fetches `/.well-known/sonder-telemetry`,
    validates it (`sonder.telemetry.producer/1`), and opens the SSE stream
-   (then NDJSON, then WebSocket).
+   (then NDJSON, then WebSocket). Status in this repo:
+   `LiveConnectionManager` does this for every URL it is given, but the
+   renderer does not use the manager yet (producer cards and `connectAll`
+   wiring are the renderer/UX work, obs-ux-upgrade). Until that lands the
+   desktop shell's frontend opens only the first URL (`LaunchInfo.connect`)
+   through the single-URL path, which also resolves a base URL through
+   discovery but sends no token; further URLs and their tokens are ignored.
 4. Each producer replays its retained window, then streams live. Observatory
    merges them in one session and correlates Runtime turns with Inference
    requests by `run_id` and `parent_request_id`.
@@ -102,9 +109,12 @@ sonder-observatory
   plain `ws` / `http` only to loopback; credentials and token query
   parameters are rejected.
 - `--token-file` (alias `--capability-file`) is read once (max 4 KiB,
-  trimmed), kept in memory only, never logged. It binds to the `--connect`
-  it follows and becomes that producer's `Authorization: Bearer` token.
-  Tokens are never passed on the command line or in URLs.
+  trimmed, printable ASCII without spaces), kept in memory only, never
+  logged. It binds to the `--connect` it follows and becomes that producer's
+  `Authorization: Bearer` token. Tokens are never taken from the command
+  line or URLs: the legacy `--capability <token>` argument is passed to the
+  frontend as `capability` for older frontends but never used to
+  authenticate a `--connect` URL.
 - Browser URL parameters (contract section 8.2, renderer work):
   `?connect=` (repeatable), `?ws=` (legacy alias), `?fixture=0`, `?view=`,
   `?theme=`; `?token=` / `?access_token=` are ignored with a visible warning.

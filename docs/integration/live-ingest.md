@@ -2,7 +2,8 @@
 
 Status: implemented in `src/ingest/live/`, tested against
 `scripts/fake-live-producer.mjs` and a fake fetch/WebSocket. The renderer's
-single-URL connect path uses `connectLiveSession`. The multi-producer
+single-URL connect path uses `connectLiveSession`, which resolves a base URL
+through discovery. The multi-producer
 `LiveConnectionManager` below is implemented and tested; wiring it into the
 renderer (producer cards, presets, URL parameters) is the renderer/UX work.
 
@@ -25,13 +26,14 @@ transport (WebSocket | SSE | NDJSON-over-HTTP)
 
 | Concern | Behaviour |
 |---|---|
+| Discovery | A producer base URL (http(s) with an empty path or `/`) or discovery URL is resolved through `/.well-known/sonder-telemetry` first (SSE, then NDJSON, then WebSocket unless `transport` is forced), so the single-URL path accepts the same URLs as the manager. An unreachable producer is retried with backoff; a refused document or a producer without a usable stream is `failed`. `discover: false` skips this (the manager passes it). |
 | Transport choice | Picked by URL. `ws://` / `wss://` uses WebSocket. `http://` / `https://` uses a streaming `fetch`. The response `Content-Type` then decides the parser: `text/event-stream` means SSE, anything else is read as NDJSON lines. A path ending in `/ndjson`, `.ndjson` or `.jsonl`, or `?format=ndjson`, only changes the `Accept` header. `transport: "websocket" \| "sse" \| "ndjson"` forces a transport. |
 | Headers | `headers` (for example `{ Authorization: "Bearer …" }`) are added to HTTP requests. They are never reported in status. A WebSocket URL with an `Authorization` header is refused, because a browser cannot send it on the handshake. |
 | Reconnect | On any close that `stop()` did not cause. Exponential backoff with jitter (defaults: 250 ms initial, x2 per attempt, 10 s cap, 30% jitter). An SSE `retry:` value acts as a floor on the delay. Backoff resets on the first valid event after a connection opens. `maxRetries` counts consecutive attempts that delivered no data; once it is exceeded the state becomes `failed`. |
 | Resume | The client tracks the last event id (the SSE `id:` field, otherwise the `event_id` of the last valid event) and sends it on reconnect: `Last-Event-ID` over HTTP, `?last_event_id=` over WebSocket. A producer that replays from the start is still safe: `SessionStore.append` dedupes by `event_id`. |
 | Backpressure | A fixed-capacity ring buffer (default 20 000) drains to the sink in batches (default 1000 events every 50 ms). HTTP streams stop reading above 75% and resume at 25% (TCP backpressure, no drops). A WebSocket cannot be paused, so it drops on overflow. |
 | Drops | `drop-oldest` by default. Every dropped event is counted in `status.dropped`; drops also show up in the store as sequence `gaps`. Rejected lines go to `store.addRejected` and are counted in `status.rejected`. |
-| HTTP errors | `lastError` names the status with a hint: 401 needs a token, 403 origin/host/token refused, 404 no stream (export disabled?), 429 too many subscribers. |
+| HTTP errors | `lastError` names the status with a hint: 401 needs a token, 403 origin/host/token refused, 404 no stream (export disabled?), 429 too many subscribers. Redirects are not followed (`redirect: "manual"`); a redirect is reported as an error so a producer cannot move the viewer past the endpoint policy. |
 | Endpoint policy | `resolveEndpoint` refuses credentials in the URL, `token` / `access_token` query parameters, and plain `http://` or `ws://` to a non-loopback host. `https://` / `wss://` to a remote host is allowed with a warning. The legacy `checkEndpoint` in `src/transport/live.ts` applies the same rules to ws(s). |
 
 `LiveIngestStatus` has these fields: `state` (`idle | connecting | open |
@@ -73,20 +75,29 @@ await manager.disconnectAll();
 - Discovery documents are validated with `validateDiscovery`
   (`src/protocol/discovery.ts`); another schema major or event schema is
   refused with a message.
-- The store is reset to source `live` once, when the first producer is added
-  over a non-live source. Each producer gets its own `LiveIngestClient`.
+- The store is reset to source `live` once, when the first producer's stream
+  is about to open over a non-live source. A failed or refused `add()`
+  (unreachable, CORS, 404, refused discovery, token over WebSocket, policy)
+  leaves a loaded recording or fixture untouched. Each producer gets its own `LiveIngestClient`.
   `store.sourceLabel` lists the open stream URLs.
 - `ProducerConnection` carries `id`, `url`, `label`, `hasToken`, `streamUrl`,
   `discovery`, `identity` (from discovery, or from the first events of a direct
   stream; it follows a producer restart to the new `instance_id`) and
   `status`.
-- `probeProducer(url, { token })` checks a URL without opening a stream and
-  returns `{ ok, discovery, streamUrl, error, corsSuspected }`.
+- Discovery documents are fetched without following redirects and refused
+  above 64 KiB.
+- `probeProducer(url, { token })` checks a URL without ingesting events and
+  returns `{ ok, discovery, streamUrl, error, corsSuspected }`. Base and
+  discovery URLs fetch and validate discovery; an http(s) stream URL is
+  requested and dropped once its response headers arrive (so a dead stream
+  is not reported as ok); a ws(s) stream URL is only checked against the
+  policy and is not contacted.
   `corsSuspected` is set when the request failed at the network level (what a
   CORS refusal looks like from a page) or the producer answered
   `forbidden_origin`; the message then names the allowlist to change
   (Runtime `SONDER_OBSERVATORY_ORIGINS`, or `SONDER_CORS_ORIGINS` on runtimes
-  without it; Inference `--cors-origin <origin>`). A 401 says a token is
+  without it, with the note that the latter also opens admin routes to that
+  origin; Inference `--cors-origin <origin>`). A 401 says a token is
   needed or was rejected.
 - `LOCAL_PRESETS`: Sonder Runtime `http://127.0.0.1:11435`, Sonder-Inference
   `http://127.0.0.1:11437`, fake producer `http://127.0.0.1:8766/sse`
@@ -112,11 +123,12 @@ chains adapters. Sonder-Inference envelopes validate as they are
 
 ## Fake live producer (`scripts/fake-live-producer.mjs`)
 
-Dev/test only; every event it serves is synthetic. One loopback port serves:
+Dev/test only; everything it serves is labelled synthetic (`producer.synthetic:
+true` on every event, added when the log lacks it). One loopback port serves:
 
 - `GET /.well-known/sonder-telemetry`: a discovery document
 - `ws://127.0.0.1:8766/ws`: NDJSON frames (`--batch` events per frame)
-- `http://127.0.0.1:8766/sse`: `text/event-stream`, `retry:` first, `id:` = `event_id`, `: keepalive` heartbeats
+- `http://127.0.0.1:8766/sse`: `text/event-stream`, `retry: 2000` first (`--retry-ms`), `id:` = `event_id`, `: keepalive` heartbeats
 - `http://127.0.0.1:8766/ndjson`: `application/x-ndjson`, blank-line heartbeats
 
 Options: `--pace timeline|burst`, `--speed`, `--batch`, `--disconnect-after N`,
@@ -128,13 +140,18 @@ Options: `--pace timeline|burst`, `--speed`, `--batch`, `--disconnect-after N`,
   sequences renumbered from 0 and `event_id = <instance_id>-<sequence>`;
   `producer.synthetic` stays true. Resume follows the protocol: an id of this
   instance resumes after its sequence, another instance replays the window,
-  `?since=now` is live only. Without `--role`, events are served unchanged.
+  `?since=now` is live only. Resuming after the last event sends nothing
+  more unless `--loop` is set. Without `--role`, ids, sequences and names are
+  served unchanged.
 - `--token-file PATH`: require `Authorization: Bearer <token>` on every route
   except the CORS preflight (401 with a JSON error otherwise).
 
-It echoes the request `Origin` (dev/test convenience; real producers use an
-exact allowlist) and its preflight allows `Accept, Authorization,
-Cache-Control, Content-Type, Last-Event-ID`. Tests import it as
+CORS follows the producer rules: an exact-match allowlist (the Observatory
+dev, preview and Tauri origins by default; `--cors-origin ORIGIN` adds one),
+an allowed `Origin` is echoed with `Vary: Origin`, another `Origin` gets 403
+`forbidden_origin`, and requests without an `Origin` are unaffected. The
+preflight allows `Accept, Authorization, Cache-Control, Content-Type,
+Last-Event-ID`. Tests import it as
 `startFakeLiveProducer()` on an ephemeral port; types are in
 `scripts/fake-live-producer.d.mts`.
 
@@ -152,13 +169,17 @@ node scripts/fake-live-producer.mjs --role runtime --port 8767 --token-file ./to
   SSE, the adapter hook, `maxRetries`, `stop()`.
 - `tests/ingest/live/manager.test.ts` (fake fetch and WebSocket): base URL →
   discovery → SSE, discovery URL, direct stream URL, forced transport, two
-  producers into one store with one reset, `remove()` keeps events, failed
-  discovery, Authorization only with a token, token + ws refused, plain remote
-  http/ws refused, credentials and token query parameters refused,
-  `probeProducer` messages.
+  producers into one store with one reset, a failed `add()` keeping a loaded
+  recording, `remove()` keeps events, failed discovery, Authorization only
+  with a token, token + ws refused, plain remote http/ws refused, credentials
+  and token query parameters refused, redirects not followed, the 64 KiB
+  discovery cap, `probeProducer` messages and stream probing, and
+  `connectLiveSession` resolving a base URL through discovery.
 - `tests/ingest/live/conformance.test.ts`: the fake producer's role modes,
-  auth, preflight and heartbeats, and the conformance checks passing on it and
-  failing on broken producers.
+  auth, CORS allowlist, preflight, heartbeats, `retry: 2000` and resume after
+  the last event, and the conformance checks passing on it and failing on
+  broken producers (event name, id mismatch, sequence gap, wildcard CORS,
+  wrong retry, a permissive origin policy).
 - `tests/conformance/live-producer.test.ts`: the conformance suite against
   running producers (`SONDER_CONFORMANCE_URLS`; skipped without it).
 
