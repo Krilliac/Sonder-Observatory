@@ -17,9 +17,14 @@
 //!   once (at most 4 KiB, trimmed) and the token is kept in memory only and
 //!   never logged. A token file given right after a `--connect` binds to that
 //!   URL (`connectTokens[i]`), so each producer only ever receives its own
-//!   token. A token not bound to a URL is the `capability`; it is applied to
-//!   the launched http(s) connection only when exactly one http(s) URL was
-//!   given, and never to ws(s) URLs (browsers cannot send it there).
+//!   token. A token file not bound to a URL is the `capability`; it is
+//!   applied to the launched http(s) connection only when exactly one
+//!   http(s) URL was given, and never to ws(s) URLs (browsers cannot send it
+//!   there). Tokens are printable ASCII without spaces (the frontend's rule).
+//! - `--capability <token>` (argv) is kept for older frontends as
+//!   `capability` only. Tokens never come from argv (other local users can
+//!   read a process's command line), so it is never used as a bearer token
+//!   for a `--connect` URL; use `--token-file`.
 //!
 //! Both `--flag value` and `--flag=value` forms work. Invalid values are
 //! dropped with a warning rather than aborting startup so the viewer can still
@@ -48,6 +53,8 @@ pub struct RawLaunchArgs {
     pub session: Option<String>,
     /// Token not bound to a `--connect` URL.
     pub capability: Option<String>,
+    /// `capability` came from argv (`--capability`), not from a file.
+    pub capability_from_argv: bool,
     pub open: Option<PathBuf>,
     pub warnings: Vec<String>,
 }
@@ -141,9 +148,19 @@ where
             }
             "--capability" => {
                 out.warnings.push(
-                    "--capability exposes the token to other local processes; prefer --token-file".into(),
+                    "--capability exposes the token to other local processes and is not used to authenticate \
+                     --connect URLs; use --token-file"
+                        .into(),
                 );
-                value
+                if out.capability.is_some() {
+                    out.warnings.push(
+                        "--capability: more than one token without a preceding --connect; the last one is used".into(),
+                    );
+                }
+                out.capability = Some(value);
+                out.capability_from_argv = true;
+                bindable = None;
+                continue;
             }
             "--capability-file" | "--token-file" => match read_token_file(&value) {
                 Ok(token) => token,
@@ -164,14 +181,17 @@ where
                     ));
                 }
                 out.capability = Some(token);
+                out.capability_from_argv = false;
             }
         }
     }
     out
 }
 
+/// A usable bearer token: 1 to 4096 bytes of printable ASCII without spaces
+/// (0x21..=0x7e), the same rule `LiveConnectionManager` applies.
 fn valid_token(token: &str) -> bool {
-    !token.is_empty() && token.len() <= MAX_CAPABILITY_BYTES && !token.chars().any(char::is_control)
+    !token.is_empty() && token.len() <= MAX_CAPABILITY_BYTES && token.bytes().all(|b| (0x21..=0x7e).contains(&b))
 }
 
 /// Validate the raw arguments into what the frontend may see.
@@ -190,7 +210,7 @@ pub fn validate(raw: &RawLaunchArgs) -> LaunchArgs {
         let token = entry.token.as_deref().and_then(|t| {
             if !valid_token(t) {
                 warnings.push(format!(
-                    "token for --connect #{} rejected: empty, too long, or contains control characters",
+                    "token for --connect #{} rejected: empty, too long, or not printable ASCII without spaces",
                     i + 1
                 ));
                 return None;
@@ -219,11 +239,12 @@ pub fn validate(raw: &RawLaunchArgs) -> LaunchArgs {
     let capability = raw.capability.as_deref().and_then(|c| {
         let ok = valid_token(c);
         if !ok {
-            warnings.push("capability rejected: empty, too long, or contains control characters".into());
+            warnings.push("capability rejected: empty, too long, or not printable ASCII without spaces".into());
         }
         ok.then(|| c.to_string())
     });
-    if let Some(token) = capability.as_deref() {
+    // Only a file-sourced capability may authenticate a connection.
+    if let Some(token) = capability.as_deref().filter(|_| !raw.capability_from_argv) {
         let http: Vec<usize> = (0..connect_all.len()).filter(|&i| !is_ws(&connect_all[i])).collect();
         match http.as_slice() {
             [only] => {
@@ -449,6 +470,43 @@ mod tests {
         assert!(bound.warnings.iter().any(|w| w.contains("WebSocket")));
         let unbound = validate(&parse(["--token-file", &tok, "--connect", "ws://127.0.0.1:8765"]));
         assert_eq!(unbound.connect_tokens, vec![None]);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn argv_capability_is_never_a_bearer_token() {
+        let v = validate(&parse(["--connect", "http://127.0.0.1:1", "--capability", "X"]));
+        assert_eq!(v.connect_tokens, vec![None]);
+        assert_eq!(v.capability.as_deref(), Some("X"));
+        assert!(v.warnings.iter().any(|w| w.contains("use --token-file")));
+        let before = validate(&parse(["--capability=X", "--connect", "http://127.0.0.1:1"]));
+        assert_eq!(before.connect_tokens, vec![None]);
+
+        // A token file still binds or applies as before; a later argv
+        // capability replaces the unbound one and is then not applied.
+        let dir = temp_dir("argv");
+        let tok = token_file(&dir, "tok", b"from-file");
+        let file_then_argv = validate(&parse(["--token-file", &tok, "--capability", "X", "--connect", "http://127.0.0.1:1"]));
+        assert_eq!(file_then_argv.connect_tokens, vec![None]);
+        let argv_then_file = validate(&parse(["--capability", "X", "--token-file", &tok, "--connect", "http://127.0.0.1:1"]));
+        assert_eq!(argv_then_file.connect_tokens, vec![Some("from-file".to_string())]);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn tokens_must_be_printable_ascii_without_spaces() {
+        let dir = temp_dir("ascii");
+        for (name, contents) in [("space", "abc def".as_bytes()), ("unicode", "tök".as_bytes()), ("tab", b"a\tb")] {
+            let file = token_file(&dir, name, contents);
+            let v = validate(&parse(["--connect", "http://127.0.0.1:1", "--token-file", &file]));
+            assert_eq!(v.connect_tokens, vec![None], "{name}");
+            assert!(v.warnings.iter().any(|w| w.contains("not printable ASCII without spaces")), "{name}: {:?}", v.warnings);
+            let unbound = validate(&parse(["--token-file", &file]));
+            assert_eq!(unbound.capability, None, "{name}");
+        }
+        let ok = token_file(&dir, "ok", b"  A-b_c.~!9  \n");
+        let v = validate(&parse(["--connect", "http://127.0.0.1:1", "--token-file", &ok]));
+        assert_eq!(v.connect_tokens, vec![Some("A-b_c.~!9".to_string())]);
         std::fs::remove_dir_all(dir).ok();
     }
 

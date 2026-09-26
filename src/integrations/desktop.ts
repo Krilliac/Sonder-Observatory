@@ -34,7 +34,12 @@ export interface LaunchInfo {
      */
     connectTokens?: (string | null)[];
     session: string | null;
-    /** Token not bound to a URL (legacy); keep it in memory and never log it. */
+    /**
+     * Legacy token not bound to a URL (from a token file, or the argv
+     * `--capability`); keep it in memory and never log it. The shell already
+     * applied a file-sourced one to connectTokens where it fits; an argv one
+     * is never used as a bearer token.
+     */
     capability: string | null;
     open: RecordingGrant | null;
     /** Show these in the UI. */
