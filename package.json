@@ -21,6 +21,7 @@
     "test:e2e": "playwright test",
     "fixture": "node scripts/generate-fixture.mjs",
     "fake-producer": "node scripts/fake-producer.mjs",
+    "fake-live-producer": "node scripts/fake-live-producer.mjs",
     "tauri": "tauri"
   },
   "dependencies": {
