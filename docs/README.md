@@ -7,6 +7,8 @@
 - [Security and privacy](SECURITY_PRIVACY.md)
 - [Research references](RESEARCH.md)
 - [Roadmap](ROADMAP.md)
+- [Decisions](DECISIONS.md)
+- [Recording format](RECORDING_FORMAT.md)
 - [Concept asset manifest](assets/concepts/README.md)
 
 Machine-readable event envelope: [../protocol/observatory-events.schema.json](../protocol/observatory-events.schema.json)

@@ -7,21 +7,29 @@
 - [x] define Flutter/standalone integration concept
 - [x] capture UX/design direction
 - [ ] settle protocol package ownership between Runtime/Inference/Observatory
-- [ ] choose recording extension/container name
+- [x] choose recording extension/container name (provisional: `.sobs` NDJSON + manifest, see [recording format](RECORDING_FORMAT.md))
 - [ ] define compatibility/version policy
 
 ## Milestone 1 — smallest useful Observatory
 
-- [ ] Tauri shell + web renderer
-- [ ] connect/disconnect to live WebSocket
-- [ ] metric cards
-- [ ] event timeline
-- [ ] event table + inspector
-- [ ] basic session recorder/replay
-- [ ] no 3D dependency required for MVP
-- [ ] synthetic telemetry fixture for tests
+- [x] web renderer (TypeScript + Vite, see [decisions](DECISIONS.md))
+- [ ] Tauri standalone shell — **next step**: needs a Rust toolchain on the build machine; wrap the Vite build (`dist/`) with `@tauri-apps/cli`, keep loopback-only defaults, add a CI job
+- [x] connect/disconnect to live WebSocket (configurable URL; plain event frames, no handshake yet)
+- [x] metric cards
+- [x] event timeline
+- [x] event table + inspector
+- [x] basic session recorder/replay (save live session to `.sobs`, open recordings, scrubber, play/speed, next error)
+- [x] no 3D dependency required for MVP
+- [x] synthetic telemetry fixture for tests (`fixtures/synthetic-session.ndjson`, labeled synthetic)
+- [x] protocol TypeScript types + runtime validator with schema drift test
+- [x] dev fake producer replaying a recording over WebSocket
+- [x] unit tests (Vitest) and CI (lint, test, build)
 
 Success gate: developer can identify request latency, token rate, errors, agent/tool transitions, and resource pressure from a recorded session.
+
+Status 2026-09-26: met against the **synthetic** fixture only. Validating the gate against a real Sonder Runtime / Sonder-Inference recording is blocked on producer instrumentation and the open protocol questions in [decisions](DECISIONS.md).
+
+Deferred from Milestone 1: Tauri shell, live reconnect/resume, capability-token handshake, indexed seeking for long recordings (replay currently loads the whole file), recorder quota/rotation, ZIP `.sobs` packaging, event-type filters beyond class/text.
 
 ## Milestone 2 — Sonder topology
 
@@ -66,7 +74,7 @@ Success gate: developer can identify request latency, token rate, errors, agent/
 ## Milestone 6 — distributed Observatory
 
 - [ ] multi-node topology
-- [ ] clock synchronization diagnostics
+- [ ] clock synchronization diagnostics (replay currently assumes one monotonic time base per session)
 - [ ] remote cache/context transfer
 - [ ] node health/resource views
 - [ ] distributed prefill/decode visualization

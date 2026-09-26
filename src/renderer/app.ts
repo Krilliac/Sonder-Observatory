@@ -1,4 +1,5 @@
 import fixtureText from "../../fixtures/synthetic-session.ndjson?raw";
+import { FindingsController, renderFindingsPanel, runDiagnostics } from "../diagnostics";
 import { renderInspector } from "../inspector/inspector";
 import type { ObservatoryEvent } from "../protocol/events";
 import { classifyEvent, EVENT_CLASSES, isErrorEvent, type EventClass } from "../query/classify";
@@ -6,6 +7,7 @@ import { deriveMetrics, type Metrics } from "../query/metrics";
 import { loadRecording, RECORDING_EXTENSION, serializeRecording } from "../recording/sobs";
 import { ReplayCursor } from "../replay/controller";
 import { SessionStore } from "../replay/session";
+import { TopologyPanel } from "../topology";
 import { checkEndpoint, DEFAULT_ENDPOINT, LiveConnection, type ConnectionState } from "../transport/live";
 import { byId, h, svg } from "./dom";
 import { fmtBytes, fmtMs, fmtPct, fmtRate, fmtRelNs, summarizeAttributes } from "./format";
@@ -13,6 +15,12 @@ import type { ObservatoryPanel } from "./panels";
 
 const TABLE_LIMIT = 400;
 const SPEEDS = [0.25, 0.5, 1, 2, 4, 8];
+/** Analysis views shown as tabs below the event table. */
+const VIEWS = [
+    { id: "diagnostics", title: "Diagnostics" },
+    { id: "agents", title: "Agents" },
+] as const;
+type ViewId = (typeof VIEWS)[number]["id"];
 
 export class ObservatoryApp {
     private readonly root: HTMLElement;
@@ -30,10 +38,44 @@ export class ObservatoryApp {
     private filterClass: EventClass | "all" = "all";
     private renderQueued = false;
     private readonly panels: ObservatoryPanel[];
+    private view: ViewId = "diagnostics";
+    /** Event ids highlighted in timeline/table (diagnostics or topology evidence). */
+    private highlighted = new Set<string>();
+    private readonly diag: FindingsController;
+    private findingsDirty = true;
+    private findingsVersion = 0;
+    private diagStamp = "";
+    private readonly topology: TopologyPanel;
+    private topologyDirty = true;
 
     constructor(root: HTMLElement, panels: readonly ObservatoryPanel[] = []) {
         this.root = root;
         this.panels = [...panels];
+        this.diag = new FindingsController({
+            highlightEvents: (ids) => {
+                this.highlighted = new Set(ids);
+            },
+            selectEvent: (id) => {
+                const event = this.store.events.find((e) => e.event_id === id);
+                if (event) {
+                    this.setFollow(false);
+                    this.cursor.seek(this.cursor.relativeTime(event));
+                    this.selectedId = event.event_id;
+                }
+            },
+        });
+        this.topology = new TopologyPanel({
+            onSelectEvent: (event) => {
+                this.setFollow(false);
+                this.cursor.seek(this.cursor.relativeTime(event));
+                this.select(event);
+            },
+            onSelectionChange: (_selection, evidenceEventIds) => {
+                this.highlighted = new Set(evidenceEventIds);
+                this.render();
+            },
+            relativeTime: (event) => fmtRelNs(this.cursor.relativeTime(event)),
+        });
         this.live = new LiveConnection({
             onEvents: (events) => {
                 this.store.append(events);
@@ -54,6 +96,11 @@ export class ObservatoryApp {
 
     start(params: URLSearchParams): void {
         this.root.replaceChildren(this.layout(params.get("ws") ?? DEFAULT_ENDPOINT));
+        byId("view-agents").append(this.topology.element);
+        const view = VIEWS.find((v) => v.id === params.get("view"));
+        if (view) {
+            this.view = view.id;
+        }
         this.bindControls();
         window.addEventListener("resize", () => this.queueRender());
         const ws = params.get("ws");
@@ -149,6 +196,18 @@ export class ObservatoryApp {
                 h("section", { id: "inspector", class: "panel inspector", "aria-label": "Inspector" }),
             ),
             h(
+                "section",
+                { class: "panel views", "aria-label": "Analysis views" },
+                h(
+                    "div",
+                    { class: "tabs", role: "tablist", "aria-label": "Analysis views" },
+                    ...VIEWS.map((v) =>
+                        h("button", { id: `tab-${v.id}`, type: "button", role: "tab", class: "tab", "aria-controls": `view-${v.id}`, text: v.title }),
+                    ),
+                ),
+                ...VIEWS.map((v) => h("div", { id: `view-${v.id}`, class: "view", role: "tabpanel", "aria-labelledby": `tab-${v.id}` })),
+            ),
+            h(
                 "div",
                 { id: "extra-panels", class: "extra-panels" },
                 ...this.panels.map((p) =>
@@ -223,6 +282,12 @@ export class ObservatoryApp {
             this.render();
         });
         byId<HTMLDivElement>("table-wrap").addEventListener("keydown", (ev) => this.onTableKey(ev));
+        for (const v of VIEWS) {
+            byId<HTMLButtonElement>(`tab-${v.id}`).addEventListener("click", () => {
+                this.view = v.id;
+                this.render();
+            });
+        }
     }
 
     // --------------------------------------------------------------- actions
@@ -267,6 +332,8 @@ export class ObservatoryApp {
         const previous = this.cursor.position;
         this.cursor = new ReplayCursor(this.store.events);
         this.cursor.seek(this.follow ? this.cursor.durationNs : previous);
+        this.findingsDirty = true;
+        this.topologyDirty = true;
     }
 
     private setFollow(follow: boolean): void {
@@ -347,7 +414,59 @@ export class ObservatoryApp {
         this.renderTimeline(metrics);
         this.renderTable();
         this.renderInspectorPanel();
+        this.renderViews();
         this.renderExtraPanels(visible);
+    }
+
+    private renderViews(): void {
+        for (const v of VIEWS) {
+            const active = v.id === this.view;
+            const tab = byId<HTMLButtonElement>(`tab-${v.id}`);
+            tab.setAttribute("aria-selected", active ? "true" : "false");
+            tab.classList.toggle("active", active);
+            byId(`view-${v.id}`).hidden = !active;
+        }
+        this.renderDiagnostics();
+        this.renderTopology();
+    }
+
+    /** Topology layout uses the whole session; the graph itself is derived at the replay cursor. */
+    private renderTopology(): void {
+        if (byId("view-agents").hidden) {
+            return;
+        }
+        if (this.topologyDirty) {
+            this.topologyDirty = false;
+            this.topology.setEvents(this.store.events);
+        }
+        this.topology.setTime(this.follow ? null : this.cursor.originNs + this.cursor.position);
+    }
+
+    /** Findings are recomputed over the whole session when it changes (fine for M1-sized sessions). */
+    private renderDiagnostics(): void {
+        if (this.findingsDirty) {
+            this.findingsDirty = false;
+            this.findingsVersion += 1;
+            this.diag.setFindings(runDiagnostics(this.store.events));
+        }
+        const container = byId("view-diagnostics");
+        const stamp = `${this.findingsVersion}|${this.diag.selected()?.id ?? ""}|${this.store.synthetic}|${this.cursor.originNs}`;
+        if (container.hidden || stamp === this.diagStamp) {
+            return;
+        }
+        this.diagStamp = stamp;
+        const hadFocus = container.contains(document.activeElement);
+        const origin = this.cursor.originNs;
+        container.replaceChildren(
+            ...renderFindingsPanel(this.diag, {
+                relativeTime: (ns) => fmtRelNs(ns - origin),
+                onChange: () => this.render(),
+                synthetic: this.store.synthetic,
+            }),
+        );
+        if (hadFocus) {
+            (container.querySelector<HTMLElement>(".diag-finding.selected") ?? container.querySelector<HTMLElement>(".diag-finding"))?.focus();
+        }
     }
 
     private renderExtraPanels(visible: readonly ObservatoryEvent[]): void {
@@ -531,7 +650,8 @@ export class ObservatoryApp {
             const cls = classifyEvent(e);
             const x = Math.round(xOf(rel));
             const key = `${cls}:${x}`;
-            if (seen.has(key) && e.event_id !== this.selectedId) {
+            const evidence = this.highlighted.has(e.event_id);
+            if (seen.has(key) && e.event_id !== this.selectedId && !evidence) {
                 continue;
             }
             seen.add(key);
@@ -542,7 +662,7 @@ export class ObservatoryApp {
                     y: 4 + row * rowH + 3,
                     width: e.event_id === this.selectedId ? 3 : 1.5,
                     height: rowH - 6,
-                    class: `tick cls-${cls}${rel > cursorRel ? " future" : ""}${e.event_id === this.selectedId ? " selected" : ""}`,
+                    class: `tick cls-${cls}${rel > cursorRel ? " future" : ""}${evidence ? " evidence" : ""}${e.event_id === this.selectedId ? " selected" : ""}`,
                 }),
             );
         }
@@ -608,7 +728,7 @@ export class ObservatoryApp {
             const cls = classifyEvent(e);
             const tr = h(
                 "tr",
-                { class: `row cls-${cls}${e.event_id === this.selectedId ? " selected" : ""}`, "aria-selected": e.event_id === this.selectedId ? "true" : "false" },
+                { class: `row cls-${cls}${this.highlighted.has(e.event_id) ? " evidence" : ""}${e.event_id === this.selectedId ? " selected" : ""}`, "aria-selected": e.event_id === this.selectedId ? "true" : "false" },
                 h("td", { class: "mono", text: e.sequence }),
                 h("td", { class: "mono", text: fmtRelNs(this.cursor.relativeTime(e)) }),
                 h("td", {}, h("span", { class: `dot cls-${cls}`, "aria-hidden": "true" }), ` ${e.event_type}`),

@@ -1,26 +1,40 @@
 # Scaffold status
 
-Created 2026-09-26. **Documentation and directory structure only.**
+Created 2026-09-26 as documentation and directory structure only. On
+2026-09-26 the owner requested implementation; the repository is now in
+**Milestone 1 implementation** (see [AGENTS.md](../AGENTS.md)).
 
 ## Included
 
-- [Source ownership placeholders](../src/README.md).
-- [Future test location](../tests/README.md).
-- [Existing protocol workspace](../protocol/README.md).
+- [Source workspace](../src/README.md) with Milestone 1 modules.
+- [Tests](../tests/README.md) (Vitest unit tests).
+- [Existing protocol workspace](../protocol/README.md) — schema unchanged.
 - [Ecosystem boundaries](BOUNDARIES.md).
-- Git/editor conventions and contribution instructions.
+- [Decisions](DECISIONS.md) and [recording format](RECORDING_FORMAT.md).
+- Git/editor conventions, contribution instructions, and CI
+  (`.github/workflows/ci.yml`).
 
 Existing architecture, research, UX notes, design tokens, and event schema are
-preserved. Technology preferences in the architecture are not changed by this
-scaffold. There is no application, renderer, recorder, transport, test suite,
-dependency manifest, build system, or CI workflow implemented yet.
+preserved.
+
+## Implemented (Milestone 1)
+
+- [x] dependency manifest and build system (npm, TypeScript, Vite)
+- [x] protocol TypeScript types + runtime validator (mirror of the schema)
+- [x] synthetic telemetry fixture and generator
+- [x] live WebSocket transport + recording file loading
+- [x] recorder (`.sobs`) and replay with scrubber
+- [x] web renderer: metric cards, timeline, event table, inspector
+- [x] unit test suite and CI workflow
+- [ ] Tauri standalone shell (next step, see [roadmap](ROADMAP.md))
+- [ ] Flutter embedding (`src/integrations/` remains a placeholder)
 
 ## Next design work
 
 1. Resolve protocol ownership and compatibility policy with Runtime and Inference.
-2. Define an initial fixture and acceptance criteria for timeline/inspector/replay.
-3. Validate the proposed TypeScript/Tauri toolchain and project/dependency licenses.
-4. Request a bounded implementation slice from the existing roadmap.
+2. Confirm producer attribute names used by metric derivation ([decisions](DECISIONS.md)).
+3. Validate the Tauri shell and project/dependency licenses.
+4. Record a real producer session and re-check the Milestone 1 success gate.
 
 Producer instrumentation stays with Runtime/Inference. Observatory must remain
 optional, isolated, and grounded in telemetry evidence. Raw payload capture and
