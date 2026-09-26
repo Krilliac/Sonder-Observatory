@@ -72,7 +72,7 @@ See **Krilliac/Sonder-Inference** for the execution-engine research and architec
 Milestone 1 in progress (2026-09-26): a small, trustworthy live viewer + replay
 recorder, web renderer first, before heavier 3D interpretation layers. What
 exists: metric cards, event timeline, event table + evidence inspector, live
-WebSocket connection, `.sobs` recorder, replay with scrubber, and a synthetic
+ingest (WebSocket, SSE, NDJSON), `.sobs` recorder, replay with scrubber, and a synthetic
 fixture, plus agent topology and diagnostics tabs (Milestone 2) and a Tauri
 desktop shell in `src-tauri/`. Not yet: Tauri bundle, Flutter embedding, 3D
 views, real producer integration. See [roadmap](docs/ROADMAP.md) and
@@ -97,6 +97,10 @@ WebSocket; the data stays labeled synthetic):
 ```bash
 npm run fake-producer -- --speed 2          # ws://127.0.0.1:8765
 # then press Connect in the UI, or open http://127.0.0.1:5173/?ws=ws://127.0.0.1:8765
+
+npm run fake-live-producer -- --pace timeline   # one port, three transports:
+# ws://127.0.0.1:8766/ws, http://127.0.0.1:8766/sse, http://127.0.0.1:8766/ndjson
+# add --disconnect-after 100 to watch reconnect + resume in the #live-status badge
 ```
 
 Other options: `?fixture=0` starts empty; **Open recording…** loads a `.sobs`
@@ -104,9 +108,12 @@ or `.ndjson`/`.jsonl` file; **Save** writes the current session as `.sobs`;
 `npm run fixture` regenerates `fixtures/synthetic-session.ndjson`
 deterministically.
 
-The WebSocket client accepts frames containing one protocol event (JSON) or
-several (NDJSON). There is no handshake or resume protocol yet; that contract
-is unresolved with Sonder Runtime / Sonder-Inference.
+The endpoint field accepts `ws(s)://` (WebSocket frames with one JSON event or
+several NDJSON lines) and `http(s)://` (Server-Sent Events, or NDJSON lines).
+The client reconnects with backoff and asks the producer to resume after the
+last event id; see [live ingest notes](docs/integration/live-ingest.md). There
+is no capability handshake yet, and the resume parameters are proposals; that
+contract is unresolved with Sonder Runtime / Sonder-Inference.
 
 ## Repository scaffold
 
