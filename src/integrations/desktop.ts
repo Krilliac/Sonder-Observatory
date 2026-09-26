@@ -10,6 +10,7 @@
  * has no fs-plugin or dialog permission and never sees absolute paths.
  */
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import type { ProducerEndpointInput } from "../ingest/live/manager";
 
 export interface RecordingGrant {
     id: string;
@@ -18,10 +19,27 @@ export interface RecordingGrant {
 }
 
 export interface LaunchInfo {
-    /** Validated ws(s) URL. */
+    /** First validated `--connect` URL (ws, wss, http or https). */
     connect: string | null;
+    /**
+     * Every validated `--connect` URL, in argument order (connect is the
+     * first). Always sent by this shell; optional so launch info from older
+     * shells still type-checks (see launchProducers).
+     */
+    connectAll?: string[];
+    /**
+     * Bearer token per connectAll entry (same length) or null. A token is
+     * bound to the `--connect` it followed; never sent to ws(s) URLs. Keep in
+     * memory only and never log it. Always sent by this shell.
+     */
+    connectTokens?: (string | null)[];
     session: string | null;
-    /** Short-lived token; keep it in memory and never log it. */
+    /**
+     * Legacy token not bound to a URL (from a token file, or the argv
+     * `--capability`); keep it in memory and never log it. The shell already
+     * applied a file-sourced one to connectTokens where it fits; an argv one
+     * is never used as a bearer token.
+     */
     capability: string | null;
     open: RecordingGrant | null;
     /** Show these in the UI. */
@@ -60,6 +78,20 @@ export function isDesktop(): boolean {
 
 export async function getLaunchInfo(): Promise<LaunchInfo | null> {
     return isTauri() ? invoke<LaunchInfo>("get_launch_args") : null;
+}
+
+/**
+ * The producers to connect at launch, for LiveConnectionManager.add(): every
+ * `--connect` URL with its own bearer token, if any. Older shells that only
+ * report `connect` yield that single URL without a token.
+ */
+export function launchProducers(info: Pick<LaunchInfo, "connect" | "connectAll" | "connectTokens">): ProducerEndpointInput[] {
+    const urls = Array.isArray(info.connectAll) ? info.connectAll : info.connect ? [info.connect] : [];
+    const tokens = Array.isArray(info.connectTokens) ? info.connectTokens : [];
+    return urls.map((url, i) => {
+        const token = tokens[i];
+        return typeof token === "string" && token !== "" ? { url, token } : { url };
+    });
 }
 
 export async function pickRecording(folder = false): Promise<RecordingGrant | null> {

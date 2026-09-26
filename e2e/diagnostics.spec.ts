@@ -1,12 +1,12 @@
 import { expect, test } from "@playwright/test";
-import { FIXTURE_EVENTS, cursorX, inspectorEventId, openFixture, shot, visibleCount } from "./helpers";
+import { FIXTURE_EVENTS, cursorX, inspectorEventId, openFixture, showView, shot, visibleCount } from "./helpers";
 
 test.describe("Diagnostics tab", () => {
     test.beforeEach(async ({ page }) => {
-        await openFixture(page);
+        await openFixture(page, "view=diagnostics");
     });
 
-    test("is the default view and lists findings", async ({ page }, testInfo) => {
+    test("?view=diagnostics opens it and lists findings", async ({ page }, testInfo) => {
         await expect(page.getByRole("tab", { name: "Diagnostics" })).toHaveAttribute("aria-selected", "true");
         await expect(page.locator("#view-diagnostics")).toBeVisible();
         await expect(page.locator("#view-agents")).toBeHidden();
@@ -20,7 +20,9 @@ test.describe("Diagnostics tab", () => {
     });
 
     test("clicking a finding highlights evidence and moves the cursor", async ({ page }, testInfo) => {
+        await showView(page, "Overview");
         const endX = await cursorX(page);
+        await showView(page, "Diagnostics");
         const finding = page.locator("#view-diagnostics .diag-finding").first();
         const evidenceCount = Number(/\((\d+) evidence event/.exec((await finding.textContent()) ?? "")?.[1]);
         expect(evidenceCount).toBeGreaterThan(0);
@@ -36,18 +38,21 @@ test.describe("Diagnostics tab", () => {
         const evidenceButtons = evidenceList.locator("button");
         await expect(evidenceButtons).toHaveCount(evidenceCount);
 
-        // Evidence is highlighted in the timeline (all of it) and table (up to the cursor).
-        expect(await page.locator("#timeline rect.tick.evidence").count()).toBeGreaterThan(0);
-        expect(await page.locator("#table-wrap tr.evidence").count()).toBeGreaterThan(0);
-
-        // Cursor moved to the first evidence event and the inspector shows it.
+        // Cursor moved to the first evidence event and the docked inspector shows it.
         await expect(page.locator("#follow-check")).not.toBeChecked();
         const firstEvidence = ((await evidenceButtons.first().textContent()) ?? "").trim();
         await expect(inspectorEventId(page)).toHaveText(firstEvidence);
-        await expect(page.locator("#table-wrap tr.selected")).toHaveCount(1);
-        expect(await cursorX(page)).toBeLessThan(endX);
         expect(await visibleCount(page)).toBeLessThan(FIXTURE_EVENTS);
         await shot(page, testInfo, "diagnostics-finding-selected");
+
+        // Evidence is highlighted in the timeline (all of it) and table (up to the cursor).
+        await showView(page, "Overview");
+        expect(await page.locator("#timeline rect.tick.evidence").count()).toBeGreaterThan(0);
+        expect(await cursorX(page)).toBeLessThan(endX);
+        await showView(page, "Events");
+        expect(await page.locator("#table-wrap tr.evidence").count()).toBeGreaterThan(0);
+        await expect(page.locator("#table-wrap tr.selected")).toHaveCount(1);
+        await showView(page, "Diagnostics");
 
         // Clicking another evidence id inspects it.
         if (evidenceCount > 1) {

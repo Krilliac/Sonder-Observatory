@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SEED, generateEvents, generateNdjson, parseSize, PRESET_SIZES } from "../../scripts/gen-large-fixture.mjs";
 import { validateEvent } from "../../src/protocol/validate";
+import { deriveMetrics } from "../../src/query/metrics";
 
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 
@@ -32,6 +33,21 @@ describe("scripts/gen-large-fixture.mjs", () => {
             ids.add(e.event_id);
         }
         expect(ids.size).toBe(events.length);
+    });
+
+    it("reports telemetry.dropped counts as a cumulative running total", () => {
+        const events = [...generateEvents(100_000)];
+        const counts = events
+            .filter((e) => e.event_type === "telemetry.dropped")
+            .map((e) => e.attributes.dropped_count as number);
+        expect(counts.length).toBeGreaterThan(1);
+        counts.forEach((count, i) => {
+            if (i > 0) {
+                expect(count).toBeGreaterThan(counts[i - 1]!);
+            }
+        });
+        // One producer instance: the latest cumulative value is the total.
+        expect(deriveMetrics(events).droppedEvents).toBe(counts.at(-1));
     });
 
     it("covers every timeline track that the viewer draws", () => {

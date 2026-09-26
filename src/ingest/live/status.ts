@@ -53,3 +53,26 @@ export function describeStatus(status: LiveIngestStatus): StatusView {
             return { label: "connection failed", tone: "error", detail };
     }
 }
+
+/**
+ * Producer card state words (the `data-testid=producer-state` DOM hook).
+ * Client states map as: idle and closed -> disconnected, open -> live,
+ * connecting -> connecting, reconnecting -> reconnecting, failed -> failed.
+ */
+export type ProducerState = "connecting" | "live" | "reconnecting" | "failed" | "disconnected";
+
+export function producerState(status: Pick<LiveIngestStatus, "state">): ProducerState {
+    switch (status.state) {
+        case "connecting":
+            return "connecting";
+        case "open":
+            return "live";
+        case "reconnecting":
+            return "reconnecting";
+        case "failed":
+            return "failed";
+        case "idle":
+        case "closed":
+            return "disconnected";
+    }
+}

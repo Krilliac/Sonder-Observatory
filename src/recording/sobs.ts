@@ -13,6 +13,7 @@
  * invented.
  */
 import type { ObservatoryEvent } from "../protocol/events";
+import { totalDroppedEvents } from "../query/attributes";
 import { parseNdjson, toNdjson, type RejectedLine } from "./ndjson";
 
 export const RECORDING_FORMAT = "sonder.observatory.recording/1";
@@ -26,12 +27,18 @@ export interface RecordingManifest {
     complete: boolean;
     event_count: number;
     schema_versions: string[];
-    producers: { name: string; version: string; node_id: string; synthetic: boolean }[];
+    /**
+     * One entry per producer name/version/node. `role` is producer.role
+     * ("inference" | "runtime" | "fixture") or null when no event declares it;
+     * recordings written before roles existed omit the key.
+     */
+    producers: { name: string; version: string; node_id: string; role: string | null; synthetic: boolean }[];
     session_ids: string[];
     run_ids: string[];
     sampling_levels: string[];
     /** Redaction/capture policy as declared by producers; "unspecified" if absent. */
     capture_policy: string;
+    /** Latest cumulative producer-reported drop count per producer instance, summed. */
     dropped_events: number;
     time_origin: { wall_time: string; mono_ns: number } | null;
     synthetic: boolean;
@@ -51,14 +58,6 @@ function unique<T>(values: Iterable<T>): T[] {
     return [...new Set(values)];
 }
 
-function droppedCount(event: ObservatoryEvent): number {
-    if (event.event_type !== "telemetry.dropped") {
-        return 0;
-    }
-    const n = event.attributes.dropped_count;
-    return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 1;
-}
-
 export function buildManifest(
     events: readonly ObservatoryEvent[],
     createdAt: Date = new Date(),
@@ -66,13 +65,19 @@ export function buildManifest(
     const producers = new Map<string, RecordingManifest["producers"][number]>();
     for (const e of events) {
         const key = `${e.producer.name}\u0000${e.producer.version}\u0000${e.producer.node_id}`;
-        if (!producers.has(key)) {
+        const role = typeof e.producer.role === "string" ? e.producer.role : null;
+        const known = producers.get(key);
+        if (!known) {
             producers.set(key, {
                 name: e.producer.name,
                 version: e.producer.version,
                 node_id: e.producer.node_id,
+                role,
                 synthetic: isSyntheticProducer(e.producer),
             });
+        } else {
+            known.role ??= role;
+            known.synthetic ||= isSyntheticProducer(e.producer);
         }
     }
     const sessions = unique(events.map((e) => e.session_id));
@@ -104,7 +109,7 @@ export function buildManifest(
                 .filter((l): l is NonNullable<typeof l> => typeof l === "string"),
         ),
         capture_policy: policies.length > 0 ? policies.join(",") : "unspecified",
-        dropped_events: events.reduce((sum, e) => sum + droppedCount(e), 0),
+        dropped_events: totalDroppedEvents(events),
         time_origin: first ? { wall_time: first.wall_time, mono_ns: first.mono_ns } : null,
         synthetic: [...producers.values()].some((p) => p.synthetic),
     };

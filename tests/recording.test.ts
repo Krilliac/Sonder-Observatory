@@ -71,6 +71,35 @@ describe(".sobs recording", () => {
         expect(loadRecording("PK\u0003\u0004...").rejected[0]!.reason).toMatch(/ZIP/);
     });
 
+    it("sums the latest cumulative drop count per producer instance", () => {
+        const inf = (instance: string) => ({ name: "sonder-inference", version: "0.1.0", node_id: "vm", instance_id: instance, role: "inference" });
+        const drop = (ms: number, instance: string, seq: number, n: number) =>
+            at(ms, "telemetry.dropped", {
+                producer: inf(instance),
+                sequence: seq,
+                event_id: `${instance}-${seq}`,
+                attributes: { dropped_events: n },
+            });
+        expect(buildManifest([drop(1, "tel-a", 0, 5), drop(2, "tel-a", 1, 7)]).dropped_events).toBe(7);
+        expect(buildManifest([drop(1, "tel-a", 0, 5), drop(2, "tel-a", 1, 7), drop(3, "tel-b", 0, 4)]).dropped_events).toBe(11);
+        // A report with no count no longer counts as 1.
+        expect(buildManifest([at(1, "telemetry.dropped")]).dropped_events).toBe(0);
+    });
+
+    it("records each producer's role", () => {
+        const m = buildManifest([
+            makeEvent({ producer: { name: "sonder-runtime", version: "1", node_id: "h", role: "runtime" } }),
+            makeEvent({ producer: { name: "sonder-inference", version: "1", node_id: "h" } }),
+            makeEvent({ producer: { name: "sonder-inference", version: "1", node_id: "h", role: "inference", synthetic: true } }),
+            makeEvent(),
+        ]);
+        expect(m.producers.map((p) => [p.name, p.role, p.synthetic])).toEqual([
+            ["sonder-runtime", "runtime", false],
+            ["sonder-inference", "inference", true],
+            ["test-producer", null, false],
+        ]);
+    });
+
     it("flags synthetic producers", () => {
         const syn = makeEvent({ producer: { name: "fx", version: "1", node_id: "n", synthetic: true } });
         expect(buildManifest([syn]).synthetic).toBe(true);

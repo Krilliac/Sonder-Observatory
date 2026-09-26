@@ -3,6 +3,13 @@
  * small overscan) are in the DOM, so the table can show every event at the
  * cursor instead of the latest 400. Scrolling repaints just the window; it
  * does not re-render the rest of the app.
+ *
+ * Row elements are keyed by event position and reused across paints: a row
+ * that stays in the window keeps its element and only its changed attributes
+ * are touched. Live ingest renders many times per second, and a mouse click
+ * only lands when press and release hit the same element; the row pressed is
+ * also remembered, so a click whose release lands after the window moved
+ * still selects the row the press started on.
  */
 import type { ObservatoryEvent } from "../protocol/events";
 import type { EventClass } from "../query/classify";
@@ -12,7 +19,7 @@ import { fmtRelNs, summarizeAttributes } from "./format";
 import { eventPosition, getEventIndex, TRACKS } from "./timelineModel";
 import { computeWindow, FilteredRows, scrollTopForRow, type RowWindow } from "./virtualWindow";
 
-const COLUMNS = ["seq", "t", "event type", "class", "request", "agent", "attributes"] as const;
+const COLUMNS = ["seq", "t", "event type", "class", "producer", "request", "agent", "attributes"] as const;
 const DEFAULT_ROW_HEIGHT = 22;
 
 export interface EventTableState {
@@ -47,6 +54,10 @@ export class EventTable {
     private lastSelected: string | null = null;
     private scrollQueued = false;
     private lastWindow: RowWindow | null = null;
+    /** Painted rows by event position (see paint()). */
+    private painted = new Map<number, { tr: HTMLTableRowElement; event: ObservatoryEvent; stamp: string }>();
+    /** Row under the last primary-button press, for a click whose release landed elsewhere. */
+    private pressed: HTMLTableRowElement | null = null;
 
     constructor(
         private readonly wrap: HTMLElement,
@@ -68,8 +79,15 @@ export class EventTable {
         );
         wrap.replaceChildren(this.table);
         wrap.addEventListener("scroll", () => this.queueWindow());
+        this.body.addEventListener("pointerdown", (ev) => {
+            this.pressed = ev.button === 0 ? (ev.target as Element).closest<HTMLTableRowElement>("tr.row") : null;
+        });
         this.body.addEventListener("click", (ev) => {
-            const tr = (ev.target as Element).closest<HTMLTableRowElement>("tr.row");
+            const pressed = this.pressed;
+            this.pressed = null;
+            // A click fires on the common ancestor when press and release hit
+            // different rows (the window moved in between): use the pressed row.
+            const tr = (ev.target as Element).closest<HTMLTableRowElement>("tr.row") ?? (pressed?.isConnected ? pressed : null);
             const pos = tr ? Number(tr.dataset.pos) : NaN;
             const event = Number.isInteger(pos) ? this.state?.events[pos] : undefined;
             if (event) {
@@ -93,6 +111,45 @@ export class EventTable {
             this.revealSelected();
         }
         return { shown: this.rowCount, atCursor: state.visibleCount };
+    }
+
+    /**
+     * Scrolls the selection (or, when following, the latest row) into view.
+     * Called when the table becomes visible again: while hidden it cannot
+     * measure its viewport.
+     */
+    revealSelection(): void {
+        if (!this.state) {
+            return;
+        }
+        this.paint();
+        if (this.state.follow) {
+            this.wrap.scrollTop = this.wrap.scrollHeight;
+            this.paint();
+        } else {
+            this.revealSelected();
+        }
+    }
+
+    /**
+     * Event `delta` rows away from the selection among every filtered row,
+     * including rows after the replay cursor (J/K and timeline stepping move
+     * the cursor to it). With no selection it starts at the cursor.
+     */
+    step(selectedId: string | null, delta: number): ObservatoryEvent | undefined {
+        const s = this.state;
+        const total = this.rows.length;
+        if (!s || total === 0) {
+            return undefined;
+        }
+        const pos = selectedId ? eventPosition(getEventIndex(s.events), selectedId) : -1;
+        const row = pos >= 0 ? this.rows.rowOfPosition(pos) : -1;
+        // No (visible) selection: start with the row at the replay cursor.
+        const next = row < 0 ? Math.max(this.rowCount - 1, 0) : row + delta;
+        if (next < 0 || next >= total) {
+            return undefined;
+        }
+        return s.events[this.rows.positionOf(next)];
     }
 
     /** Event `delta` rows away from the selection (keyboard navigation). */
@@ -169,9 +226,10 @@ export class EventTable {
         });
         this.lastWindow = w;
         const index = getEventIndex(s.events);
-        const frag = document.createDocumentFragment();
         this.topSpacer.style.height = `${w.padTop}px`;
         this.bottomSpacer.style.height = `${w.padBottom}px`;
+        const next = new Map<number, { tr: HTMLTableRowElement; event: ObservatoryEvent; stamp: string }>();
+        const rows: HTMLTableRowElement[] = [];
         for (let r = w.start; r < w.end; r += 1) {
             const pos = this.rows.positionOf(r);
             const e = s.events[pos];
@@ -180,26 +238,48 @@ export class EventTable {
             }
             const cls = TRACKS[index.cls[pos]!] ?? "other";
             const selected = e.event_id === s.selectedId;
-            frag.append(
-                h(
-                    "tr",
-                    {
-                        class: `row cls-${cls}${s.highlighted.has(e.event_id) ? " evidence" : ""}${selected ? " selected" : ""}`,
-                        "aria-selected": selected ? "true" : "false",
-                        "aria-rowindex": r + 2,
-                        "data-pos": pos,
-                    },
-                    h("td", { class: "mono", text: e.sequence }),
-                    h("td", { class: "mono", text: fmtRelNs(e.mono_ns - s.originNs) }),
-                    h("td", {}, h("span", { class: `dot cls-${cls}`, "aria-hidden": "true" }), ` ${e.event_type}`),
-                    h("td", { text: cls }),
-                    h("td", { class: "mono", text: e.request_id ?? "" }),
-                    h("td", { class: "mono", text: e.agent_id ?? "" }),
-                    h("td", { class: "muted", text: summarizeAttributes(e.attributes) }),
-                ),
-            );
+            const className = `row cls-${cls}${s.highlighted.has(e.event_id) ? " evidence" : ""}${selected ? " selected" : ""}`;
+            const stamp = `${className}\u0000${r}\u0000${e.mono_ns - s.originNs}`;
+            const prev = this.painted.get(pos);
+            let tr: HTMLTableRowElement;
+            if (prev && prev.event === e) {
+                tr = prev.tr;
+                if (prev.stamp !== stamp) {
+                    tr.className = className;
+                    tr.setAttribute("aria-selected", selected ? "true" : "false");
+                    tr.setAttribute("aria-rowindex", String(r + 2));
+                    (tr.cells[1] as HTMLTableCellElement).textContent = fmtRelNs(e.mono_ns - s.originNs);
+                }
+            } else {
+                tr = this.renderRow(e, pos, r, cls, className, selected, s.originNs);
+            }
+            next.set(pos, { tr, event: e, stamp });
+            rows.push(tr);
         }
-        this.body.replaceChildren(frag);
+        this.painted = next;
+        // Reorder only when the sequence of row elements changed; kept rows are not detached.
+        const current = this.body.children;
+        let same = current.length === rows.length;
+        for (let i = 0; same && i < rows.length; i += 1) {
+            same = current[i] === rows[i];
+        }
+        if (!same) {
+            // Drop rows that left the window first, so rows that stay are never moved.
+            const keep = new Set<Element>(rows);
+            for (const child of [...current]) {
+                if (!keep.has(child)) {
+                    child.remove();
+                }
+            }
+            let cursor: Element | null = this.body.firstElementChild;
+            for (const tr of rows) {
+                if (cursor === tr) {
+                    cursor = cursor.nextElementSibling;
+                } else {
+                    this.body.insertBefore(tr, cursor);
+                }
+            }
+        }
         this.table.setAttribute("aria-rowcount", String(this.rowCount + 1));
         if (!this.measured && w.end > w.start) {
             const first = this.body.querySelector<HTMLTableRowElement>("tr.row");
@@ -212,5 +292,28 @@ export class EventTable {
                 }
             }
         }
+    }
+
+    private renderRow(e: ObservatoryEvent, pos: number, r: number, cls: string, className: string, selected: boolean, originNs: number): HTMLTableRowElement {
+        return h(
+            "tr",
+            {
+                class: className,
+                "aria-selected": selected ? "true" : "false",
+                "aria-rowindex": r + 2,
+                "data-pos": pos,
+                "data-testid": "event-row",
+                "data-producer": e.producer.name,
+                "data-event-type": e.event_type,
+            },
+            h("td", { class: "mono", text: e.sequence }),
+            h("td", { class: "mono", text: fmtRelNs(e.mono_ns - originNs) }),
+            h("td", {}, h("span", { class: `dot cls-${cls}`, "aria-hidden": "true" }), ` ${e.event_type}`),
+            h("td", { text: cls }),
+            h("td", { class: "producer-cell", text: e.producer.name }),
+            h("td", { class: "mono", text: e.request_id ?? "" }),
+            h("td", { class: "mono", text: e.agent_id ?? "" }),
+            h("td", { class: "muted", text: summarizeAttributes(e.attributes) }),
+        );
     }
 }
