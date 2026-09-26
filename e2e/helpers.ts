@@ -16,6 +16,14 @@ export async function openFixture(page: Page, query = ""): Promise<void> {
     expect(errors, "uncaught page errors during load").toEqual([]);
 }
 
+/** Clicks a view tab (Overview, Events, Diagnostics, Agents) and waits for its panel. */
+export async function showView(page: Page, name: "Overview" | "Events" | "Diagnostics" | "Agents"): Promise<void> {
+    const tab = page.getByRole("tab", { name, exact: true });
+    await tab.click();
+    await expect(tab).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator(`#view-${name.toLowerCase()}`)).toBeVisible();
+}
+
 /** "12/575 events" -> 12 */
 export async function visibleCount(page: Page): Promise<number> {
     const text = (await page.locator("#cursor-label").textContent()) ?? "";

@@ -12,7 +12,7 @@ import { fmtRelNs, summarizeAttributes } from "./format";
 import { eventPosition, getEventIndex, TRACKS } from "./timelineModel";
 import { computeWindow, FilteredRows, scrollTopForRow, type RowWindow } from "./virtualWindow";
 
-const COLUMNS = ["seq", "t", "event type", "class", "request", "agent", "attributes"] as const;
+const COLUMNS = ["seq", "t", "event type", "class", "producer", "request", "agent", "attributes"] as const;
 const DEFAULT_ROW_HEIGHT = 22;
 
 export interface EventTableState {
@@ -93,6 +93,45 @@ export class EventTable {
             this.revealSelected();
         }
         return { shown: this.rowCount, atCursor: state.visibleCount };
+    }
+
+    /**
+     * Scrolls the selection (or, when following, the latest row) into view.
+     * Called when the table becomes visible again: while hidden it cannot
+     * measure its viewport.
+     */
+    revealSelection(): void {
+        if (!this.state) {
+            return;
+        }
+        this.paint();
+        if (this.state.follow) {
+            this.wrap.scrollTop = this.wrap.scrollHeight;
+            this.paint();
+        } else {
+            this.revealSelected();
+        }
+    }
+
+    /**
+     * Event `delta` rows away from the selection among every filtered row,
+     * including rows after the replay cursor (J/K and timeline stepping move
+     * the cursor to it). With no selection it starts at the cursor.
+     */
+    step(selectedId: string | null, delta: number): ObservatoryEvent | undefined {
+        const s = this.state;
+        const total = this.rows.length;
+        if (!s || total === 0) {
+            return undefined;
+        }
+        const pos = selectedId ? eventPosition(getEventIndex(s.events), selectedId) : -1;
+        const row = pos >= 0 ? this.rows.rowOfPosition(pos) : -1;
+        // No (visible) selection: start with the row at the replay cursor.
+        const next = row < 0 ? Math.max(this.rowCount - 1, 0) : row + delta;
+        if (next < 0 || next >= total) {
+            return undefined;
+        }
+        return s.events[this.rows.positionOf(next)];
     }
 
     /** Event `delta` rows away from the selection (keyboard navigation). */
@@ -188,11 +227,15 @@ export class EventTable {
                         "aria-selected": selected ? "true" : "false",
                         "aria-rowindex": r + 2,
                         "data-pos": pos,
+                        "data-testid": "event-row",
+                        "data-producer": e.producer.name,
+                        "data-event-type": e.event_type,
                     },
                     h("td", { class: "mono", text: e.sequence }),
                     h("td", { class: "mono", text: fmtRelNs(e.mono_ns - s.originNs) }),
                     h("td", {}, h("span", { class: `dot cls-${cls}`, "aria-hidden": "true" }), ` ${e.event_type}`),
                     h("td", { text: cls }),
+                    h("td", { class: "producer-cell", text: e.producer.name }),
                     h("td", { class: "mono", text: e.request_id ?? "" }),
                     h("td", { class: "mono", text: e.agent_id ?? "" }),
                     h("td", { class: "muted", text: summarizeAttributes(e.attributes) }),

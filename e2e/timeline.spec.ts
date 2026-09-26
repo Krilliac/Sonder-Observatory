@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { FIXTURE_EVENTS, cursorLine, cursorX, inspectorEventId, openFixture, scrubTo, shot, visibleCount } from "./helpers";
+import { FIXTURE_EVENTS, cursorLine, cursorX, inspectorEventId, openFixture, scrubTo, showView, shot, visibleCount } from "./helpers";
 
 test.describe("timeline", () => {
     test.beforeEach(async ({ page }) => {
@@ -62,8 +62,51 @@ test.describe("timeline", () => {
         await page.locator("#next-error-btn").click();
         await expect(page.locator("#inspector .big")).toBeVisible();
         const id = (await inspectorEventId(page).textContent())!.trim();
+        await expect(page.locator("#inspector .big")).toHaveText(/\.failed|\.error|retry\.scheduled|recovery\.action|guard\./);
+        await showView(page, "Events");
         await expect(page.locator("#table-wrap tr.selected")).toContainText(/\.failed|\.error|retry\.scheduled|recovery\.action|guard\./);
         expect(id.length).toBeGreaterThan(0);
         expect(await visibleCount(page)).toBeLessThan(FIXTURE_EVENTS);
+    });
+
+    test("Previous error steps back through the errors", async ({ page }) => {
+        await page.locator("#next-error-btn").click(); // at the end: nothing later
+        await expect(page.locator("#warnings")).toContainText("No later error event.");
+        await page.locator("#prev-error-btn").click();
+        const last = (await inspectorEventId(page).textContent())!.trim();
+        await expect(page.locator("#inspector .big")).toHaveText(/\.failed|\.error|retry\.scheduled|recovery\.action|guard\./);
+        await expect(page.locator("#warnings")).not.toContainText("No later error event.");
+        await page.locator("#prev-error-btn").click();
+        await expect(inspectorEventId(page)).not.toHaveText(last);
+        await page.locator("#next-error-btn").click();
+        await expect(inspectorEventId(page)).toHaveText(last);
+    });
+
+    test("legend and text alternative describe the timeline", async ({ page }) => {
+        const legend = page.locator("#timeline-legend");
+        await expect(legend).toBeVisible();
+        for (const label of ["request", "inference", "error", "request span", "failed request", "selected", "evidence", "cursor"]) {
+            await expect(legend.getByText(label, { exact: true })).toBeVisible();
+        }
+        const summary = page.locator("#timeline-summary");
+        await expect(summary).toContainText(`${FIXTURE_EVENTS} events`);
+        await expect(summary).toContainText("By class:");
+        await expect(page.locator("#timeline svg")).toHaveAttribute("aria-describedby", "timeline-summary");
+    });
+
+    test("the timeline steps through events with the keyboard", async ({ page }) => {
+        const timeline = page.locator("#timeline");
+        await timeline.focus();
+        await page.keyboard.press("Home");
+        await expect(page.locator("#inspector dl.kv dt", { hasText: /^sequence$/ }).locator("xpath=following-sibling::dd[1]")).toHaveText("0");
+        await expect(page.locator("#timeline-summary")).toContainText("Selected: session.started");
+        const first = (await inspectorEventId(page).textContent())!.trim();
+        await page.keyboard.press("ArrowRight");
+        await expect(inspectorEventId(page)).not.toHaveText(first);
+        await page.keyboard.press("ArrowLeft");
+        await expect(inspectorEventId(page)).toHaveText(first);
+        await page.keyboard.press("End");
+        await expect(page.locator("#follow-check")).toBeChecked();
+        expect(await visibleCount(page)).toBe(FIXTURE_EVENTS);
     });
 });
