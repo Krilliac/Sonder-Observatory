@@ -12,6 +12,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         node: [20, 22]
     steps:
@@ -19,7 +20,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      # No package-lock.json is committed yet (see docs/DECISIONS.md).
+      # No package-lock.json yet; .npmrc sets legacy-peer-deps=true
+      # (see docs/DECISIONS.md).
       - run: npm install --no-audit --no-fund
       - run: npm run lint
       - run: npm test

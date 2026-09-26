@@ -3,6 +3,7 @@ import { tokensToCssVariables } from "../design/tokens";
 import { ObservatoryApp } from "./app";
 import type { ObservatoryPanel } from "./panels";
 import "./styles.css";
+import "./views.css";
 
 for (const [name, value] of Object.entries(tokensToCssVariables(tokens))) {
     document.documentElement.style.setProperty(name, value);
@@ -12,7 +13,8 @@ const root = document.getElementById("app");
 if (!root) {
     throw new Error("missing #app root");
 }
-// Additional panels (topology, diagnostics, ...) are registered here by the integrator.
+// Extra generic panels can be registered here. Diagnostics and topology are
+// wired as analysis-view tabs inside ObservatoryApp (see app.ts VIEWS).
 const panels: ObservatoryPanel[] = [];
 
 new ObservatoryApp(root, panels).start(new URLSearchParams(window.location.search));

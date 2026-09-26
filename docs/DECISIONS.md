@@ -9,8 +9,13 @@ be revisited; record the replacement here rather than editing history.
   installed on the development machine, so npm avoids an extra tool.
 - **Lockfile:** not committed yet because the initial push went through the
   GitHub API, where an 86 kB generated lockfile is impractical. CI uses
-  `npm install`. Next step: run `npm install` on a dev machine and commit
-  `package-lock.json`, then switch CI to `npm ci` with npm caching.
+  `npm install`. Next step: commit a `package-lock.json` generated on a dev
+  machine (with the `.npmrc` below in place), then switch CI to `npm ci`.
+- **Peer deps:** on Node 22, npm 10.9's peer-set resolution crashes
+  (`Cannot read properties of null (reading 'edgesOut')`) on the
+  Vite 8 / Vitest 4 peer graph. The committed `.npmrc` sets
+  `legacy-peer-deps=true` so `npm install` works on Node 20 and 22. npm 11
+  does not crash; revisit once npm 10 is no longer the Node 22 default.
 - **Fixture file:** `fixtures/synthetic-session.ndjson` is generated
   deterministically by `scripts/generate-fixture.mjs` via npm `pre*` scripts
   and is git-ignored, so it can never drift from its generator.
