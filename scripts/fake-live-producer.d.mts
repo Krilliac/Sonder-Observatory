@@ -17,14 +17,22 @@ export interface FakeLiveProducerOptions {
     disconnectAfter?: number;
     /** Honour Last-Event-ID / ?last_event_id. Default true. */
     resume?: boolean;
-    /** Replay forever as new sessions. Default false. */
+    /**
+     * Replay forever as new sessions. Default false: resuming after the last
+     * event then sends nothing more.
+     */
     loop?: boolean;
-    /** SSE `retry:` hint in ms. Default 1000. */
+    /** SSE `retry:` hint in ms. Default 2000 (the live producer protocol v1 value). */
     retryMs?: number;
+    /**
+     * Exact-match CORS allowlist. Default DEFAULT_CORS_ORIGINS. A present but
+     * unlisted Origin gets 403 forbidden_origin; no Origin is unaffected.
+     */
+    corsOrigins?: readonly string[];
     /**
      * Relabel the events as a producer of this role (name, role, a fresh
      * instance_id, contiguous sequences, event_id = instance-sequence).
-     * Default: serve the events unchanged.
+     * Default: keep ids, sequences and names (only producer.synthetic is set).
      */
     role?: FakeProducerRole;
     /** Instance id to use instead of a random one. */
@@ -75,6 +83,7 @@ export interface FakeLiveProducer {
 
 export const DEFAULT_FIXTURE: string;
 export const DISCOVERY_PATH: string;
+export const DEFAULT_CORS_ORIGINS: readonly string[];
 export const ROLE_MODES: Record<FakeProducerRole, { name: string | null; prefix: string; hexBytes: number }>;
 export function loadEvents(file?: string): Record<string, unknown>[];
 export function readTokenFile(path: string): string;

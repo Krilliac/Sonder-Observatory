@@ -96,6 +96,52 @@ describe("fake live producer role modes", () => {
         }
     });
 
+    it("uses an exact-match origin allowlist: 403 forbidden_origin for others, no Origin unaffected", async () => {
+        const p = await producer({ role: "runtime" });
+        for (const method of ["GET", "OPTIONS"]) {
+            const res = await fetch(p.urls.discovery, { method, headers: { Origin: "https://evil.example" } });
+            expect(res.status, method).toBe(403);
+            expect(res.headers.get("access-control-allow-origin"), method).toBeNull();
+            expect((await res.json()).error.code).toBe("forbidden_origin");
+        }
+        const plain = await fetch(p.urls.discovery);
+        expect(plain.status).toBe(200);
+        expect(plain.headers.get("access-control-allow-origin")).toBeNull();
+        const allowed = await fetch(p.urls.discovery, { headers: { Origin: "tauri://localhost" } });
+        expect(allowed.headers.get("access-control-allow-origin")).toBe("tauri://localhost");
+        expect(allowed.headers.get("vary")).toBe("Origin");
+        const custom = await producer({ role: "runtime", corsOrigins: ["https://viewer.example"] });
+        expect((await fetch(custom.urls.discovery, { headers: { Origin: ORIGIN } })).status).toBe(403);
+        expect((await fetch(custom.urls.discovery, { headers: { Origin: "https://viewer.example" } })).status).toBe(200);
+    });
+
+    it("starts SSE with retry: 2000 and labels no-role events synthetic", async () => {
+        const events = [0, 1].map((sequence) => ({
+            schema: "sonder.observatory.event/1",
+            event_id: `e-${sequence}`,
+            sequence,
+            event_type: "session.started",
+            wall_time: "2026-09-26T08:00:00.000Z",
+            mono_ns: 1000 + sequence,
+            session_id: "s",
+            producer: { name: "recorded", version: "0", node_id: "n" },
+            attributes: {},
+        }));
+        const p = await producer({ events });
+        expect(p.events.map((e) => (e.producer as { synthetic?: unknown }).synthetic)).toEqual([true, true]);
+        expect(p.events.map((e) => e.event_id)).toEqual(["e-0", "e-1"]);
+        const controller = new AbortController();
+        const res = await fetch(p.urls.sse, { signal: controller.signal });
+        const reader = res.body!.getReader();
+        let text = "";
+        while (!text.includes("data:")) {
+            text += new TextDecoder().decode((await reader.read()).value);
+        }
+        controller.abort();
+        expect(text.split("\n")[0]).toBe("retry: 2000");
+        expect(text).toContain('"synthetic":true');
+    });
+
     it("sends blank-line NDJSON heartbeats", async () => {
         const p = await producer({ role: "inference", events: [], heartbeatMs: 20 }).catch((e: Error) => e);
         expect(p).toBeInstanceOf(Error); // no events: refuses to start
@@ -123,6 +169,45 @@ describe("fake live producer role modes", () => {
         };
         expect((await read(`${p.instanceId}-4`)).sequence).toBe(5);
         expect((await read("tel-00000000000000ff-4")).sequence).toBe(0);
+    });
+
+    it("sends nothing after the last event unless --loop is set", async () => {
+        /** Reads what arrives within `ms` after resuming from `lastId`. */
+        const readFor = async (url: string, lastId: string, ms: number) => {
+            const controller = new AbortController();
+            const res = await fetch(url, { headers: { "Last-Event-ID": lastId }, signal: controller.signal });
+            const reader = res.body!.getReader();
+            let text = "";
+            const timer = setTimeout(() => controller.abort(), ms);
+            try {
+                for (;;) {
+                    const { value, done } = await reader.read();
+                    if (done) {
+                        break;
+                    }
+                    text += new TextDecoder().decode(value);
+                }
+            } catch {
+                // aborted after `ms`
+            } finally {
+                clearTimeout(timer);
+            }
+            return text
+                .split("\n")
+                .filter((l) => l.trim() !== "")
+                .map((l) => JSON.parse(l) as { sequence: number; event_id: string; session_id: string });
+        };
+        const p = await producer({ role: "inference" });
+        const last = p.events.length - 1;
+        expect(await readFor(p.urls.ndjson, `${p.instanceId}-${last}`, 300)).toEqual([]);
+        expect(await readFor(p.urls.ndjson, `${p.instanceId}-${last + 50}`, 300)).toEqual([]);
+        expect(p.stats.sent).toBe(0);
+
+        const looping = await producer({ role: "inference", loop: true });
+        const next = await readFor(looping.urls.ndjson, `${looping.instanceId}-${last}`, 300);
+        expect(next.length).toBeGreaterThan(0);
+        expect(next[0]).toMatchObject({ sequence: last + 1, event_id: `${looping.instanceId}-${last + 1}` });
+        expect(next[0]!.session_id).toMatch(/_p1$/);
     });
 
     it("feeds the connection manager from its base URL with a token", async () => {
@@ -176,6 +261,10 @@ describe("conformance checks", () => {
         idMismatch?: boolean;
         gap?: boolean;
         gapNotice?: boolean;
+        /** Answer CORS with `*` instead of echoing the origin. */
+        wildcard?: boolean;
+        /** First SSE line. Default "retry: 2000". */
+        retryLine?: string;
     }
 
     /** A minimal producer whose SSE stream can be broken in one way. */
@@ -193,7 +282,9 @@ describe("conformance checks", () => {
             producer: { name: "bad", version: "0", node_id: "n", instance_id: instance, role: "fixture", synthetic: true },
             attributes: {},
         }));
-        const cors = { "Access-Control-Allow-Origin": "*" };
+        const cors: Record<string, string> = opts.wildcard
+            ? { "Access-Control-Allow-Origin": "*" }
+            : { "Access-Control-Allow-Origin": ORIGIN, Vary: "Origin" };
         const server = createServer((req, res) => {
             const path = new URL(req.url ?? "/", "http://x").pathname;
             if (req.method === "OPTIONS") {
@@ -223,7 +314,7 @@ describe("conformance checks", () => {
                 const last = req.headers["last-event-id"];
                 const from = typeof last === "string" ? Number(last.split("-").pop()) + 1 : 0;
                 res.writeHead(200, { ...cors, "Content-Type": "text/event-stream" });
-                res.write("retry: 2000\n\n");
+                res.write(`${opts.retryLine ?? "retry: 2000"}\n\n`);
                 for (const e of events.filter((x) => x.sequence >= from)) {
                     if (opts.gapNotice && e.sequence === 3) {
                         res.write(": resume-gap 2-2\n\n");
@@ -249,6 +340,25 @@ describe("conformance checks", () => {
 
     it("pass against a minimal conforming producer", async () => {
         expect((await checkProducer(await badProducer({}), options)).failures).toEqual([]);
+    });
+
+    it("fail on a wildcard Access-Control-Allow-Origin", async () => {
+        const report = await checkProducer(await badProducer({ wildcard: true }), options);
+        expect(report.failures.join("\n")).toMatch(/discovery: Access-Control-Allow-Origin is "\*", expected exactly/);
+        expect(report.failures.join("\n")).toMatch(/Vary does not include Origin/);
+    });
+
+    it("fail on a retry hint other than retry: 2000", async () => {
+        const report = await checkProducer(await badProducer({ retryLine: "retry: 1000" }), options);
+        expect(report.failures.join("\n")).toMatch(/sse: the first line is "retry: 1000", expected "retry: 2000"/);
+    });
+
+    it("check that a disallowed origin is refused when asked to", async () => {
+        const p = await producer({ role: "inference" });
+        const denied = await checkProducer(p.urls.base, { ...options, minEvents: 12, deniedOrigin: "https://denied.example" });
+        expect(denied.failures).toEqual([]);
+        const permissive = await checkProducer(await badProducer({}), { ...options, deniedOrigin: "https://denied.example" });
+        expect(permissive.failures.join("\n")).toMatch(/disallowed Origin https:\/\/denied.example returned HTTP 200, expected 403/);
     });
 
     it("fail on an SSE event: name", async () => {

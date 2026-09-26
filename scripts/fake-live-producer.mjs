@@ -1,8 +1,9 @@
 // Dev/test-only fake live producer: serves a recorded or synthetic NDJSON
 // event log over WebSocket, Server-Sent Events and plain NDJSON-over-HTTP
 // from one loopback port, so src/ingest/live can be exercised without Sonder
-// Runtime or Sonder-Inference. Every event it serves is synthetic and keeps
-// (or, in role modes, gets) `producer.synthetic: true`.
+// Runtime or Sonder-Inference. Everything it serves is labelled synthetic:
+// every event carries `producer.synthetic: true` (added when the log lacks
+// it) and the discovery document says `synthetic: true`.
 //
 //   GET /.well-known/sonder-telemetry  discovery (sonder.telemetry.producer/1)
 //   ws://HOST:PORT/ws                  one NDJSON frame per batch
@@ -14,26 +15,34 @@
 // (docs/TELEMETRY_PROTOCOL.md): producer name, role and a fresh per-process
 // instance_id (rt-<12 hex>, tel-<16 hex>, fx-<12 hex>); sequences are
 // renumbered 0..n-1 in replay order and event_id = <instance_id>-<sequence>.
-// Without --role the events are served unchanged (existing tests rely on it).
+// Without --role the events keep their ids, sequences and producer names
+// (existing tests rely on it); only `producer.synthetic: true` is added.
 //
 // Resume: `Last-Event-ID` wins over `?last_event_id=`. In role modes an id of
 // this instance resumes after its sequence; an id of another instance (a
 // "restarted" producer) or no id replays the whole retained log, and
-// `?since=now` sends only new events (with --loop). Without --role, a known
-// event id resumes after it and an unknown id replays from the start.
+// `?since=now` sends only new events (with --loop). Resuming after the last
+// event sends nothing more unless --loop is set (then the next pass follows).
+// Without --role, a known event id resumes after it and an unknown id
+// replays from the start.
 //
 // Auth: with --token-file every route except the CORS preflight requires
-// `Authorization: Bearer <token>` (401 otherwise). CORS: the request Origin
-// is echoed (dev/test only; real producers use an exact allowlist) and the
-// preflight allows Accept, Authorization, Cache-Control, Content-Type and
-// Last-Event-ID. Heartbeats: `: keepalive` (SSE) or a blank line (NDJSON)
-// every --heartbeat-ms (default 15000).
+// `Authorization: Bearer <token>` (401 otherwise). CORS follows the producer
+// rules of the ecosystem contract: an exact-match origin allowlist (default:
+// the Observatory dev, preview and Tauri origins; each --cors-origin adds
+// one), an allowed Origin is echoed with `Vary: Origin`, a present but not
+// allowed Origin gets 403 forbidden_origin, and requests without an Origin
+// are unaffected. The preflight allows Accept, Authorization, Cache-Control,
+// Content-Type and Last-Event-ID. SSE starts with `retry: 2000` (--retry-ms).
+// Heartbeats: `: keepalive` (SSE) or a blank line (NDJSON) every
+// --heartbeat-ms (default 15000).
 //
 // Usage:
 //   node scripts/fake-live-producer.mjs [--file fixtures/synthetic-session.ndjson]
 //       [--host 127.0.0.1] [--port 8766] [--pace timeline|burst] [--speed 1]
 //       [--batch 64] [--disconnect-after N] [--no-resume] [--loop]
 //       [--role runtime|inference|fixture] [--token-file PATH] [--heartbeat-ms N]
+//       [--retry-ms N] [--cors-origin ORIGIN]...
 //
 // Also importable: `startFakeLiveProducer(options)` (see the .d.mts file).
 // Binds to loopback by default (docs/SECURITY_PRIVACY.md).
@@ -50,6 +59,16 @@ const here = dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_FIXTURE = resolve(here, "..", "fixtures/synthetic-session.ndjson");
 
 export const DISCOVERY_PATH = "/.well-known/sonder-telemetry";
+
+/** Default exact-match CORS allowlist (Observatory dev, preview and Tauri origins). */
+export const DEFAULT_CORS_ORIGINS = Object.freeze([
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+    "http://127.0.0.1:4173",
+    "http://localhost:4173",
+    "tauri://localhost",
+    "http://tauri.localhost",
+]);
 
 /** Relabelling per role mode. `name: null` keeps the fixture's producer name. */
 export const ROLE_MODES = {
@@ -84,6 +103,15 @@ export function readTokenFile(path) {
         throw new Error("token file must hold one printable ASCII token");
     }
     return token;
+}
+
+/** Adds `producer.synthetic: true` to an event served without a role (see header). */
+function markSynthetic(event) {
+    const producer = event?.producer;
+    if (producer === null || typeof producer !== "object" || Array.isArray(producer) || producer.synthetic === true) {
+        return event;
+    }
+    return { ...event, producer: { ...producer, synthetic: true } };
 }
 
 /** Relabels events as a producer of `role` with one instance id (see header). */
@@ -145,7 +173,7 @@ export async function startFakeLiveProducer(options = {}) {
             : typeof loaded[0].producer?.instance_id === "string" && loaded[0].producer.instance_id !== ""
               ? loaded[0].producer.instance_id
               : `fx-${randomBytes(6).toString("hex")}`);
-    const events = role !== null ? relabelForRole(loaded, role, instanceId) : loaded;
+    const events = role !== null ? relabelForRole(loaded, role, instanceId) : loaded.map(markSynthetic);
     const host = options.host ?? "127.0.0.1";
     const pace = options.pace ?? "burst";
     const speed = options.speed ?? 1;
@@ -153,7 +181,8 @@ export async function startFakeLiveProducer(options = {}) {
     const disconnectAfter = options.disconnectAfter ?? 0;
     const resume = options.resume !== false;
     const loop = options.loop === true;
-    const retryMs = options.retryMs ?? 1000;
+    const retryMs = options.retryMs ?? 2000;
+    const corsOrigins = new Set(options.corsOrigins ?? DEFAULT_CORS_ORIGINS);
     const heartbeatMs = options.heartbeatMs ?? 15_000;
     const token = options.token ?? (options.tokenFile ? readTokenFile(options.tokenFile) : null);
     const log = options.log ?? (() => undefined);
@@ -219,6 +248,10 @@ export async function startFakeLiveProducer(options = {}) {
             }
             stats.resumed.push(lastId);
             const next = parsed.sequence + 1;
+            if (!loop) {
+                // Nothing after the last event: stay live-only, never invent a second pass.
+                return { index: Math.min(next, events.length), pass: 0 };
+            }
             return { index: next % events.length, pass: Math.floor(next / events.length) };
         }
         const i = indexById.get(lastId);
@@ -294,10 +327,17 @@ export async function startFakeLiveProducer(options = {}) {
         };
     }
 
+    /** CORS headers for an allowed or absent Origin; null for a refused one. */
     function corsHeaders(req) {
         const origin = req.headers.origin;
+        if (typeof origin !== "string" || origin === "") {
+            return { Vary: "Origin" };
+        }
+        if (!corsOrigins.has(origin)) {
+            return null;
+        }
         return {
-            "Access-Control-Allow-Origin": typeof origin === "string" && origin !== "" ? origin : "*",
+            "Access-Control-Allow-Origin": origin,
             Vary: "Origin",
             "Access-Control-Expose-Headers": "Content-Type",
         };
@@ -330,6 +370,15 @@ export async function startFakeLiveProducer(options = {}) {
     const server = createServer((req, res) => {
         const url = new URL(req.url ?? "/", `http://${host}`);
         const cors = corsHeaders(req);
+        if (cors === null) {
+            res.writeHead(403, { "Content-Type": "application/json", "Cache-Control": "no-store", Vary: "Origin" });
+            res.end(
+                JSON.stringify({
+                    error: { message: "origin not allowed", type: "invalid_request_error", code: "forbidden_origin", param: null },
+                }) + "\n",
+            );
+            return;
+        }
         if (req.method === "OPTIONS") {
             res.writeHead(204, {
                 ...cors,
@@ -411,6 +460,10 @@ export async function startFakeLiveProducer(options = {}) {
             socket.destroy();
             return;
         }
+        if (corsHeaders(req) === null) {
+            socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+            return;
+        }
         if (token !== null && !sameToken(req.headers.authorization, token)) {
             stats.unauthorized += 1;
             socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
@@ -486,6 +539,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
         return i >= 0 && i + 1 < args.length ? args[i + 1] : fallback;
     };
     const file = option("file", undefined);
+    const corsOrigins = args.flatMap((a, i) => (a === "--cors-origin" && i + 1 < args.length ? [args[i + 1]] : []));
     const tokenFile = option("token-file", undefined);
     startFakeLiveProducer({
         file: file ? resolve(process.cwd(), file) : undefined,
@@ -500,6 +554,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
         role: option("role", undefined),
         tokenFile: tokenFile ? resolve(process.cwd(), tokenFile) : undefined,
         heartbeatMs: Number(option("heartbeat-ms", "15000")),
+        retryMs: Number(option("retry-ms", "2000")),
+        corsOrigins: corsOrigins.length > 0 ? [...DEFAULT_CORS_ORIGINS, ...corsOrigins] : undefined,
         log: (m) => console.log(m),
     }).catch((error) => {
         console.error(error.message);

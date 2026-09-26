@@ -16,8 +16,13 @@ import type { ObservatoryEvent } from "../../src/protocol/events";
 import { formatIssues, validateEvent } from "../../src/protocol/validate";
 
 export interface ConformanceOptions {
-    /** Origin sent on every request; CORS answers must allow it. */
+    /** Origin sent on every request; CORS answers must echo it exactly. */
     origin: string;
+    /**
+     * An Origin the producer must refuse: discovery with it must answer
+     * 403 forbidden_origin without allowing it. Checked only when given.
+     */
+    deniedOrigin?: string;
     token?: string;
     /** Stop reading a stream after this many events. Default 20. */
     minEvents?: number;
@@ -41,6 +46,9 @@ export interface ConformanceReport {
     sse: StreamSample | null;
     ndjson: StreamSample | null;
 }
+
+/** The SSE reconnection hint every producer sends first (live producer protocol v1). */
+export const SSE_RETRY_LINE = "retry: 2000";
 
 /** Headers a browser-based Observatory sends on HTTP streams (contract section 0). */
 export const REQUIRED_ALLOW_HEADERS = ["accept", "authorization", "cache-control", "last-event-id"] as const;
@@ -194,10 +202,44 @@ function checkSequence(
     }
 }
 
+/** Exact-match allowlists echo the Origin (never `*`) and send `Vary: Origin`. */
 function checkCorsResponse(label: string, headers: Headers, origin: string, failures: string[]): void {
     const allow = headers.get("access-control-allow-origin");
-    if (allow !== origin && allow !== "*") {
-        failures.push(`${label}: Access-Control-Allow-Origin is ${JSON.stringify(allow)}, expected ${origin}`);
+    if (allow !== origin) {
+        failures.push(
+            `${label}: Access-Control-Allow-Origin is ${JSON.stringify(allow)}, expected exactly ${origin}` +
+                (allow === "*" ? " (producers use an exact-match allowlist, not a wildcard)" : ""),
+        );
+    }
+    if (!headerList(headers.get("vary")).includes("origin")) {
+        failures.push(`${label}: Vary does not include Origin`);
+    }
+}
+
+async function checkDeniedOrigin(
+    fetchImpl: typeof globalThis.fetch,
+    url: string,
+    denied: string,
+    auth: Record<string, string>,
+    failures: string[],
+): Promise<void> {
+    let response: Response;
+    try {
+        response = await fetchImpl(url, { headers: { Origin: denied, Accept: "application/json", ...auth } });
+    } catch (error) {
+        failures.push(`cors: request with a disallowed Origin failed (${(error as Error).message})`);
+        return;
+    }
+    const body = (await response.json().catch(() => null)) as { error?: { code?: unknown } } | null;
+    if (response.status !== 403 || body?.error?.code !== "forbidden_origin") {
+        failures.push(
+            `cors: discovery with disallowed Origin ${denied} returned HTTP ${response.status}` +
+                `${typeof body?.error?.code === "string" ? ` ${body.error.code}` : ""}, expected 403 forbidden_origin`,
+        );
+    }
+    const allow = response.headers.get("access-control-allow-origin");
+    if (allow === denied || allow === "*") {
+        failures.push(`cors: a disallowed Origin was answered with Access-Control-Allow-Origin ${allow}`);
     }
 }
 
@@ -248,8 +290,8 @@ function sseSample(
 ): { sample: StreamSample; items: { event: ObservatoryEvent; gapBefore: boolean }[] } {
     const blocks = parseSseBlocks(text);
     const firstLine = text.replace(/\r\n?/g, "\n").split("\n").find((l) => l !== "");
-    if (!firstLine?.startsWith("retry:")) {
-        failures.push(`${label}: the first line is ${JSON.stringify(firstLine ?? "")}, expected "retry: <ms>"`);
+    if (firstLine !== SSE_RETRY_LINE) {
+        failures.push(`${label}: the first line is ${JSON.stringify(firstLine ?? "")}, expected ${JSON.stringify(SSE_RETRY_LINE)}`);
     }
     const events: ObservatoryEvent[] = [];
     const comments: string[] = [];
@@ -331,6 +373,9 @@ export async function checkProducer(url: string, options: ConformanceOptions): P
         failures.push(`discovery: Content-Type ${response.headers.get("content-type")}, expected application/json`);
     }
     checkCorsResponse("discovery", response.headers, options.origin, failures);
+    if (options.deniedOrigin !== undefined) {
+        await checkDeniedOrigin(fetchImpl, discoveryUrl, options.deniedOrigin, auth, failures);
+    }
     const parsed = parseDiscovery(await response.json().catch(() => null));
     if (!parsed.ok) {
         failures.push(`discovery: ${formatIssues(parsed.issues)}`);
