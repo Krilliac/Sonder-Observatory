@@ -7,6 +7,7 @@ import { deriveMetrics, type Metrics } from "../query/metrics";
 import { loadRecording, RECORDING_EXTENSION, serializeRecording } from "../recording/sobs";
 import { ReplayCursor } from "../replay/controller";
 import { SessionStore } from "../replay/session";
+import { TopologyPanel } from "../topology";
 import { checkEndpoint, DEFAULT_ENDPOINT, LiveConnection, type ConnectionState } from "../transport/live";
 import { byId, h, svg } from "./dom";
 import { fmtBytes, fmtMs, fmtPct, fmtRate, fmtRelNs, summarizeAttributes } from "./format";
@@ -15,7 +16,10 @@ import type { ObservatoryPanel } from "./panels";
 const TABLE_LIMIT = 400;
 const SPEEDS = [0.25, 0.5, 1, 2, 4, 8];
 /** Analysis views shown as tabs below the event table. */
-const VIEWS = [{ id: "diagnostics", title: "Diagnostics" }] as const;
+const VIEWS = [
+    { id: "diagnostics", title: "Diagnostics" },
+    { id: "agents", title: "Agents" },
+] as const;
 type ViewId = (typeof VIEWS)[number]["id"];
 
 export class ObservatoryApp {
@@ -35,12 +39,14 @@ export class ObservatoryApp {
     private renderQueued = false;
     private readonly panels: ObservatoryPanel[];
     private view: ViewId = "diagnostics";
-    /** Event ids highlighted in timeline/table (diagnostics evidence). */
+    /** Event ids highlighted in timeline/table (diagnostics or topology evidence). */
     private highlighted = new Set<string>();
     private readonly diag: FindingsController;
     private findingsDirty = true;
     private findingsVersion = 0;
     private diagStamp = "";
+    private readonly topology: TopologyPanel;
+    private topologyDirty = true;
 
     constructor(root: HTMLElement, panels: readonly ObservatoryPanel[] = []) {
         this.root = root;
@@ -57,6 +63,18 @@ export class ObservatoryApp {
                     this.selectedId = event.event_id;
                 }
             },
+        });
+        this.topology = new TopologyPanel({
+            onSelectEvent: (event) => {
+                this.setFollow(false);
+                this.cursor.seek(this.cursor.relativeTime(event));
+                this.select(event);
+            },
+            onSelectionChange: (_selection, evidenceEventIds) => {
+                this.highlighted = new Set(evidenceEventIds);
+                this.render();
+            },
+            relativeTime: (event) => fmtRelNs(this.cursor.relativeTime(event)),
         });
         this.live = new LiveConnection({
             onEvents: (events) => {
@@ -78,6 +96,11 @@ export class ObservatoryApp {
 
     start(params: URLSearchParams): void {
         this.root.replaceChildren(this.layout(params.get("ws") ?? DEFAULT_ENDPOINT));
+        byId("view-agents").append(this.topology.element);
+        const view = VIEWS.find((v) => v.id === params.get("view"));
+        if (view) {
+            this.view = view.id;
+        }
         this.bindControls();
         window.addEventListener("resize", () => this.queueRender());
         const ws = params.get("ws");
@@ -310,6 +333,7 @@ export class ObservatoryApp {
         this.cursor = new ReplayCursor(this.store.events);
         this.cursor.seek(this.follow ? this.cursor.durationNs : previous);
         this.findingsDirty = true;
+        this.topologyDirty = true;
     }
 
     private setFollow(follow: boolean): void {
@@ -403,6 +427,19 @@ export class ObservatoryApp {
             byId(`view-${v.id}`).hidden = !active;
         }
         this.renderDiagnostics();
+        this.renderTopology();
+    }
+
+    /** Topology layout uses the whole session; the graph itself is derived at the replay cursor. */
+    private renderTopology(): void {
+        if (byId("view-agents").hidden) {
+            return;
+        }
+        if (this.topologyDirty) {
+            this.topologyDirty = false;
+            this.topology.setEvents(this.store.events);
+        }
+        this.topology.setTime(this.follow ? null : this.cursor.originNs + this.cursor.position);
     }
 
     /** Findings are recomputed over the whole session when it changes (fine for M1-sized sessions). */
