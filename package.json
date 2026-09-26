@@ -18,6 +18,7 @@
     "pretest": "node scripts/generate-fixture.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:e2e": "playwright test",
     "fixture": "node scripts/generate-fixture.mjs",
     "fake-producer": "node scripts/fake-producer.mjs",
     "tauri": "tauri"
@@ -26,7 +27,9 @@
     "@tauri-apps/api": "^2.11.1"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "1.63.0",
     "@tauri-apps/cli": "^2.11.5",
     "@types/node": "^22.19.0",
     "@types/ws": "^8.18.1",
