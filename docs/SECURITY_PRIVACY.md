@@ -48,6 +48,32 @@ When remote Observatory is enabled:
 - authorize telemetry level separately from normal API actions
 - rate-limit and cap retained replay data
 
+### Rules Observatory enforces (live producer protocol v1)
+
+- Loopback by default. Plain `http://` and `ws://` are refused to any
+  non-loopback host (browser, manager and desktop launch alike); remote
+  producers need `https://` / `wss://` and a bearer token.
+- URLs with credentials (`user:pass@`) or a `token` / `access_token` query
+  parameter are refused. Tokens never go in URLs, argv or logs.
+- A bearer token is bound to one producer and sent only as
+  `Authorization: Bearer` on that producer's HTTP requests. It is not sent
+  over WebSocket (browsers cannot set the header), not sent to a stream on a
+  different origin than the discovery URL, not exposed in connection lists,
+  and not persisted. The desktop shell reads `--token-file` once (max 4 KiB)
+  and binds it to the preceding `--connect`, so one producer's key is never
+  sent to another.
+- The CORS allowlists are the producers' (exact match): Sonder-Inference
+  `--cors-origin` (defaults: the Observatory dev, preview and Tauri origins),
+  Sonder Runtime its telemetry origin allowlist. Observatory's messages name
+  the setting to change and never suggest a wildcard.
+- Producer telemetry is content-free by default: Inference exports token text
+  only with `--capture-text` (announced as `text_capture`), Runtime never
+  exports prompts, responses, summaries or provider payloads.
+
+Open: Runtime telemetry currently needs Runtime's admin authorization (granted
+by local-open loopback mode). A read-only, short-lived telemetry capability
+would be less privileged; it is not specified yet.
+
 ## Recording hygiene
 
 - manifest records the capture policy

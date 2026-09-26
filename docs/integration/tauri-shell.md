@@ -50,9 +50,11 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 
 export interface RecordingGrant { id: string; name: string; kind: 'file' | 'folder' }
 export interface LaunchInfo {
-  connect: string | null;     // validated ws(s) URL
+  connect: string | null;     // first validated --connect URL (ws, wss, http, https)
+  connectAll?: string[];      // every validated --connect URL, in order
+  connectTokens?: (string | null)[]; // bearer token per connectAll entry; memory only, never log
   session: string | null;
-  capability: string | null;  // short-lived token; keep it in memory and never log it
+  capability: string | null;  // token not bound to a URL; keep it in memory and never log it
   open: RecordingGrant | null;
   warnings: string[];         // show these in the UI
 }
@@ -89,7 +91,10 @@ export async function readRecordingEntry(grant: string, entry?: string): Promise
 At startup:
 
 1. `const info = await getLaunchInfo()`.
-2. If `info.connect` is set, connect with `info.session` and `info.capability`.
+2. Connect every `info.connectAll` URL, each with its own `connectTokens[i]`
+   as a bearer token (`launchProducers(info)` builds the
+   `LiveConnectionManager.add()` inputs). Launch argument rules: see
+   [desktop notes](desktop.md), "Launch arguments for several producers".
 3. If `info.open` is set, load it. For a folder grant, read `manifest.json`, then `events.ndjson`.
 4. Surface `info.warnings`.
 
@@ -147,8 +152,9 @@ These were run on Linux (rustc 1.85.1, webkit2gtk 4.1):
 ## Open items
 
 - Pop-out/reattach from Flutter (Milestone 4). A single-instance plugin and a
-  deep-link or IPC handoff can be added then. The current CLI contract already
-  carries endpoint, session, and capability.
+  deep-link or IPC handoff can be added then. The current CLI contract
+  carries one or more `--connect` URLs, per-URL `--token-file`, `--session`
+  and `--open`.
 - Real icons (see `src-tauri/README.md`).
 - There's no LICENSE file yet (`package.json` says `UNLICENSED`). `Cargo.toml`
   has no `license` field; set it and the bundle metadata once a license is chosen.

@@ -168,12 +168,66 @@ for the `WebSocketLike` types and `DEFAULT_ENDPOINT`. The Tauri CSP
 shell, `--connect <ws-url>` starts the same connection through
 `ObservatoryApp.connectLive()`, and `--open` wins when both are given.
 
+## 2026-09-26 — Live producer protocol v1
+
+Implements Observatory's part of the Sonder ecosystem integration contract v1
+(sections 5 to 8). The full protocol is in
+[telemetry protocol](TELEMETRY_PROTOCOL.md), "Live producer protocol v1".
+Recorded for owner review: it resolves the protocol-ownership and handshake
+questions that were open below.
+
+- **Ownership.** Observatory owns the telemetry shapes in `protocol/`: the
+  envelope (`sonder.observatory.event/1`, now declaring the additive optional
+  `producer.instance_id`, `role` and `synthetic`) and the discovery document
+  (`sonder.telemetry.producer/1`). Each producer owns its event-vocabulary doc.
+  Additive changes stay within a major; renames and removals need a new major
+  that lands in `protocol/` first. Schema first, then the TypeScript mirror
+  and its drift test, then consumers.
+- **SSE-first producers.** Sonder Runtime and Sonder-Inference serve
+  telemetry as SSE (default) and NDJSON over HTTP GET, not WebSocket: a
+  browser cannot send `Authorization` on a WebSocket handshake, and HTTP
+  avoids in-house WebSocket framing in the producers. Observatory keeps its
+  WebSocket client for other producers.
+- **Direct multi-producer connections.** Observatory connects to each
+  producer itself (`LiveConnectionManager`, one `LiveIngestClient` per
+  producer, one shared `SessionStore`) and correlates them: replay order is
+  `mono_ns` (host-monotonic, same host only) then `sequence`; a Runtime turn
+  id is the Inference request's `run_id` and `parent_request_id`. Runtime does
+  not relay Inference telemetry. Metrics key request spans by
+  (producer stream, `request_id`).
+- **Discovery document.** `GET /.well-known/sonder-telemetry` names the
+  producer (including `instance_id`, `role`, `synthetic`), its streams, resume
+  window, auth and clock. A base URL resolves through it; a stream URL still
+  works directly. Observatory refuses another discovery major or event schema
+  with a message. Validation is the hand-written `validateDiscovery` (no
+  JSON-Schema library, per "Runtime dependencies"), kept aligned by
+  `tests/protocol-discovery-drift.test.ts`.
+- **Resume.** `event_id = <instance_id>-<sequence>`; `Last-Event-ID` (over
+  `?last_event_id=`) resumes within the same instance; another instance
+  replays the retained window; a lost window is announced as
+  `: resume-gap <from>-<to>`.
+- **Token handling.** Bearer tokens are per producer, in memory only, sent as
+  `Authorization` on HTTP requests to that producer, never in URLs, argv,
+  logs or storage, never over WebSocket, never to a stream on another origin.
+  Plain `http://` / `ws://` to non-loopback hosts, URL credentials and
+  `token` / `access_token` query parameters are refused (this replaces the
+  earlier warning-only behaviour for remote plain endpoints). The desktop
+  shell's `--token-file` binds to the `--connect` it follows.
+- **Drop accounting.** `telemetry.dropped` counts are cumulative per producer
+  instance: metrics and `.sobs` manifests take the latest value per instance
+  and sum over instances; a report without a count no longer counts as 1.
+  Per-subscriber stream losses are not `telemetry.dropped` (they show as
+  sequence gaps).
+- **Conformance.** `tests/conformance/` checks a running producer
+  (`SONDER_CONFORMANCE_URLS`); the fake producer's `--role` modes conform.
+
 ## Open questions
 
-- Protocol package ownership and compatibility/version policy (Milestone 0).
-- Producer attribute names for token counts, memory/compute samples, tool
-  call ids and dropped-event counts.
-- Live transport handshake: capability token, resume-from-sequence, and
-  producer capability advertisement at session start.
-- Redaction/capture policy field in `session.started` (the manifest reads
-  `attributes.text_capture` if present, otherwise records `unspecified`).
+- Producer attribute names for memory/compute samples and tool call ids
+  beyond what docs/telemetry-schema.md records.
+- A read-only, short-lived telemetry capability issued by Runtime (today
+  Runtime telemetry needs admin authorization, granted by local-open
+  loopback mode).
+- A discovery field for per-subscriber loss counts (for example
+  `subscriber_dropped_events`); not pinned by the v1 contract.
+- Cross-host clock alignment (v1 merges producers on one host only).
