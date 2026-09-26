@@ -425,7 +425,12 @@ table.events tr.cls-error td:nth-child(3) {
     margin: 0;
 }
 
+/* WCAG 2.2 target size (2.5.8): at least 24x24 CSS px. */
 button.link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    min-width: 24px;
     background: none;
     border: none;
     padding: 1px 0;

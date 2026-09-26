@@ -3,15 +3,17 @@ import { expect, test } from "@playwright/test";
 import { openFixture } from "./helpers";
 
 /**
- * axe-core WCAG 2.x A/AA scan. The allowlist is empty: the findings-list ARIA
- * and selected-row contrast violations found in #12 were fixed in
- * feat/a11y-fixes (docs/integration/e2e.md). If a violation must ever be
- * tolerated temporarily, add it here with a target pattern and a note; it is
- * matched by rule AND by every failing element, so anything new still fails.
+ * axe-core WCAG 2.0/2.1/2.2 A/AA scan. The allowlist is empty: the
+ * findings-list ARIA and selected-row contrast violations found in #12 were
+ * fixed in feat/a11y-fixes, and the 2.2 target-size finding on `.link`
+ * buttons in the launch/a11y follow-up (docs/integration/e2e.md). If a
+ * violation must ever be tolerated temporarily, add it here with a target
+ * pattern and a note; it is matched by rule AND by every failing element, so
+ * anything new still fails.
  */
 const KNOWN_VIOLATIONS: Record<string, { targets: RegExp; note: string }> = {};
 
-const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"];
+const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"];
 
 for (const [name, query] of [
     ["diagnostics view", ""],

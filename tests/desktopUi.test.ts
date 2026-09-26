@@ -178,8 +178,25 @@ describe("DesktopIntegration", () => {
             warnings: [],
         };
         await new DesktopIntegration(host, doc, fakeBridge({ getLaunchInfo: async () => info })).mount();
-        expect(host.connectLive).toHaveBeenCalledWith("ws://127.0.0.1:8766/ws");
+        expect(host.connectLive).toHaveBeenCalledWith("ws://127.0.0.1:8766/ws", { session: null, capability: null });
         expect(host.openRecordingText).not.toHaveBeenCalled();
+    });
+
+    it("passes --session and --capability to the live connection", async () => {
+        const { doc } = fakeDoc();
+        const host = { openRecordingText: vi.fn(), connectLive: vi.fn() };
+        const info: LaunchInfo = {
+            connect: "http://127.0.0.1:8766/events",
+            session: "ses_42",
+            capability: "cap-token",
+            open: null,
+            warnings: [],
+        };
+        await new DesktopIntegration(host, doc, fakeBridge({ getLaunchInfo: async () => info })).mount();
+        expect(host.connectLive).toHaveBeenCalledWith("http://127.0.0.1:8766/events", {
+            session: "ses_42",
+            capability: "cap-token",
+        });
     });
 
     it("prefers --open over --connect and says so", async () => {
