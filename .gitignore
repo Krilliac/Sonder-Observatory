@@ -1,0 +1,31 @@
+# Local credentials and environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Generated output and local caches
+/build/
+/dist/
+/out/
+/artifacts/
+/.cache/
+/.venv/
+__pycache__/
+*.py[cod]
+.vs/
+*.log
+Thumbs.db
+.DS_Store
+
+# Model weights are not source
+*.gguf
+*.safetensors
+
+# Frontend/native build output and private recordings
+node_modules/
+/target/
+/src-tauri/target/
+/recordings/
+*.sobs
