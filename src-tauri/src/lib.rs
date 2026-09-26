@@ -8,13 +8,16 @@
 //! - `list_recording_entries` / `read_recording_entry`  read-only access to granted recordings
 //! - `list_recent_recordings` / `open_recent_recording` / `clear_recent_recordings`
 //!   recently granted recordings, persisted in the app data dir (see `recent.rs`)
+//! - `save_export`          native save dialog (Rust side) + write of one export file (see `export.rs`)
 //!
 //! No shell, process, HTTP, fs-plugin, or webview-side dialog access is exposed.
 
+mod export;
 mod launch;
 mod recent;
 mod recording;
 
+use export::SavedFile;
 use launch::LaunchArgs;
 use recent::{RecentList, RecentRecording};
 use recording::{Grants, RecordingEntry, RecordingGrant};
@@ -117,6 +120,33 @@ fn clear_recent_recordings(state: State<'_, AppState>) -> Result<(), String> {
     state.recent.clear()
 }
 
+/// Show a native save dialog and write `content` (UTF-8) to the chosen file.
+/// The webview only suggests a file name and extension filters; the written
+/// path is always the one the user picked. Returns `None` if cancelled.
+#[tauri::command]
+async fn save_export(
+    app: AppHandle,
+    suggested_name: String,
+    content: String,
+    filter_name: Option<String>,
+    extensions: Option<Vec<String>>,
+) -> Result<Option<SavedFile>, String> {
+    export::check_size(&content)?;
+    let exts = export::sanitize_extensions(&extensions.unwrap_or_default());
+    let mut dialog = app
+        .dialog()
+        .file()
+        .set_title("Export from Sonder Observatory")
+        .set_file_name(export::sanitize_file_name(&suggested_name));
+    if !exts.is_empty() {
+        let refs: Vec<&str> = exts.iter().map(String::as_str).collect();
+        dialog = dialog.add_filter(export::sanitize_filter_name(filter_name.as_deref()), &refs);
+    }
+    let Some(picked) = dialog.blocking_save_file() else { return Ok(None) };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
+    export::write_export(&path, &content).map(Some)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let raw = launch::parse(std::env::args().skip(1));
@@ -154,7 +184,8 @@ pub fn run() {
             read_recording_entry,
             list_recent_recordings,
             open_recent_recording,
-            clear_recent_recordings
+            clear_recent_recordings,
+            save_export
         ])
         .run(tauri::generate_context!())
         .expect("error while running Sonder Observatory");

@@ -15,6 +15,7 @@ const APP_COMMANDS: &[&str] = &[
     "list_recent_recordings",
     "open_recent_recording",
     "clear_recent_recordings",
+    "save_export",
 ];
 
 fn main() {
