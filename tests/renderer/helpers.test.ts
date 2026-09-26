@@ -6,6 +6,7 @@ import { isErrorEvent } from "../../src/query/classify";
 import { brandSvgMarkup } from "../../src/renderer/brand";
 import {
     connectionAdvice,
+    CORS_ADVICE,
     describeProbe,
     MAX_RECENT_ENDPOINTS,
     parseRecentEndpoints,
@@ -15,9 +16,16 @@ import {
 import { dragHasFiles, recordingFileProblem } from "../../src/renderer/dropZone";
 import { errorSearchStart, findMatching, listText, producersInSession, syntheticBannerText, timelineSummaryText } from "../../src/renderer/navigation";
 import { presetLine, probePresets } from "../../src/renderer/onboarding";
-import { parseLaunchParams, secretParamWarning, urlWithoutSecrets } from "../../src/renderer/params";
+import { parseLaunchParams, redactUrlSecrets, secretParamWarning, urlWithoutSecrets } from "../../src/renderer/params";
 import { producerCardModel, shortInstance } from "../../src/renderer/producersPanel";
-import { isTypingTarget, SHORTCUTS, shortcutAction } from "../../src/renderer/shortcuts";
+import {
+    isTypingTarget,
+    readShortcutsEnabled,
+    SHORTCUTS,
+    SHORTCUTS_STORAGE_KEY,
+    shortcutAction,
+    writeShortcutsEnabled,
+} from "../../src/renderer/shortcuts";
 import { clampSplit, readSplit, SPLIT_DEFAULT, SPLIT_MAX, SPLIT_MIN, splitForKey, writeSplit } from "../../src/renderer/splitter";
 import { otherTheme, parseTheme, readStoredTheme, resolveTheme, THEME_STORAGE_KEY, toggleLabel, writeStoredTheme } from "../../src/renderer/theme";
 import { eventSearchText } from "../../src/renderer/virtualWindow";
@@ -112,6 +120,43 @@ describe("URL parameters", () => {
         expect(urlWithoutSecrets("http://h/?fixture=0")).toBeNull();
         expect(urlWithoutSecrets("not a url")).toBeNull();
     });
+
+    it("removes credentials and token parameters inside connect URLs", () => {
+        const search = new URLSearchParams();
+        search.append("fixture", "0");
+        search.append("connect", "http://127.0.0.1:9/?access_token=SECRETX&format=ndjson");
+        search.append("connect", "http://u:SECRETY@127.0.0.1:10/");
+        search.append("ws", "ws://127.0.0.1:8766/ws?Token=SECRETZ");
+        search.append("connect", "http://127.0.0.1:11435");
+        const p = parseLaunchParams(search);
+        expect(p.connect).toEqual(["http://127.0.0.1:9/?format=ndjson", "http://127.0.0.1:10/", "http://127.0.0.1:11435", "ws://127.0.0.1:8766/ws"]);
+        expect(p.ignoredSecrets).toEqual([]);
+        expect(p.ignoredConnectSecrets).toBe(true);
+        expect(JSON.stringify(p)).not.toMatch(/SECRET/);
+        expect(parseLaunchParams(new URLSearchParams("connect=http://127.0.0.1:11435")).ignoredConnectSecrets).toBe(false);
+
+        const warning = secretParamWarning([], true)!;
+        expect(warning).toMatch(/Ignored the credentials or token parameters inside a connect URL/);
+        expect(secretParamWarning(["token"], true)).toMatch(/"token" URL parameter and the credentials/);
+
+        const clean = urlWithoutSecrets(`http://h/?${search.toString()}&view=events`)!;
+        expect(clean).not.toMatch(/SECRET/);
+        const back = new URL(clean).searchParams;
+        expect(back.getAll("connect")).toEqual(["http://127.0.0.1:9/?format=ndjson", "http://127.0.0.1:10/", "http://127.0.0.1:11435"]);
+        expect(back.getAll("ws")).toEqual(["ws://127.0.0.1:8766/ws"]);
+        expect(back.get("view")).toBe("events");
+        expect(urlWithoutSecrets("http://h/?connect=http%3A%2F%2F127.0.0.1%3A11435")).toBeNull();
+    });
+
+    it("redacts URLs for display", () => {
+        expect(redactUrlSecrets("http://127.0.0.1:11435")).toBe("http://127.0.0.1:11435");
+        expect(redactUrlSecrets("http://u:p@127.0.0.1:9/sse")).toBe("http://127.0.0.1:9/sse");
+        expect(redactUrlSecrets("http://127.0.0.1:9/sse?ACCESS_TOKEN=a&x=1&token=b")).toBe("http://127.0.0.1:9/sse?x=1");
+        // Values that do not parse as URLs are cleaned textually.
+        expect(redactUrlSecrets("127.0.0.1:9/sse?token=abc")).toBe("127.0.0.1:9/sse");
+        expect(redactUrlSecrets("::bad?x=1&access_token=abc#f")).toBe("::bad?x=1#f");
+        expect(redactUrlSecrets("weird://user:pw@")).not.toMatch(/pw/);
+    });
 });
 
 describe("theme", () => {
@@ -168,6 +213,19 @@ describe("shortcuts", () => {
         expect(shortcutAction({ key: "t", target: { tagName: "INPUT", type: "range" } })).toBe("toggle-theme");
         expect(isTypingTarget({ tagName: "INPUT", type: "password" })).toBe(true);
         expect(isTypingTarget(null)).toBe(false);
+    });
+
+    it("can be turned off per viewer (WCAG 2.1.4), surviving blocked storage", () => {
+        const s = new MemoryStorage() as unknown as Storage;
+        expect(readShortcutsEnabled(s)).toBe(true);
+        writeShortcutsEnabled(s, false);
+        expect(s.getItem(SHORTCUTS_STORAGE_KEY)).toBe("off");
+        expect(readShortcutsEnabled(s)).toBe(false);
+        writeShortcutsEnabled(s, true);
+        expect(readShortcutsEnabled(s)).toBe(true);
+        expect(readShortcutsEnabled(throwing)).toBe(true);
+        expect(readShortcutsEnabled(null)).toBe(true);
+        expect(() => writeShortcutsEnabled(throwing, false)).not.toThrow();
     });
 });
 
@@ -242,9 +300,23 @@ describe("connection guidance", () => {
     it("names the token step and the CORS settings", () => {
         expect(connectionAdvice("the producer requires a bearer token; add one", false)).toMatch(/needs a token/);
         expect(connectionAdvice("HTTP 401: the producer requires a bearer token", true)).toMatch(/rejected this token/);
-        expect(connectionAdvice("could not reach x (Failed to fetch)", false, true)).toMatch(/SONDER_CORS_ORIGINS.*--cors-origin/);
+        // Route-scoped setting first; the global one only as a fallback, with its admin-route cost.
+        const cors = connectionAdvice("could not reach x (Failed to fetch)", false, true)!;
+        expect(cors).toBe(CORS_ADVICE);
+        expect(cors).toMatch(/SONDER_OBSERVATORY_ORIGINS.*SONDER_CORS_ORIGINS.*admin routes.*--cors-origin/);
+        expect(cors.indexOf("SONDER_OBSERVATORY_ORIGINS")).toBeLessThan(cors.indexOf("SONDER_CORS_ORIGINS"));
         expect(connectionAdvice("could not reach x; Sonder-Inference takes --cors-origin o", false, true)).toBeNull();
+        expect(connectionAdvice("allow it in SONDER_OBSERVATORY_ORIGINS", false, true)).toBeNull();
         expect(connectionAdvice("HTTP 404", false)).toBeNull();
+    });
+
+    it("says to move a secret out of the URL instead of asking for a token", () => {
+        const creds = connectionAdvice("credentials in the URL are not allowed; pass a bearer token separately", false)!;
+        expect(creds).toMatch(/Remove the credentials or token parameter from the URL/);
+        expect(creds).not.toMatch(/needs a token/);
+        expect(connectionAdvice('the "access_token" query parameter is not allowed: tokens never go in URLs; pass a bearer token separately', false)).toMatch(
+            /Remove the credentials/,
+        );
     });
 
     it("describes probe results", () => {
@@ -267,7 +339,9 @@ describe("connection guidance", () => {
         expect(direct.lines[0]).toMatch(/no discovery document/);
         const bad = describeProbe("http://h/", { ok: false, discovery: null, streamUrl: null, error: "could not reach http://h/", corsSuspected: true }, false);
         expect(bad.ok).toBe(false);
-        expect(bad.lines[1]).toMatch(/SONDER_CORS_ORIGINS/);
+        expect(bad.lines[1]).toMatch(/SONDER_OBSERVATORY_ORIGINS/);
+        const secret = describeProbe("http://u:SECRET@h/?token=SECRET2", { ok: false, discovery: null, streamUrl: null, error: "refused", corsSuspected: false }, false);
+        expect(secret.lines.join(" ")).not.toMatch(/SECRET/);
     });
 });
 
@@ -298,6 +372,20 @@ describe("producer cards", () => {
         expect(failed.advice).toMatch(/needs a token/);
         expect(shortInstance(null)).toBe("—");
         expect(shortInstance("rt-abc")).toBe("rt-abc");
+    });
+
+    it("never shows credentials or token parameters of the URL", () => {
+        const refused = producerCardModel(
+            connection({
+                url: "http://u:SECRETY@127.0.0.1:9/?access_token=SECRETX",
+                streamUrl: null,
+                identity: null,
+                status: status({ state: "failed", lastError: "credentials in the URL are not allowed; pass a bearer token separately" }),
+            }),
+        );
+        expect(refused.url).toBe("http://127.0.0.1:9/");
+        expect(JSON.stringify(refused)).not.toMatch(/SECRET/);
+        expect(refused.advice).toMatch(/Remove the credentials/);
     });
 });
 
@@ -386,6 +474,33 @@ describe("related groups (contract 8.4)", () => {
         expect(parent.value).toBe("R");
         expect(parent.events).toEqual([turnStart, turnEnd]);
         expect(groups.find((g) => g.kind === "request")!.events).toEqual([childToken]);
+    });
+
+    it("does not relate equal request ids from different producers", () => {
+        // Two producers replaying the same ids (contract 8.4 keys requests by stream + request_id).
+        const a1 = at(1, "request.started", { request_id: "req_010", producer: { ...rt, instance_id: "rt-a" } });
+        const a2 = at(5, "request.completed", { request_id: "req_010", producer: { ...rt, instance_id: "rt-a" } });
+        const b1 = at(2, "request.started", { request_id: "req_010", producer: { ...inf, instance_id: "tel-b" } });
+        const b2 = at(3, "request.started", { request_id: "req_010", producer: { ...rt, instance_id: "rt-other" } });
+        const groups = relatedGroups(a2, [a1, b1, b2, a2]);
+        expect(groups.map((g) => g.kind)).toEqual(["request"]);
+        expect(groups[0]!.events).toEqual([a1]);
+    });
+
+    it("scopes child requests per producer and refuses links from another run", () => {
+        const child = (ms: number, instance: string, run: string, type = "request.queued") =>
+            at(ms, type, { request_id: "inf-1", run_id: run, producer: { ...inf, instance_id: instance }, attributes: { parent_request_id: "R" } });
+        const same = child(2, "tel-1", "R");
+        const sameToken = at(3, "inference.token.generated", { request_id: "inf-1", run_id: "R", producer: { ...inf, instance_id: "tel-1" } });
+        const otherRun = child(4, "tel-2", "other-run");
+        // Same request id in another instance, not linked to R: not a child.
+        const collide = at(5, "inference.token.generated", { request_id: "inf-1", run_id: "R", producer: { ...inf, instance_id: "tel-3" } });
+        const groups = relatedGroups(turnEnd, [turnStart, same, sameToken, otherRun, collide, turnEnd]);
+        const children = groups.find((g) => g.kind === "children")!;
+        expect(children.events).toEqual([same, sameToken]);
+        // The other run's child names a parent R, but R is a different request there.
+        expect(relatedGroups(otherRun, [turnStart, otherRun, turnEnd]).find((g) => g.kind === "parent")).toBeUndefined();
+        expect(relatedGroups(same, [turnStart, same, turnEnd]).find((g) => g.kind === "parent")!.events).toEqual([turnStart, turnEnd]);
     });
 
     it("limits long groups and reports the total", () => {

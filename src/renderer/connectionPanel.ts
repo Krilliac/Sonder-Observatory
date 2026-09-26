@@ -13,6 +13,7 @@ import { classifyProducerUrl } from "../ingest/live/discovery";
 import type { TransportPreference } from "../ingest/live/endpoint";
 import { LOCAL_PRESETS, probeProducer, type ProbeOptions, type ProbeResult, type ProducerEndpointInput } from "../ingest/live/manager";
 import { h } from "./dom";
+import { redactUrlSecrets } from "./params";
 
 export const RECENT_ENDPOINTS_KEY = "sonder-observatory.recent-endpoints";
 export const MAX_RECENT_ENDPOINTS = 8;
@@ -96,7 +97,20 @@ export function saveRecentEndpoints(storage: Storage | null, list: readonly Rece
 }
 
 const TOKEN_ERROR = /bearer token|HTTP 401|unauthori[sz]ed/i;
-const CORS_SETTINGS = /SONDER_CORS_ORIGINS|--cors-origin/;
+/** The endpoint policy refused a URL that carries a secret (src/ingest/live/endpoint.ts). */
+const SECRET_IN_URL = /credentials in the URL are not allowed|query parameter is not allowed: tokens never go in URLs/i;
+const CORS_SETTINGS = /SONDER_OBSERVATORY_ORIGINS|SONDER_CORS_ORIGINS|--cors-origin/;
+
+/**
+ * Fallback CORS guidance when a network error hides the cause. Same order and
+ * caveat as discovery.ts corsHint: the route-scoped Runtime setting first;
+ * the global SONDER_CORS_ORIGINS only where it is missing, because it also
+ * opens the admin routes to that origin.
+ */
+export const CORS_ADVICE =
+    "If the producer is running, allow this page's origin: Sonder Runtime lists it in SONDER_OBSERVATORY_ORIGINS " +
+    "(telemetry routes only; on runtimes without that setting SONDER_CORS_ORIGINS works too, but it also allows " +
+    "that origin to call admin routes); Sonder-Inference takes --cors-origin.";
 
 /**
  * Extra guidance for a connection or probe error: what to change. The
@@ -104,13 +118,16 @@ const CORS_SETTINGS = /SONDER_CORS_ORIGINS|--cors-origin/;
  * step and falls back to naming the settings when a network error hides CORS.
  */
 export function connectionAdvice(error: string, hasToken: boolean, corsSuspected = false): string | null {
+    if (SECRET_IN_URL.test(error)) {
+        return "Remove the credentials or token parameter from the URL, and paste the token into Sources > Bearer token instead.";
+    }
     if (TOKEN_ERROR.test(error)) {
         return hasToken
             ? "The producer rejected this token. Check the token and connect again."
             : "This producer needs a token: paste it into Sources > Bearer token and connect again.";
     }
     if (corsSuspected && !CORS_SETTINGS.test(error)) {
-        return "If the producer is running, allow this page's origin: SONDER_CORS_ORIGINS (Sonder Runtime) or --cors-origin (Sonder-Inference).";
+        return CORS_ADVICE;
     }
     return null;
 }
@@ -124,7 +141,7 @@ export interface ProbeReport {
 export function describeProbe(url: string, result: ProbeResult, hasToken: boolean): ProbeReport {
     if (!result.ok) {
         const advice = connectionAdvice(result.error ?? "", hasToken, result.corsSuspected);
-        return { ok: false, lines: [`Test failed for ${url}: ${result.error ?? "unknown error"}`, ...(advice ? [advice] : [])] };
+        return { ok: false, lines: [`Test failed for ${redactUrlSecrets(url)}: ${result.error ?? "unknown error"}`, ...(advice ? [advice] : [])] };
     }
     const d = result.discovery;
     if (!d) {
@@ -169,7 +186,7 @@ export class ConnectionPanel {
             id: "ws-url",
             type: "text",
             inputmode: "url",
-            value: initialUrl,
+            value: redactUrlSecrets(initialUrl),
             placeholder: "http://127.0.0.1:11435",
             spellcheck: "false",
             autocomplete: "off",
@@ -300,7 +317,7 @@ export class ConnectionPanel {
         const token = this.readToken();
         const run = ++this.probeRun;
         this.result.dataset.tone = "pending";
-        this.result.replaceChildren(h("p", { text: `Testing ${url}…` }));
+        this.result.replaceChildren(h("p", { text: `Testing ${redactUrlSecrets(url)}…` }));
         const probe = this.callbacks.probe ?? probeProducer;
         const result = await probe(url, token !== undefined ? { token } : {});
         if (run === this.probeRun) {

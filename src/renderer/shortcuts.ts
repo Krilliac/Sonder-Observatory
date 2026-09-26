@@ -6,6 +6,11 @@
  * content), when Ctrl/Meta/Alt is held (browser and OS shortcuts win), and
  * for Space on controls that Space already activates (buttons, checkboxes,
  * tabs, links), so native activation never runs twice.
+ *
+ * WCAG 2.1.4 (Character Key Shortcuts): the single-key shortcuts can be
+ * turned off in the dialog (#shortcuts-enabled). The choice is a per-viewer
+ * setting in localStorage behind try/catch; the header Shortcuts button
+ * still opens the dialog when they are off.
  */
 import { h } from "./dom";
 
@@ -54,6 +59,25 @@ export interface TargetLike {
     isContentEditable?: boolean;
     getAttribute?(name: string): string | null;
     type?: string;
+}
+
+export const SHORTCUTS_STORAGE_KEY = "sonder-observatory.shortcuts";
+
+/** Whether single-key shortcuts are on for this viewer (default on). */
+export function readShortcutsEnabled(storage: Storage | null): boolean {
+    try {
+        return storage?.getItem(SHORTCUTS_STORAGE_KEY) !== "off";
+    } catch {
+        return true;
+    }
+}
+
+export function writeShortcutsEnabled(storage: Storage | null, enabled: boolean): void {
+    try {
+        storage?.setItem(SHORTCUTS_STORAGE_KEY, enabled ? "on" : "off");
+    } catch {
+        // Not persisted; the choice still applies to this page.
+    }
 }
 
 const TEXT_INPUT_TYPES = new Set(["", "text", "search", "url", "email", "password", "number", "tel", "date", "time", "datetime-local", "month", "week"]);
@@ -130,13 +154,24 @@ const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select
  * Modal help dialog. Opens with "?", traps Tab/Shift+Tab inside itself,
  * closes with Esc or the Close button and returns focus to where it was.
  */
+export interface ShortcutsDialogOptions {
+    /** Initial state of the on/off switch. Default true. */
+    enabled?: boolean;
+    /** Called when the viewer turns single-key shortcuts on or off. */
+    onToggle?: (enabled: boolean) => void;
+}
+
 export class ShortcutsDialog {
     readonly element: HTMLDialogElement;
+    private readonly enabledBox: HTMLInputElement;
     private returnFocus: HTMLElement | null = null;
 
-    constructor(doc: Document = document) {
+    constructor(doc: Document = document, options: ShortcutsDialogOptions = {}) {
         const close = h("button", { type: "button", class: "dialog-close", text: "Close" });
         close.addEventListener("click", () => this.close());
+        this.enabledBox = h("input", { id: "shortcuts-enabled", type: "checkbox", "aria-describedby": "shortcuts-enabled-help" });
+        this.enabledBox.checked = options.enabled !== false;
+        this.enabledBox.addEventListener("change", () => options.onToggle?.(this.enabledBox.checked));
         const rows = SHORTCUTS.map((s) =>
             h("tr", {}, h("th", { scope: "row" }, ...s.keys.map((k) => h("kbd", { text: k }))), h("td", { text: s.description })),
         );
@@ -145,6 +180,16 @@ export class ShortcutsDialog {
             { id: "shortcuts-dialog", class: "dialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "shortcuts-title", "aria-describedby": "shortcuts-note" },
             h("div", { class: "dialog-head" }, h("h2", { id: "shortcuts-title", text: "Keyboard shortcuts" }), close),
             h("p", { id: "shortcuts-note", class: "muted", text: "Shortcuts are off while you type in a text field. Esc closes this dialog." }),
+            h(
+                "div",
+                { class: "shortcuts-switch" },
+                h("label", { class: "check" }, this.enabledBox, " Single-key shortcuts"),
+                h("p", {
+                    id: "shortcuts-enabled-help",
+                    class: "hint",
+                    text: "Turn off if you use speech input or keys trigger actions by accident. The Shortcuts button reopens this list.",
+                }),
+            ),
             h("table", { class: "shortcut-table" }, h("thead", {}, h("tr", {}, h("th", { scope: "col", text: "Key" }), h("th", { scope: "col", text: "Action" }))), h("tbody", {}, ...rows)),
         );
         this.element.addEventListener("keydown", (ev) => this.onKey(ev));
@@ -154,6 +199,10 @@ export class ShortcutsDialog {
             this.close();
         });
         doc.body.append(this.element);
+    }
+
+    get enabled(): boolean {
+        return this.enabledBox.checked;
     }
 
     get isOpen(): boolean {

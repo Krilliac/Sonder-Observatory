@@ -108,6 +108,16 @@ button.link-button {
     white-space: nowrap;
 }
 
+/* A visually hidden control (the header file input) shows its focus on the visible label after it. */
+.sr-only:focus-visible + .button-like {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 1px;
+}
+
+.shortcuts-switch {
+    margin: var(--space-3) 0;
+}
+
 .mono {
     font-family: var(--font-family-mono);
     font-size: var(--font-size-sm);
@@ -558,6 +568,11 @@ kbd {
 
 .producer-error {
     color: var(--color-textError);
+}
+
+/* Cards are patched in place: parts toggle with the hidden attribute (.tag sets display). */
+.producer-card [hidden] {
+    display: none;
 }
 
 .counters {

@@ -20,9 +20,9 @@ import { fmtBytes, fmtMs, fmtPct, fmtRate, fmtRelNs } from "./format";
 import { errorSearchStart, findMatching, producersInSession, syntheticBannerText, timelineSummaryText } from "./navigation";
 import { Onboarding } from "./onboarding";
 import type { ObservatoryPanel } from "./panels";
-import { parseLaunchParams, secretParamWarning, urlWithoutSecrets } from "./params";
+import { parseLaunchParams, redactUrlSecrets, secretParamWarning, urlWithoutSecrets } from "./params";
 import { producerCardModel, ProducersPanel } from "./producersPanel";
-import { ShortcutsDialog, shortcutAction, type ShortcutAction } from "./shortcuts";
+import { readShortcutsEnabled, ShortcutsDialog, shortcutAction, writeShortcutsEnabled, type ShortcutAction } from "./shortcuts";
 import { mountSplitter } from "./splitter";
 import { safeStorage, type ThemeController } from "./theme";
 import { getEventIndex, TRACKS } from "./timelineModel";
@@ -88,6 +88,12 @@ export class ObservatoryApp {
     private readonly inputs = new Map<string, RememberedInput>();
     /** Messages shown in #warnings until the next load or connect. */
     private notices: string[] = [];
+    /**
+     * Launch-time warnings (ignored token URL parameters, contract 8.2). They
+     * stay for the life of the page: the ?connect= producers added right after
+     * launch clear `notices`, and the warning must still be seen.
+     */
+    private readonly launchNotices: string[] = [];
     /** Result of the last error jump ("no later error"), cleared by the next selection. */
     private navNotice: string | null = null;
     private follow = true;
@@ -159,9 +165,9 @@ export class ObservatoryApp {
 
     start(search: URLSearchParams): void {
         const params = parseLaunchParams(search);
-        const secretWarning = secretParamWarning(params.ignoredSecrets);
+        const secretWarning = secretParamWarning(params.ignoredSecrets, params.ignoredConnectSecrets);
         if (secretWarning) {
-            this.notices.push(secretWarning);
+            this.launchNotices.push(secretWarning);
             const clean = urlWithoutSecrets(window.location.href);
             if (clean) {
                 window.history.replaceState(window.history.state, "", clean);
@@ -181,7 +187,10 @@ export class ObservatoryApp {
             onShowSources: () => this.showSources(),
         });
         this.root.replaceChildren(this.layout());
-        this.shortcuts = new ShortcutsDialog(document);
+        this.shortcuts = new ShortcutsDialog(document, {
+            enabled: readShortcutsEnabled(this.storage),
+            onToggle: (enabled) => writeShortcutsEnabled(this.storage, enabled),
+        });
         byId("view-agents").append(this.topology.element);
         this.timelineView = new TimelineView(byId("timeline"), ({ rel, event }) => {
             this.setFollow(false);
@@ -285,8 +294,9 @@ export class ObservatoryApp {
                 h(
                     "div",
                     { class: "actions" },
-                    h("label", { id: "file-open", class: "button-like", for: "file-input", text: "Open recording…" }),
+                    // The input comes first so CSS can show its keyboard focus on the visible label.
                     h("input", { id: "file-input", type: "file", accept: RECORDING_FILE_EXTENSIONS.join(","), class: "sr-only" }),
+                    h("label", { id: "file-open", class: "button-like", for: "file-input", text: "Open recording…" }),
                     h("button", { id: "fixture-btn", type: "button", text: "Synthetic demo" }),
                     h("button", { id: "save-btn", type: "button", text: `Save (${RECORDING_EXTENSION})` }),
                     h("button", { id: "theme-toggle", type: "button", class: "toggle", text: "Theme" }),
@@ -496,7 +506,7 @@ export class ObservatoryApp {
             });
         });
         document.addEventListener("keydown", (ev) => {
-            if (this.shortcuts?.isOpen || ev.defaultPrevented) {
+            if (!this.shortcuts?.enabled || this.shortcuts.isOpen || ev.defaultPrevented) {
                 return;
             }
             const action = shortcutAction(ev);
@@ -612,7 +622,7 @@ export class ObservatoryApp {
         const input = this.inputs.get(id) ?? { url: connection.url, transport: "auto" as const };
         const needsToken = connection.hasToken || /token/i.test(connection.status.lastError ?? "");
         this.setSidebar(true);
-        this.connectionPanel?.fill({ url: input.url, transport: input.transport }, needsToken ? "token" : "url");
+        this.connectionPanel?.fill({ url: redactUrlSecrets(input.url), transport: input.transport }, needsToken ? "token" : "url");
         void this.removeProducer(id);
     }
 
@@ -1067,7 +1077,7 @@ export class ObservatoryApp {
     /** #warnings is a polite live region: it is rewritten only when its text changes. */
     private renderWarnings(): void {
         const s = this.store;
-        const items: string[] = [...this.notices, ...(this.navNotice ? [this.navNotice] : [])];
+        const items: string[] = [...this.launchNotices, ...this.notices, ...(this.navNotice ? [this.navNotice] : [])];
         if (s.rejected.length > 0) {
             const first = s.rejected[0]!;
             items.push(`${s.rejected.length} line(s) rejected by the schema validator (first: line ${first.line}: ${first.reason})`);
