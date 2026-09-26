@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Visualization, replay, and diagnostics companion for the Sonder ecosystem (Milestone 1 web renderer).",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "type": "module",
   "engines": {
     "node": ">=20.19.0"

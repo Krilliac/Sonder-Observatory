@@ -34,7 +34,7 @@ preserved.
 
 1. Resolve protocol ownership and compatibility policy with Runtime and Inference.
 2. Confirm producer attribute names used by metric derivation ([decisions](DECISIONS.md)).
-3. Run `tauri dev`/`tauri build` on Windows, wire the desktop bridge, and review dependency licenses (the project is MIT).
+3. Run `tauri dev`/`tauri build` on Windows, wire the desktop bridge, and review dependency licenses (the project is Apache-2.0).
 4. Record a real producer session and re-check the Milestone 1 success gate.
 
 Producer instrumentation stays with Runtime/Inference. Observatory must remain
