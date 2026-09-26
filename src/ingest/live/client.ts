@@ -101,6 +101,16 @@ export interface LiveIngestOptions {
     resume?: boolean;
     /** WebSocket resume query parameter. Default "last_event_id". */
     resumeParam?: string;
+    /** Session id (desktop `--session`); sent as a query parameter on every transport. */
+    session?: string | null;
+    /** Query parameter for `session`. Default "session". */
+    sessionParam?: string;
+    /**
+     * Capability token (desktop `--capability` / `--capability-file`). HTTP sends
+     * `Authorization: Bearer`; WebSocket sends it as the first frame. It is
+     * kept out of the URL and out of `status`.
+     */
+    capability?: string | null;
     webSocketFactory?: WebSocketFactory;
     fetch?: FetchLike;
     onStatus?: (status: LiveIngestStatus) => void;
@@ -287,6 +297,9 @@ export class LiveIngestClient {
             kind: this.kind,
             lastEventId,
             resumeParam: this.options.resumeParam ?? "last_event_id",
+            session: this.options.session ?? null,
+            sessionParam: this.options.sessionParam ?? "session",
+            capability: this.options.capability ?? null,
         };
         if (this.kind === "websocket") {
             const factory =
