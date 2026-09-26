@@ -31,7 +31,11 @@ export class SessionStore {
     }
 
     append(events: readonly ObservatoryEvent[]): void {
-        this.raw.push(...events);
+        // A loop, not push(...events): spreading overflows the call stack for
+        // very large recordings (~120k+ items in Chromium).
+        for (const e of events) {
+            this.raw.push(e);
+        }
         const ordered = orderEvents(this.raw);
         this.events = ordered.events;
         this.duplicates = ordered.duplicates;
@@ -39,7 +43,9 @@ export class SessionStore {
     }
 
     addRejected(lines: readonly RejectedLine[]): void {
-        this.rejected.push(...lines);
+        for (const line of lines) {
+            this.rejected.push(line);
+        }
     }
 
     get synthetic(): boolean {

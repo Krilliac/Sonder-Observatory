@@ -106,7 +106,8 @@ npm run fake-live-producer -- --pace timeline   # one port, three transports:
 Other options: `?fixture=0` starts empty; **Open recording…** loads a `.sobs`
 or `.ndjson`/`.jsonl` file; **Save** writes the current session as `.sobs`;
 `npm run fixture` regenerates `fixtures/synthetic-session.ndjson`
-deterministically.
+deterministically; `npm run fixture:large` writes seeded 10k/100k/1M-event
+recordings to `artifacts/fixtures/` for performance work.
 
 The endpoint field accepts `ws(s)://` (WebSocket frames with one JSON event or
 several NDJSON lines) and `http(s)://` (Server-Sent Events, or NDJSON lines).

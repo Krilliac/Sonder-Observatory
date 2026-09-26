@@ -18,8 +18,6 @@ import type { ObservatoryPanel } from "./panels";
 import { TimelineView } from "./timelineView";
 
 const SPEEDS = [0.25, 0.5, 1, 2, 4, 8];
-/** Largest array handed to SessionStore.append in one call (see applyLoaded). */
-const APPEND_BATCH = 50_000;
 /** Analysis views shown as tabs below the event table. */
 const VIEWS = [
     { id: "diagnostics", title: "Diagnostics" },
@@ -60,6 +58,8 @@ export class ObservatoryApp {
     private eventTable: EventTable | null = null;
     /** Bumped per load so a superseded chunked load is discarded. */
     private loadToken = 0;
+    /** Aborts the running chunked/streamed parse when a newer load or connect wins. */
+    private loadAbort: AbortController | null = null;
 
     constructor(root: HTMLElement, panels: readonly ObservatoryPanel[] = []) {
         this.root = root;
@@ -331,7 +331,7 @@ export class ObservatoryApp {
 
     /** Connects with src/ingest/live: ws(s):// uses WebSocket, http(s):// uses SSE or NDJSON. */
     private connect(url: string): void {
-        this.loadToken += 1;
+        this.supersedeLoad();
         byId<HTMLInputElement>("ws-url").value = url;
         this.disconnect();
         const endpoint = resolveEndpoint(url);
@@ -381,11 +381,18 @@ export class ObservatoryApp {
 
     private loadText(text: string, source: "fixture" | "file", label: string): void {
         if (text.length < CHUNKED_LOAD_THRESHOLD_CHARS) {
-            this.loadToken += 1;
+            this.supersedeLoad();
             this.applyLoaded(loadRecording(text), source, label);
             return;
         }
         this.loadChunked((opts) => loadRecordingChunked(text, opts), source, label);
+    }
+
+    /** Invalidates the running load (discard its result, abort its parse) and returns the new token. */
+    private supersedeLoad(): number {
+        this.loadAbort?.abort();
+        this.loadAbort = null;
+        return ++this.loadToken;
     }
 
     /** Large recordings parse in slices so the UI keeps painting; a newer load or connect wins. */
@@ -394,10 +401,13 @@ export class ObservatoryApp {
         source: "fixture" | "file",
         label: string,
     ): void {
-        const token = ++this.loadToken;
+        const token = this.supersedeLoad();
+        const abort = new AbortController();
+        this.loadAbort = abort;
         const badge = byId("source-badge");
         badge.textContent = `loading ${label}…`;
         run({
+            signal: abort.signal,
             onProgress: (p) => {
                 if (token === this.loadToken) {
                     const pct = p.totalBytes > 0 ? ` · ${Math.round((p.bytesDone / p.totalBytes) * 100)}%` : "";
@@ -407,11 +417,13 @@ export class ObservatoryApp {
         }).then(
             (loaded) => {
                 if (token === this.loadToken) {
+                    this.loadAbort = null;
                     this.applyLoaded(loaded, source, label);
                 }
             },
             (error: unknown) => {
                 if (token === this.loadToken) {
+                    this.loadAbort = null;
                     badge.textContent = `failed to load ${label}: ${(error as Error).message}`;
                 }
             },
@@ -420,15 +432,9 @@ export class ObservatoryApp {
 
     private applyLoaded(loaded: ReturnType<typeof loadRecording>, source: "fixture" | "file", label: string): void {
         this.store.reset(source, label, loaded.manifest);
-        // SessionStore.append/addRejected spread their argument into push(),
-        // which overflows the call stack past ~120k items in Chromium. Feed
-        // them in batches until session.ts loops instead (docs/integration/perf.md).
-        for (let i = 0; i < loaded.events.length; i += APPEND_BATCH) {
-            this.store.append(loaded.events.length <= APPEND_BATCH ? loaded.events : loaded.events.slice(i, i + APPEND_BATCH));
-        }
-        for (let i = 0; i < loaded.rejected.length; i += APPEND_BATCH) {
-            this.store.addRejected(loaded.rejected.slice(i, i + APPEND_BATCH));
-        }
+        // One append = one ordering pass; SessionStore no longer spreads into push().
+        this.store.append(loaded.events);
+        this.store.addRejected(loaded.rejected);
         this.rebuildCursor();
         this.selectedId = null;
         this.setFollow(true);
