@@ -36,7 +36,8 @@ export default defineConfig({
         : {
               command: `npm run build && npx vite preview --host 127.0.0.1 --port ${PORT} --strictPort`,
               url: baseURL,
-              reuseExistingServer: !process.env.CI,
+              // Opt-in only: silently reusing whatever already listens on the port can test the wrong build.
+              reuseExistingServer: !process.env.CI && process.env.E2E_REUSE_SERVER === "1",
               timeout: 180_000,
               stdout: "ignore",
               stderr: "pipe",
