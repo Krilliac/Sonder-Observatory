@@ -1,7 +1,18 @@
 import type { ObservatoryEvent } from "../protocol/events";
+import { producerInstance } from "../query/attributes";
 
-/** Stream identity: sequence numbers are monotonic per producer stream. */
+/**
+ * Stream identity: sequence numbers are monotonic per producer stream. When
+ * the event reveals the producer instance that assigned the sequence (see
+ * `producerInstance`), the stream is that instance, across sessions:
+ * Sonder-Inference numbers engine- and session-scoped events from one counter.
+ * Otherwise the stream is session + producer name + node.
+ */
 export function streamKey(event: ObservatoryEvent): string {
+    const instance = producerInstance(event);
+    if (instance !== null) {
+        return `${event.producer.name}\u0000${event.producer.node_id}\u0000#${instance}`;
+    }
     return `${event.session_id}\u0000${event.producer.name}\u0000${event.producer.node_id}`;
 }
 

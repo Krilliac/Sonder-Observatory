@@ -1,4 +1,5 @@
 import type { ObservatoryEvent } from "../../protocol/events";
+import { memoryUsage } from "../../query/attributes";
 import type { Detector, Finding } from "../types";
 import { groupBy, makeFinding, num, pct, str } from "../util";
 import { episodes, severityFor } from "./shared";
@@ -11,13 +12,9 @@ interface MemSample {
 }
 
 function memSample(e: ObservatoryEvent): MemSample | null {
-    const used = num(e, "used_bytes");
-    const total = num(e, "total_bytes");
-    if (used !== null && total !== null && total > 0) {
-        return { event: e, fraction: used / total, used, total };
-    }
-    const fraction = num(e, "used_fraction");
-    return fraction === null ? null : { event: e, fraction, used: null, total: null };
+    // used_bytes/total_bytes, total_bytes - available_bytes, or used_fraction.
+    const usage = memoryUsage(e);
+    return usage === null ? null : { event: e, fraction: usage.fraction, used: usage.usedBytes, total: usage.totalBytes };
 }
 
 function gib(bytes: number): string {

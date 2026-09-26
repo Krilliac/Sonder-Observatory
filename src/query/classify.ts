@@ -42,6 +42,7 @@ export function classifyEvent(event: ObservatoryEvent): EventClass {
     const prefix = event.event_type.split(".")[0];
     switch (prefix) {
         case "session":
+        case "engine":
             return "session";
         case "request":
             return "request";

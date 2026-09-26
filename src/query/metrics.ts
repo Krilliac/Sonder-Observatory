@@ -5,6 +5,7 @@
  * producer did not report: a metric with no evidence is `null` (unavailable).
  */
 import type { ObservatoryEvent } from "../protocol/events";
+import { backendTokenCount, droppedCount, memoryUsage } from "./attributes";
 import { isErrorEvent } from "./classify";
 
 export type Provenance = "measured" | "backend-reported" | "derived" | "estimated" | "unavailable";
@@ -22,7 +23,10 @@ export interface RequestSpan {
     endNs: number | null;
     outcome: "completed" | "failed" | "cancelled" | "open";
     firstTokenNs: number | null;
+    /** Tokens counted from inference.token.generated events. */
     tokens: number;
+    /** Completion tokens reported by the backend on the outcome event, if any. */
+    backendTokens: number | null;
 }
 
 export interface ResourceSample {
@@ -46,6 +50,11 @@ export interface Metrics {
         /** Tokens per second over the trailing window ending at the last event. */
         recentRate: number | null;
         windowMs: number;
+        /**
+         * Sum of backend-reported completion tokens over requests that report
+         * them (`token_counts_from_backend`); null when no request does.
+         */
+        backendReported: number | null;
     };
     errors: {
         total: number;
@@ -139,6 +148,7 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
                 outcome: "open",
                 firstTokenNs: null,
                 tokens: 0,
+                backendTokens: null,
             });
         } else if (
             (t === "request.completed" || t === "request.failed" || t === "request.cancelled") &&
@@ -153,6 +163,7 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
                         : t === "request.failed"
                           ? "failed"
                           : "cancelled";
+                span.backendTokens = backendTokenCount(e);
             }
         } else if (t === "inference.token.generated") {
             const n = tokenCount(e);
@@ -212,15 +223,14 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
         }
 
         if (t === "device.memory.sample") {
-            const used = numberAttr(e, "used_bytes");
-            const total = numberAttr(e, "total_bytes");
-            if (used !== null && total !== null && total > 0) {
+            const usage = memoryUsage(e);
+            if (usage && usage.usedBytes !== null && usage.totalBytes !== null) {
                 const sample: ResourceSample = {
                     monoNs: e.mono_ns,
                     deviceId: e.device_id ?? null,
-                    usedBytes: used,
-                    totalBytes: total,
-                    fraction: used / total,
+                    usedBytes: usage.usedBytes,
+                    totalBytes: usage.totalBytes,
+                    fraction: usage.fraction,
                     eventId: e.event_id,
                 };
                 latest = sample;
@@ -239,8 +249,7 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
         }
 
         if (t === "telemetry.dropped") {
-            const n = numberAttr(e, "dropped_count");
-            dropped += n !== null && n > 0 ? n : 1;
+            dropped += droppedCount(e) ?? 1;
         }
     }
 
@@ -249,6 +258,8 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
     const withFirstToken = requests.filter((s) => s.firstTokenNs !== null);
 
     const totalTokens = tokenTimes.reduce((sum, x) => sum + x.n, 0);
+    const reporting = requests.filter((s) => s.backendTokens !== null);
+    const backendReported = reporting.length > 0 ? reporting.reduce((sum, s) => sum + s.backendTokens!, 0) : null;
     let overallRate: number | null = null;
     let recentRate: number | null = null;
     if (tokenTimes.length >= 2) {
@@ -269,7 +280,7 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
         requests,
         requestLatency: latencyStats(finished.map((s) => s.endNs! - s.startNs)),
         timeToFirstToken: latencyStats(withFirstToken.map((s) => s.firstTokenNs! - s.startNs)),
-        tokens: { total: totalTokens, overallRate, recentRate, windowMs: RECENT_WINDOW_MS },
+        tokens: { total: totalTokens, overallRate, recentRate, windowMs: RECENT_WINDOW_MS, backendReported },
         errors: {
             total: errorIds.length,
             byType: errorsByType,
