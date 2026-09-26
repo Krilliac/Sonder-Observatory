@@ -12,10 +12,17 @@ import * as bridge from "./desktop";
 import type { OpenedRecording, RecentRecording } from "./desktop";
 import { modeBadge, runtimeMode } from "./mode";
 
+/** `--session` / `--capability` launch values applied to a live connection. */
+export interface LiveCredentials {
+    session: string | null;
+    /** Short-lived token; keep it in memory and never log it. */
+    capability: string | null;
+}
+
 export interface RecordingHost {
     openRecordingText(text: string, label: string): void;
     /** Starts a live connection (`--connect` launch argument). Optional so file-only hosts still fit. */
-    connectLive?(url: string): void;
+    connectLive?(url: string, credentials?: LiveCredentials): void;
 }
 
 /** Subset of the bridge used here, injectable for tests. */
@@ -136,7 +143,7 @@ export class DesktopIntegration {
                 }
                 await this.run(() => this.api.readGrantText(open), false);
             } else if (info.connect && this.host.connectLive) {
-                this.host.connectLive(info.connect);
+                this.host.connectLive(info.connect, { session: info.session, capability: info.capability });
             }
         } catch (err) {
             this.setStatus(`launch arguments unavailable: ${errorText(err)}`);

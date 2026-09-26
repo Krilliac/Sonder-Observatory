@@ -18,8 +18,9 @@ export interface RecordingGrant {
 }
 
 export interface LaunchInfo {
-    /** Validated ws(s) URL. */
+    /** Validated live endpoint: wss/https (any host) or ws/http on loopback. */
     connect: string | null;
+    /** Session id for the live connection (sent as a query parameter). */
     session: string | null;
     /** Short-lived token; keep it in memory and never log it. */
     capability: string | null;
