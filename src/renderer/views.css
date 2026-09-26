@@ -69,3 +69,10 @@ table.events tr.evidence td:first-child {
     margin: 2px 0 8px 3.5em;
     padding: 0;
 }
+
+/* Agent topology (src/topology/view.ts) */
+.topology-svg { display: block; max-height: 60vh; }
+.topology-node, .topology-edge { cursor: pointer; outline: none; }
+.topology-node:focus-visible path, .topology-edge:focus-visible path { stroke-width: 4; }
+.topology-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; }
+.topology-legend-item { display: inline-flex; align-items: center; gap: 4px; }
