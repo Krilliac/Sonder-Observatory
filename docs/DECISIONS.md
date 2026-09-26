@@ -28,12 +28,18 @@ be revisited; record the replacement here rather than editing history.
 - **Node:** `>=20.19.0` (Vite 8 requirement). CI runs Node 20 and 22.
 - **UI framework:** none. The Milestone 1 UI is plain TypeScript + DOM/SVG to
   keep the dependency surface small; revisit when views multiply.
-- **Runtime dependencies:** none. `ws` is a dev dependency used only by the
-  fake producer script.
+- **Runtime dependencies:** `@tauri-apps/api` only, used by
+  `src/integrations/desktop.ts` (not imported by the web renderer yet, so it
+  is not in the web bundle). `ws` is a dev dependency used only by the fake
+  producer script.
 - **3D:** not included (Milestone 1 requires no 3D dependency). Three.js /
   WebGPU remains the proposal for Milestone 3.
-- **Tauri:** see ROADMAP; the standalone shell is the next step and is only
-  added once a Rust toolchain is available and the shell builds.
+- **Tauri:** the v2 shell lives in `src-tauri/` (PR #3). CI runs
+  `cargo check` and `cargo test` on `windows-latest`; `tauri dev` /
+  `tauri build` have not been run yet. Vite uses `strictPort` because
+  `tauri.conf.json` expects `http://127.0.0.1:5173`. No `Cargo.lock` is
+  committed yet. `src/integrations/desktop.ts` (launch args, native
+  recording picker) is present but not wired into the UI.
 
 ## 2026-09-26 — Protocol types and validation
 
