@@ -19,10 +19,15 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "fixture": "node scripts/generate-fixture.mjs",
-    "fake-producer": "node scripts/fake-producer.mjs"
+    "fake-producer": "node scripts/fake-producer.mjs",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@tauri-apps/cli": "^2.11.5",
     "@types/node": "^22.19.0",
     "@types/ws": "^8.18.1",
     "eslint": "^10.11.0",
