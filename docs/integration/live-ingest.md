@@ -149,3 +149,4 @@ ephemeral port; types are in `scripts/fake-live-producer.d.mts`. The existing
 
 - The WebSocket resume parameter name (`last_event_id`) and the use of `Last-Event-ID` on NDJSON streams are proposals. Neither Sonder Runtime nor Inference has a producer contract for resume yet (docs/INTEGRATION.md). Until one exists, dedupe covers producers that ignore it.
 - There is no producer capability handshake yet, so the client can't tell whether resume was honoured. `resumeRequested` reports only that it was asked for.
+- Credentials (desktop `--session` / `--capability`) are sent as a `session` query parameter plus `Authorization: Bearer` (HTTP) or a first `{"type":"observatory.auth","capability":…,"session":…}` frame (WebSocket). These shapes are proposals too (docs/DECISIONS.md); a producer that ignores the frame simply streams as before.
