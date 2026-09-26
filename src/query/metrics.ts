@@ -5,7 +5,8 @@
  * producer did not report: a metric with no evidence is `null` (unavailable).
  */
 import type { ObservatoryEvent } from "../protocol/events";
-import { backendTokenCount, droppedCount, memoryUsage } from "./attributes";
+import { streamKey } from "../replay/order";
+import { backendTokenCount, memoryUsage, totalDroppedEvents } from "./attributes";
 import { isErrorEvent } from "./classify";
 
 export type Provenance = "measured" | "backend-reported" | "derived" | "estimated" | "unavailable";
@@ -19,6 +20,14 @@ export interface LatencyStats {
 
 export interface RequestSpan {
     requestId: string;
+    /**
+     * Producer stream the span belongs to (see replay/order streamKey).
+     * Spans are keyed by (streamKey, request_id), so two producers that
+     * share a request_id yield two spans.
+     */
+    streamKey: string;
+    /** producer.name of the stream. */
+    producer: string;
     startNs: number;
     endNs: number | null;
     outcome: "completed" | "failed" | "cancelled" | "open";
@@ -42,6 +51,8 @@ export interface Metrics {
     eventCount: number;
     requests: RequestSpan[];
     requestLatency: LatencyStats;
+    /** Finished-request latency per producer.name (additive). */
+    requestLatencyByProducer: Record<string, LatencyStats>;
     timeToFirstToken: LatencyStats;
     tokens: {
         total: number;
@@ -79,6 +90,7 @@ export interface Metrics {
         pressureEvents: number;
         latestComputeUtilization: number | null;
     };
+    /** Producer-reported drops: latest cumulative count per producer instance, summed. */
     droppedEvents: number;
 }
 
@@ -134,15 +146,18 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
     let peak: ResourceSample | null = null;
     let pressureEvents = 0;
     let latestCompute: number | null = null;
-    let dropped = 0;
 
     for (const e of events) {
         const t = e.event_type;
         const rid = e.request_id ?? null;
+        const stream = rid ? streamKey(e) : "";
+        const spanKey = rid ? `${stream}\u0001${rid}` : "";
 
         if (t === "request.started" && rid) {
-            spans.set(rid, {
+            spans.set(spanKey, {
                 requestId: rid,
+                streamKey: stream,
+                producer: e.producer.name,
                 startNs: e.mono_ns,
                 endNs: null,
                 outcome: "open",
@@ -154,7 +169,7 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
             (t === "request.completed" || t === "request.failed" || t === "request.cancelled") &&
             rid
         ) {
-            const span = spans.get(rid);
+            const span = spans.get(spanKey);
             if (span && span.endNs === null) {
                 span.endNs = e.mono_ns;
                 span.outcome =
@@ -168,7 +183,7 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
         } else if (t === "inference.token.generated") {
             const n = tokenCount(e);
             tokenTimes.push({ ns: e.mono_ns, n });
-            const span = rid ? spans.get(rid) : undefined;
+            const span = rid ? spans.get(spanKey) : undefined;
             if (span) {
                 span.tokens += n;
                 if (span.firstTokenNs === null) {
@@ -247,14 +262,20 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
         if (t === "kv.pressure" || t === "guard.budget_pressure") {
             pressureEvents += 1;
         }
-
-        if (t === "telemetry.dropped") {
-            dropped += droppedCount(e) ?? 1;
-        }
     }
 
     const requests = [...spans.values()];
     const finished = requests.filter((s) => s.endNs !== null);
+    const durationsByProducer = new Map<string, number[]>();
+    for (const s of finished) {
+        const list = durationsByProducer.get(s.producer) ?? [];
+        list.push(s.endNs! - s.startNs);
+        durationsByProducer.set(s.producer, list);
+    }
+    const requestLatencyByProducer: Record<string, LatencyStats> = {};
+    for (const [producer, durations] of durationsByProducer) {
+        requestLatencyByProducer[producer] = latencyStats(durations);
+    }
     const withFirstToken = requests.filter((s) => s.firstTokenNs !== null);
 
     const totalTokens = tokenTimes.reduce((sum, x) => sum + x.n, 0);
@@ -279,6 +300,7 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
         eventCount: events.length,
         requests,
         requestLatency: latencyStats(finished.map((s) => s.endNs! - s.startNs)),
+        requestLatencyByProducer,
         timeToFirstToken: latencyStats(withFirstToken.map((s) => s.firstTokenNs! - s.startNs)),
         tokens: { total: totalTokens, overallRate, recentRate, windowMs: RECENT_WINDOW_MS, backendReported },
         errors: {
@@ -304,6 +326,6 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
             pressureEvents,
             latestComputeUtilization: latestCompute,
         },
-        droppedEvents: dropped,
+        droppedEvents: totalDroppedEvents(events),
     };
 }
