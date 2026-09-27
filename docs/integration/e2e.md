@@ -21,7 +21,7 @@ headless Chromium against `vite preview` of a production build.
 | `e2e/diagnostics.spec.ts` | `?view=diagnostics` opens the tab, which lists findings with text severity labels and synthetic provenance; clicking a finding selects it, expands its evidence list, highlights evidence ticks/rows, disables follow, moves the cursor and inspects the first evidence event; clicking another evidence id inspects it |
 | `e2e/agents.spec.ts` | `?view=agents` renders nodes, edges and legend (counts match the SVG `aria-label`); tab switching; graph follows the replay cursor (fewer nodes+edges early, full graph at the end); node click lists evidence, highlights it and the evidence link inspects the event |
 | `e2e/keyboard.spec.ts` | table ArrowUp/ArrowDown selection; scrubber Home/End/Arrow; tabs via Enter/Space; findings ArrowUp/ArrowDown/Escape with focus retained; topology Enter/Escape; Tab order reaches the main controls; the header **Open recording…** label shows a focus outline when its hidden file input has keyboard focus |
-| `e2e/a11y.spec.ts` | axe-core WCAG 2.0/2.1 A+AA scan (color-contrast included) in the dark and light themes of: Overview with a selected event, Events with the inspector's related groups, Diagnostics with a finding selected, Agents, the shortcuts dialog, the onboarding empty state, and the Sources panel with live, failed and disconnected producer cards and a probe error. Known violations are allow-listed **by rule and by target selector** (the list is empty); any new rule or new failing element fails the test |
+| `e2e/a11y.spec.ts` | axe-core WCAG 2.0/2.1/2.2 A+AA scan (tags `wcag2a`, `wcag2aa`, `wcag21a`, `wcag21aa`, `wcag22aa`; color-contrast and target-size included) in the dark and light themes of: Overview with a selected event, Events with the inspector's related groups, Diagnostics with a finding selected, Agents, the shortcuts dialog, the onboarding empty state, and the Sources panel with live, failed and disconnected producer cards and a probe error. Known violations are allow-listed **by rule and by target selector** (the list is empty); any new rule or new failing element fails the test |
 | `e2e/connection.spec.ts` | two fake live producers started from the spec (runtime and inference roles; the inference stream has its own request ids that name the runtime requests in `parent_request_id`, same `run_id`): `?connect=` twice gives two live cards with visible counters, one merged table and timeline, cross-producer child/parent/run related groups (and no cross-producer "Same request"), per-producer latency rows and a banner naming both synthetic producers; Disconnect keeps the events. A token-protected producer fails with "needs a token", connects once the token is typed, and the token is absent from the DOM, inputs, storage, URL and console. `?token=` is ignored with a warning, also when `?connect=` adds producers; credentials or token parameters inside a `connect` value are removed and never shown. With a producer streaming (`pace: timeline`, `loop`), the card element survives counter updates, and a press-hold-release (150 ms) selects a table row and disconnects the card. **Test** reports discovery, the missing token, and CORS (naming the route-scoped `SONDER_OBSERVATORY_ORIGINS` first, `SONDER_CORS_ORIGINS` only with its admin-route caveat, and `--cors-origin`). Presets and recent endpoints. Screenshots of Overview, Events and Sources in both themes at 1440x900 and 420x900 |
 | `e2e/loading.spec.ts` | a recording at or above the 2 MiB chunked-load threshold (the fixture repeated; `File.stream()` slowed per chunk in the page so the load is observable) shows `#load-progress` (role progressbar, `aria-valuenow`, `aria-valuetext`); `#load-cancel` hides it, says the previous source is still shown and keeps the fixture; an uncancelled load finishes. The inspector splitter follows a pointer drag, clamps at its minimum and remembers the position |
 | `e2e/onboarding.spec.ts` | empty state; synthetic demo labelled synthetic; dropping `.ndjson` opens it and other files are refused; Open recording loads a `.sobs`; local discovery lists the fake producer preset (port 8766) and connects it. If port 8766 is busy the test fails with a message; a local run may set `E2E_ALLOW_BUSY_PRESET_PORT=1` to skip it instead (ignored when `CI` is set) |
@@ -99,12 +99,16 @@ All four bugs found by the first version of this suite (#12) are fixed on
    `tabindex` (active tab 0, others -1); ArrowLeft/ArrowRight (wrapping),
    Home/End move focus and activate the tab (automatic activation).
 
-The axe allowlist in `e2e/a11y.spec.ts` is now empty; both views scan clean
-for WCAG 2.0/2.1 A+AA.
+Follow-up (ported from #21): the suite now also scans with the `wcag22aa`
+tag, which reported one more issue:
 
-Remaining, out of scope: with the extra `wcag22aa` tag axe reports
-`target-size` (24x24 px minimum) for the small evidence link buttons
-(`.link`) in the findings/topology lists. The suite does not scan WCAG 2.2.
+5. **Target size (WCAG 2.2, 2.5.8).** The evidence link buttons (`.link`) in
+   the inspector and findings/topology lists were below 24x24 px. Fix:
+   `button.link` in styles.css gets `min-height`/`min-width: var(--space-7)`
+   (24px, inline-flex, centred); `tests/tokens.test.ts` pins the rule to a
+   token of at least 24px.
+
+The axe allowlist in `e2e/a11y.spec.ts` is empty.
 
 ## Running in the Linux container used for the ecosystem work
 
