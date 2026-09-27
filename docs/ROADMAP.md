@@ -64,13 +64,18 @@ pressure (see [diagnostics notes](integration/diagnostics.md)).
 
 ## Milestone 3 — inference space
 
-- [ ] 3D token/pipeline view
+- [x] 3D token/pipeline view (request pipeline stages × model/node lanes; see [3D Inference notes](integration/inference3d.md))
 - [ ] KV/cache visualizer
 - [ ] batch scheduler view
 - [ ] model residency/device topology
 - [ ] speculative decoding visualization
-- [ ] layer/operator deep mode where supported
-- [ ] evidence inspector for every 3D entity
+- [ ] layer/operator deep mode where supported (Observatory side done: draws `backend.layer.*` / `backend.operator.*` / `inference.sampling.candidates` in the proposed shapes; no Sonder Inference backend emits them yet)
+- [x] evidence inspector for every 3D entity
+
+Status 2026-09-27: the "3D Inference" tab is three.js in a lazy chunk. KV is
+shown as a logical pool volume per producer (not yet a full cache
+visualizer); batch scheduler, residency/device topology and speculative
+decoding views remain open.
 
 ## Milestone 4 — Flutter integration
 

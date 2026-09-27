@@ -7,7 +7,10 @@ The owner requested implementation on 2026-09-26, which replaces the earlier
 scaffold-only restriction. Scope is the web renderer, protocol validation,
 synthetic fixture, WebSocket/file transport, recorder/replay, tests, and CI
 described in docs/ROADMAP.md Milestone 1. Do not add model downloads, backend
-or inference code, producer instrumentation, or 3D views in this phase.
+or inference code, or producer instrumentation in this phase. On 2026-09-27
+the owner requested the 3D Inference view (Milestone 3 "3D token/pipeline
+view"): three.js is allowed in `src/inference3d/` only, lazy-loaded, and it
+may draw only what telemetry reports (docs/integration/inference3d.md).
 
 ## Working rules
 

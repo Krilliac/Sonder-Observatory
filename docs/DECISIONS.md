@@ -274,6 +274,45 @@ rate divided by the whole session span showed "0.0 tok/s".
   (including the synthetic fixture's per-token events), so excluding sampled
   events would zero every count.
 
+## 2026-09-27 — three.js and the 3D Inference view
+
+Supersedes the "3D" bullet of "Web toolchain". At the owner's request the
+viewer gets a "3D Inference" tab (docs/integration/inference3d.md).
+
+- **Dependency:** `three` `0.186.1` (MIT), pinned exactly, the first 3D
+  runtime dependency; `@types/three` `0.186.0` (MIT) is a dev dependency
+  (it pulls type-only helpers: `@types/webxr`, `@types/stats.js`,
+  `meshoptimizer`, `fflate`, `@tweenjs/tween.js` (MIT) and
+  `@dimforge/rapier3d-compat` (Apache-2.0), none bundled). WebGL 2 only
+  (three r163+); without it the tab shows a 2D summary. WebGPU stays a
+  proposal.
+- **Bundle:** three is imported only by `src/inference3d/scene.ts` and the
+  tab is loaded with `import()`, so it is its own chunk:
+  `inference3dPanel-*.js` 605.99 kB (154.41 kB gzip) plus 10.24 kB CSS.
+  The main chunk has no three code; it went from 509.63 kB (74.12 kB gzip) to
+  519.88 kB (77.42 kB gzip) for the UX refresh (metric strip, sparkline
+  series, status chips) and the health-link reader.
+- **CSP:** three is bundled locally (no CDN). The chunk contains no `eval` or
+  `new Function`, so the Tauri CSP (`script-src 'self'`, no
+  `unsafe-eval`) is unchanged; WebGL needs no CSP source. Labels use inline
+  `style` attributes, already allowed by `style-src 'unsafe-inline'`.
+- **Semantics:** depth is the reported request pipeline (Runtime route,
+  queue, prefill, decode, output), not transformer layers. Layer planes,
+  operators and token alternatives are drawn only from
+  `backend.layer.*`, `backend.operator.*` and
+  `inference.sampling.candidates`, whose names were already in this
+  repository's taxonomy; their attribute shapes are proposed in
+  TELEMETRY_PROTOCOL.md for Sonder-Inference, which emits none of them yet.
+  When a panel cannot be fed, the tab names the producer, backend and
+  capability that is missing.
+- **Capabilities:** read from `backend.registered` in the stream and, for
+  live connections, from the discovery `links.health` document (same origin
+  only, the producer's token, no redirects, 64 KiB cap, silent on failure).
+- **Design tokens:** added the design-board neutral scale (`neutral.n900` …
+  `n100`), `font.size.xxl` (24 px) and Inter first in the sans stack. Inter is
+  not bundled (no font download, CSP `font-src 'self' data:`); machines
+  without it fall back to Segoe UI Variable / system-ui.
+
 ## Open questions
 
 - Producer attribute names for memory/compute samples and tool call ids

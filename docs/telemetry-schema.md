@@ -142,6 +142,17 @@ Observatory metrics key request spans by (producer stream, `request_id`), so
 the Runtime turn and the Inference request stay separate spans
 (`requestLatencyByProducer` reports each producer).
 
+## 3D Inference readings
+
+The 3D Inference tab (docs/integration/inference3d.md) additionally reads
+`backend.registered.capabilities` and `session.created.backend` /
+`model.load.*.backend` to name a producer's backend and what it can report,
+`request.started.sampler`, `scheduler.configured.kv_num_blocks`,
+`kv.allocated`/`kv.freed` `blocks`, `parent_request_id`, and, for live
+connections, the discovery `links.health` document's `backends[]`. Layer,
+operator and candidate events are reserved and not emitted yet; their proposed
+shapes are in TELEMETRY_PROTOCOL.md.
+
 ## What Observatory reads that no producer sends yet
 
 - agent topology beyond `route.*`: `agent.*`, `tool.*`, `memory.retrieval.*`,
