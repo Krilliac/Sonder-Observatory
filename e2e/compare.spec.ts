@@ -11,8 +11,9 @@ import { openFixture, shot } from "./helpers";
  * Compare flow (src/compare, docs/integration/compare.md).
  *
  * "harness" tests bundle src/compare/panel.ts with Vite's build API, inject it
- * into the built app page and mount it the way ObservatoryApp mounts extra
- * panels, so the flow is covered before the host wires the Compare tab.
+ * into the built app page (fixture loaded, Overview view) and mount it into
+ * #extra-panels the way ObservatoryApp mounts extra panels, so the flow is
+ * covered before the host wires the Compare tab.
  * "app" tests drive the real Compare tab / panel and skip (with a reason)
  * until app.ts / main.ts register it.
  */
@@ -65,12 +66,20 @@ async function harnessBundle(): Promise<{ js: string; css: string }> {
     return harness;
 }
 
-/** Built app with no session loaded, plus the Compare panel mounted with the base fixture as the current session. */
+/**
+ * Built app with the Compare panel mounted into #extra-panels, fed the base fixture as the current session.
+ *
+ * The app only shows #extra-panels once a session is loaded (with no source, #analysis is hidden behind
+ * onboarding) and only in the Overview view, so the page loads the bundled fixture on Overview: the state
+ * in which ObservatoryApp renders its registered panels.
+ */
 async function openHarness(page: Page): Promise<Locator> {
+    await openFixture(page, "view=overview");
     const errors: string[] = [];
     page.on("pageerror", (err) => errors.push(err.message));
-    await page.goto("./?fixture=0");
+    await expect(page.getByRole("tab", { name: "Overview", exact: true })).toHaveAttribute("aria-selected", "true");
     await expect(page.locator("#extra-panels")).toBeAttached();
+    await expect(page.locator("#extra-panels")).not.toHaveAttribute("hidden");
     const { js, css } = await harnessBundle();
     if (css) {
         await page.addStyleTag({ content: css });

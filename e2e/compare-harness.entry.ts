@@ -2,8 +2,10 @@
  * Browser entry for the compare e2e harness (e2e/compare.spec.ts). Bundled
  * on the fly with Vite's build API and injected into the built app page, so
  * the Compare panel can be exercised before the host wires it into app.ts /
- * main.ts. The harness plays the host: it mounts the panel the way
- * ObservatoryApp mounts extra panels and feeds it a PanelContext.
+ * main.ts. The harness plays the host: it mounts the panel into #extra-panels
+ * the way ObservatoryApp mounts extra panels and feeds it a PanelContext. The
+ * app hides #extra-panels until a session is loaded and outside the Overview
+ * view, so the spec loads the fixture on Overview before mounting.
  */
 import { ComparePanel } from "../src/compare/panel";
 import type { ObservatoryEvent } from "../src/protocol/events";
