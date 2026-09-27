@@ -51,6 +51,27 @@ describe("live SessionStore retention", () => {
         expect(store.droppedByRetention).toBe(before + 1);
     });
 
+    it("bounds gap history to retained live events after repeated sequence skips", () => {
+        const store = new SessionStore({ maxLiveEvents: 10 });
+        store.reset("live", "u");
+        for (let i = 0; i < 100; i += 1) {
+            store.append([ev(i * 2)]);
+        }
+        expect(store.droppedByRetention).toBeGreaterThan(0);
+        expect(store.gaps).toEqual(findSequenceGaps(store.events));
+        expect(store.gaps.length).toBeLessThan(store.maxLiveEvents);
+    });
+
+    it("forgets gaps from streams with no retained live events", () => {
+        const store = new SessionStore({ maxLiveEvents: 10 });
+        store.reset("live", "u");
+        for (let i = 0; i < 20; i += 1) {
+            const producer = { name: `producer-${i}`, version: "1", node_id: "n" };
+            store.append([ev(i * 2, { producer }), ev(i * 2 + 1, { producer, sequence: i * 2 + 2 })]);
+        }
+        expect(store.gaps).toEqual(findSequenceGaps(store.events));
+    });
+
     it("keeps every event of a loaded recording", () => {
         const store = new SessionStore({ maxLiveEvents: 10 });
         store.reset("file", "rec.sobs");

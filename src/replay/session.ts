@@ -92,7 +92,7 @@ export class SessionStore {
         this.evictedUpTo = null;
     }
 
-    /** Per-stream sequence gaps (possible dropped telemetry) over all events received. */
+    /** Per-stream sequence gaps among retained events (all events for files). */
     get gaps(): SequenceGap[] {
         if (this.gapsCache === null) {
             const gaps: SequenceGap[] = [];
@@ -122,7 +122,6 @@ export class SessionStore {
                 continue;
             }
             this.seen.add(e.event_id);
-            this.trackSequence(e);
             fresh.push(e);
         }
         if (fresh.length === 0) {
@@ -156,7 +155,21 @@ export class SessionStore {
         while (j < fresh.length) {
             next.push(fresh[j++]!);
         }
-        this.events = drop > 0 ? this.evict(next, drop) : next;
+        if (drop > 0) {
+            this.events = this.evict(next, drop);
+            // Live sequence history must follow the retained window, including
+            // streams whose last event was evicted.
+            this.streams = new Map();
+            this.gapsCache = [];
+            for (const e of this.events) {
+                this.trackSequence(e);
+            }
+        } else {
+            this.events = next;
+            for (const e of fresh) {
+                this.trackSequence(e);
+            }
+        }
     }
 
     addRejected(lines: readonly RejectedLine[]): void {
@@ -217,9 +230,8 @@ export class SessionStore {
     }
 
     /**
-     * Same result as findSequenceGaps over every event received, kept
+     * Same result as findSequenceGaps over the retained events, kept
      * incrementally: a stream's gaps are the unseen numbers in [min, max].
-     * Retention does not change them (evicted events were received).
      */
     private trackSequence(e: ObservatoryEvent): void {
         const key = streamKey(e);
