@@ -49,7 +49,9 @@ export function parseHealth(value: unknown): ProducerHealth | null {
         });
     }
     const models = Array.isArray(value.models)
-        ? value.models.filter(isObject).flatMap((m) => (typeof m.id === "string" ? [{ id: m.id, backend: typeof m.backend === "string" ? m.backend : null }] : []))
+        ? value.models
+              .filter(isObject)
+              .flatMap((m) => (typeof m.id === "string" ? [{ id: m.id, backend: typeof m.backend === "string" ? m.backend : null }] : []))
         : [];
     const telemetry = isObject(value.telemetry) ? value.telemetry : null;
     return { backends, models, telemetryLevel: telemetry && typeof telemetry.level === "string" ? telemetry.level : null };
