@@ -5,14 +5,22 @@
 // Usage:
 //   node scripts/fake-producer.mjs [--file fixtures/synthetic-session.ndjson]
 //       [--host 127.0.0.1] [--port 8765] [--speed 1] [--loop]
+//       [--cors-origin ORIGIN]... [--max-connections 32]
 //
-// Binds to loopback by default (docs/SECURITY_PRIVACY.md). Each connected
-// client receives its own replay from the start of the file.
+// Loopback only (docs/SECURITY_PRIVACY.md): this producer has no
+// authentication (browsers cannot send headers on a WebSocket handshake), so
+// a non-loopback --host is refused; use fake-live-producer.mjs with
+// --token-file for a LAN listener. A browser page may connect only from the
+// Observatory origins (the fake-live producer's DEFAULT_CORS_ORIGINS, plus
+// each --cors-origin); clients that send no Origin (not a browser) are
+// unaffected. At most --max-connections (default 32) replays run at once.
+// Each connected client receives its own replay from the start of the file.
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
+import { DEFAULT_CORS_ORIGINS, DEFAULT_MAX_CONNECTIONS, isLoopbackHost } from "./fake-live-producer.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -25,6 +33,20 @@ const host = option("host", "127.0.0.1");
 const port = Number(option("port", "8765"));
 const speed = Number(option("speed", "1"));
 const loop = args.includes("--loop");
+const origins = new Set([
+    ...DEFAULT_CORS_ORIGINS,
+    ...args.flatMap((a, i) => (a === "--cors-origin" && i + 1 < args.length ? [args[i + 1]] : [])),
+]);
+const maxConnections = Number(option("max-connections", String(DEFAULT_MAX_CONNECTIONS)));
+
+if (!isLoopbackHost(host)) {
+    console.error(`refusing to bind ${host}: this producer has no authentication and binds loopback only (use fake-live-producer.mjs --token-file for a LAN listener)`);
+    process.exit(2);
+}
+if (!Number.isInteger(maxConnections) || maxConnections <= 0) {
+    console.error("--max-connections must be a positive integer");
+    process.exit(2);
+}
 
 if (!Number.isFinite(speed) || speed <= 0) {
     console.error("--speed must be a positive number");
@@ -63,7 +85,23 @@ function variant(event, pass) {
     };
 }
 
-const wss = new WebSocketServer({ host, port });
+const wss = new WebSocketServer({
+    host,
+    port,
+    // A web page on another origin must not read the replay (cross-site WebSocket hijacking).
+    verifyClient: ({ origin }, done) => {
+        if (typeof origin === "string" && origin !== "" && !origins.has(origin)) {
+            console.log(`refused a connection from origin ${origin}`);
+            done(false, 403, "origin not allowed");
+            return;
+        }
+        if (wss.clients.size >= maxConnections) {
+            done(false, 503, "too many clients");
+            return;
+        }
+        done(true);
+    },
+});
 wss.on("listening", () => {
     console.log(`fake producer: ws://${host}:${port} replaying ${events.length} events from ${file} at ${speed}x${loop ? " (loop)" : ""}`);
 });
