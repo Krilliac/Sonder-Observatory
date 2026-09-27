@@ -45,8 +45,8 @@ describe(".sobs export round-trip", () => {
             expect(loaded.manifest?.event_count).toBe(selected.length);
             expect(loaded.manifest?.created_at).toBe("2026-09-26T12:00:00.000Z");
             expect(loaded.events).toEqual(selected);
-            // Re-serialising the loaded events is byte-identical.
-            expect(renderSobs(loaded.events, {}, GENERATED_AT)).toBe(text);
+            // Re-serialising the loaded events (with the manifest's carried capture policy) is byte-identical.
+            expect(renderSobs(loaded.events, {}, GENERATED_AT, { capturePolicy: loaded.manifest!.capture_policy })).toBe(text);
         });
     }
 

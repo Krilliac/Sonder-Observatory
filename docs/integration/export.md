@@ -22,8 +22,23 @@ Owner area: `src/export/` (new), plus the minimal desktop save surface in
 - **Findings** are recomputed over the exported range with `runDiagnostics`,
   and each finding lists its cited evidence events (time, type, id).
 - **`.sobs`** export writes a fresh manifest line plus the selected events,
-  unmodified. `loadRecording()` on the result gives back exactly those events
+  unmodified. The manifest's `capture_policy` is the policy declared by the
+  source session (`session.started` / `session.created`), even when the range
+  filters out the session-start event. `loadRecording()` on the result gives back exactly those events
   (tested for the full session, a class filter, a text filter and a time window).
+
+**Recording hygiene** (docs/SECURITY_PRIVACY.md): `assessExportSensitivity()`
+flags full text capture (`text_capture` `full` / `on`, or plaintext
+`token_text`) and unredacted tool payloads (`args`/`result`/… on `tool.*`
+events that are not `[redacted…]` or `sha256:…`). `exportSession()` throws
+`SensitiveExportError` and writes nothing, on both the browser download and the
+desktop `save_export` path, unless `acknowledgeSensitive: true` is passed.
+`saveText`/`downloadText` are not exported from `src/export` so the hook
+cannot bypass the check. `exportWithConfirmation(format, input,
+confirmSensitiveExport)` shows the modal warning (native `<dialog>`, labelled
+and described, Escape / Cancel = no export, Cancel focused first) only when
+needed. The Markdown summary clips producer-controlled strings and applies a
+final 65 536-character budget with a truncation marker.
 
 Only public APIs are used: `deriveMetrics` (`src/query/metrics.ts`),
 `runDiagnostics` (`src/diagnostics/index.ts`), `deriveTopology` /
@@ -50,7 +65,7 @@ Not wired on this branch. Suggested hook, next to the existing "Save
 recording" control:
 
 ```ts
-import { EXPORT_FORMATS, EXPORT_FORMAT_IDS, exportSession, type ExportFormat } from "../export";
+import { confirmSensitiveExport, EXPORT_FORMATS, EXPORT_FORMAT_IDS, exportWithConfirmation, type ExportFormat } from "../export";
 
 // In the header/toolbar render: a <select> or menu button "Export ▾"
 // with one item per EXPORT_FORMAT_IDS entry, labelled EXPORT_FORMATS[id].label.
@@ -67,7 +82,7 @@ private async exportAs(format: ExportFormat, scope: "session" | "view" = "sessio
               }
             : {};
     try {
-        const saved = await exportSession(format, { events: this.store.events, range });
+        const saved = await exportWithConfirmation(format, { events: this.store.events, range }, confirmSensitiveExport);
         if (saved) {
             this.setStatus(`Exported ${saved.name}`); // or the existing status/toast mechanism
         }
@@ -77,15 +92,19 @@ private async exportAs(format: ExportFormat, scope: "session" | "view" = "sessio
 }
 ```
 
-- `exportSession` returns `null` when the session is empty or the user cancels
-  the desktop dialog; it throws on write errors (show the message).
+- `exportWithConfirmation` returns `null` when the session is empty, the user
+  declines the sensitive-data warning or cancels the desktop dialog; it throws
+  on write errors (show the message). Do not call `exportSession` with
+  `acknowledgeSensitive: true` unless the user accepted that warning.
+- axe: add the warning dialog to `e2e/a11y.spec.ts` once the menu is wired
+  (open an export of a `text_capture: "full"` session and scan while it is open).
 - `scope: "view"` exports the filtered event range the user is looking at
   (event-table filters + replay cursor); `"session"` exports everything. A
   two-item submenu ("Whole session" / "Current view") per format, or a
   "Current view only" checkbox in the menu, both work.
 - Keyboard: optional `Ctrl/Cmd+Shift+E` → HTML report.
 - `saveRecording()` in `app.ts` could later become
-  `exportSession("sobs", { events: this.store.events })` to get the native save
+  `exportWithConfirmation("sobs", { events: this.store.events }, confirmSensitiveExport)` to get the native save
   dialog on desktop too.
 
 `src/renderer/main.ts`: no change.

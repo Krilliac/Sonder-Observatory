@@ -1,0 +1,31 @@
+/* Sensitive-export warning (src/export/confirmDialog.ts). Uses the app's design tokens. */
+.export-warning {
+    max-width: min(32rem, calc(100vw - 2rem));
+    padding: 16px 20px;
+    color: var(--text, #e6edf7);
+    background: var(--color-surface, #0f1726);
+    border: 1px solid var(--color-warning, #f59e0b);
+    border-radius: var(--radius, 6px);
+}
+
+.export-warning::backdrop {
+    background: rgb(0 0 0 / 60%);
+}
+
+.export-warning h2 {
+    margin: 0 0 8px;
+    font-size: 1.1rem;
+    color: var(--color-warning, #f59e0b);
+}
+
+.export-warning ul {
+    margin: 0 0 16px;
+    padding-left: 1.2rem;
+    line-height: 1.4;
+}
+
+.export-warning-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}

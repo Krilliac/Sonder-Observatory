@@ -18,6 +18,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 const exp = await import("../../src/export");
+const { saveText } = await import("../../src/export/save");
 const { fixtureEvents, GENERATED_AT } = await import("./fixture");
 
 function fakeHost() {
@@ -55,7 +56,7 @@ describe("export file names", () => {
 describe("saving in a browser", () => {
     it("downloads a Blob and revokes the object URL afterwards", async () => {
         const { host, log, blobs, timers } = fakeHost();
-        const res = await exp.saveText("r.md", "# hi\n", "markdown", { host });
+        const res = await saveText("r.md", "# hi\n", "markdown", { host });
         expect(res).toEqual({ name: "r.md", via: "download" });
         expect(log).toEqual(["create", "click blob:fake/1 r.md"]);
         expect(blobs[0]!.type).toBe("text/markdown;charset=utf-8");
@@ -80,7 +81,7 @@ describe("saving on desktop (Tauri)", () => {
     it("calls save_export with the suggested name, content and filter", async () => {
         tauri.desktop = true;
         tauri.result = { name: "chosen.sobs" };
-        const res = await exp.saveText("observatory.sobs", "{}\n", "sobs");
+        const res = await saveText("observatory.sobs", "{}\n", "sobs");
         expect(res).toEqual({ name: "chosen.sobs", via: "desktop" });
         expect(tauri.calls).toEqual([
             {
@@ -94,7 +95,7 @@ describe("saving on desktop (Tauri)", () => {
         tauri.desktop = true;
         tauri.result = null;
         const { host, log } = fakeHost();
-        expect(await exp.saveText("a.json", "{}", "json", { host })).toBeNull();
+        expect(await saveText("a.json", "{}", "json", { host })).toBeNull();
         expect(log).toEqual([]); // no browser fallback
     });
 
