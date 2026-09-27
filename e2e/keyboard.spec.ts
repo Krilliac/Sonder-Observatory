@@ -3,7 +3,7 @@ import { inspectorEventId, openFixture } from "./helpers";
 
 test.describe("keyboard navigation", () => {
     test("arrow keys in the event table move the selection", async ({ page }) => {
-        await openFixture(page);
+        await openFixture(page, "view=events");
         const wrap = page.locator("#table-wrap");
         await wrap.focus();
         await expect(wrap).toBeFocused();
@@ -107,44 +107,84 @@ test.describe("keyboard navigation", () => {
         await expect(node).toBeFocused();
     });
 
-    test("analysis tabs follow the WAI-ARIA tabs keyboard pattern", async ({ page }) => {
+    test("view tabs follow the WAI-ARIA tabs keyboard pattern", async ({ page }) => {
         await openFixture(page);
+        const overview = page.getByRole("tab", { name: "Overview" });
+        const events = page.getByRole("tab", { name: "Events" });
         const diag = page.getByRole("tab", { name: "Diagnostics" });
         const agents = page.getByRole("tab", { name: "Agents" });
         // Roving tabindex: only the active tab is a Tab stop.
-        await expect(diag).toHaveAttribute("tabindex", "0");
+        await expect(overview).toHaveAttribute("tabindex", "0");
         await expect(agents).toHaveAttribute("tabindex", "-1");
-        await diag.focus();
+        await overview.focus();
         await page.keyboard.press("ArrowRight");
-        await expect(agents).toBeFocused();
-        await expect(agents).toHaveAttribute("aria-selected", "true");
-        await expect(agents).toHaveAttribute("tabindex", "0");
-        await expect(diag).toHaveAttribute("tabindex", "-1");
-        await expect(page.locator("#view-agents")).toBeVisible();
-        await page.keyboard.press("ArrowRight"); // wraps
-        await expect(diag).toBeFocused();
-        await expect(diag).toHaveAttribute("aria-selected", "true");
-        await page.keyboard.press("ArrowLeft"); // wraps back
-        await expect(agents).toHaveAttribute("aria-selected", "true");
-        await page.keyboard.press("Home");
-        await expect(diag).toBeFocused();
-        await expect(page.locator("#view-diagnostics")).toBeVisible();
+        await expect(events).toBeFocused();
+        await expect(events).toHaveAttribute("aria-selected", "true");
+        await expect(events).toHaveAttribute("tabindex", "0");
+        await expect(overview).toHaveAttribute("tabindex", "-1");
+        await expect(page.locator("#view-events")).toBeVisible();
         await page.keyboard.press("End");
         await expect(agents).toBeFocused();
+        await expect(page.locator("#view-agents")).toBeVisible();
+        await page.keyboard.press("ArrowRight"); // wraps
+        await expect(overview).toBeFocused();
+        await expect(overview).toHaveAttribute("aria-selected", "true");
+        await page.keyboard.press("ArrowLeft"); // wraps back
+        await expect(agents).toHaveAttribute("aria-selected", "true");
+        await page.keyboard.press("ArrowLeft");
+        await expect(diag).toBeFocused();
+        await expect(page.locator("#view-diagnostics")).toBeVisible();
+        await page.keyboard.press("Home");
+        await expect(overview).toBeFocused();
         await expect(page.locator("#view-diagnostics")).toBeHidden();
+        await expect(page.locator("#view-overview")).toBeVisible();
+    });
+
+    test("the header Open recording control shows keyboard focus", async ({ page }) => {
+        await openFixture(page);
+        const label = page.locator("#file-open");
+        expect(await label.evaluate((el) => getComputedStyle(el).outlineStyle)).toBe("none");
+        for (let i = 0; i < 12; i += 1) {
+            await page.keyboard.press("Tab");
+            if (await page.evaluate(() => document.activeElement?.id === "file-input")) {
+                break;
+            }
+        }
+        expect(await page.evaluate(() => document.activeElement?.id)).toBe("file-input");
+        const outline = await label.evaluate((el) => {
+            const cs = getComputedStyle(el);
+            return { style: cs.outlineStyle, width: cs.outlineWidth };
+        });
+        expect(outline).toEqual({ style: "solid", width: "2px" });
+    });
+
+    test("the inspector splitter resizes with the keyboard", async ({ page }) => {
+        await openFixture(page, "view=events");
+        const handle = page.locator("#split-handle");
+        await expect(handle).toHaveAttribute("role", "separator");
+        const before = Number(await handle.getAttribute("aria-valuenow"));
+        const width = async () => (await page.locator("#inspector").boundingBox())!.width;
+        const w0 = await width();
+        await handle.focus();
+        await page.keyboard.press("ArrowRight");
+        await expect(handle).toHaveAttribute("aria-valuenow", String(before + 5));
+        expect(await width()).toBeLessThan(w0);
+        await page.keyboard.press("Home");
+        await expect(handle).toHaveAttribute("aria-valuenow", await handle.getAttribute("aria-valuemin") ?? "");
+        expect(await width()).toBeGreaterThan(w0);
     });
 
     test("Tab order reaches the main controls", async ({ page }) => {
-        await openFixture(page);
+        await openFixture(page, "view=events");
         const reached = new Set<string>();
-        for (let i = 0; i < 40; i += 1) {
+        for (let i = 0; i < 60; i += 1) {
             await page.keyboard.press("Tab");
             const id = await page.evaluate(() => document.activeElement?.id ?? "");
             if (id) {
                 reached.add(id);
             }
         }
-        for (const id of ["connect-btn", "fixture-btn", "play-btn", "scrubber", "filter-text", "table-wrap", "tab-diagnostics"]) {
+        for (const id of ["sidebar-toggle", "ws-url", "transport-select", "token-input", "probe-btn", "connect-btn", "fixture-btn", "theme-toggle", "tab-events", "play-btn", "prev-error-btn", "next-error-btn", "scrubber", "filter-text", "table-wrap", "split-handle"]) {
             expect(reached, `Tab should reach #${id}`).toContain(id);
         }
     });

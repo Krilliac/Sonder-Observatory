@@ -46,7 +46,9 @@ export function memoryUsage(event: ObservatoryEvent): MemoryUsage | null {
 
 /**
  * Dropped-event count of a `telemetry.dropped` event: `dropped_count`
- * (Observatory fixture) or `dropped_events` (Sonder-Inference).
+ * (Observatory fixture) or `dropped_events` (Sonder-Inference, Sonder
+ * Runtime). Both are cumulative per producer instance; see
+ * totalDroppedEvents for the aggregate.
  */
 export function droppedCount(event: ObservatoryEvent): number | null {
     const n = finite(event.attributes.dropped_count) ?? finite(event.attributes.dropped_events);
@@ -96,4 +98,35 @@ export function producerInstance(event: ObservatoryEvent): string | null {
         return match[1]!;
     }
     return null;
+}
+
+/**
+ * Producer-reported dropped events across a session: for each producer
+ * instance, the latest cumulative `dropped_events` / `dropped_count` of its
+ * `telemetry.dropped` events (in the order given, normally replay order),
+ * summed over instances. A report without a count adds nothing. Events
+ * without an instance fall back to session + producer name + node.
+ */
+export function totalDroppedEvents(events: Iterable<ObservatoryEvent>): number {
+    const latest = new Map<string, number>();
+    for (const e of events) {
+        if (e.event_type !== "telemetry.dropped") {
+            continue;
+        }
+        const n = droppedCount(e);
+        if (n === null) {
+            continue;
+        }
+        const instance = producerInstance(e);
+        const key =
+            instance !== null
+                ? `${e.producer.name}\u0000${e.producer.node_id}\u0000#${instance}`
+                : `${e.session_id}\u0000${e.producer.name}\u0000${e.producer.node_id}`;
+        latest.set(key, n);
+    }
+    let total = 0;
+    for (const n of latest.values()) {
+        total += n;
+    }
+    return total;
 }

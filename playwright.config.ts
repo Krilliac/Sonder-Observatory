@@ -6,13 +6,23 @@ import { defineConfig, devices } from "@playwright/test";
  * By default the suite builds the app (which regenerates the synthetic
  * fixture via the `prebuild` script) and serves dist/ with `vite preview`.
  * Set E2E_BASE_URL to test an already running server instead.
+ *
+ * E2E_CHROMIUM_PATH points Playwright at a Chromium build of your choice
+ * (for example a preinstalled one whose revision does not match this
+ * Playwright release). The cross-repo ecosystem spec (e2e/ecosystem.spec.ts)
+ * needs a running Sonder Runtime and Sonder-Inference, so it is excluded
+ * unless E2E_ECOSYSTEM=1; `npm run test:ecosystem` starts both and sets it
+ * (docs/integration/ecosystem-e2e.md).
  */
 const PORT = Number(process.env.E2E_PORT ?? 4173);
 const externalBaseURL = process.env.E2E_BASE_URL;
 const baseURL = externalBaseURL ?? `http://127.0.0.1:${PORT}`;
+const chromiumPath = process.env.E2E_CHROMIUM_PATH?.trim() || undefined;
+const ecosystem = process.env.E2E_ECOSYSTEM === "1";
 
 export default defineConfig({
     testDir: "e2e",
+    testIgnore: ecosystem ? [] : ["**/ecosystem.spec.ts"],
     outputDir: "test-results/e2e",
     fullyParallel: true,
     forbidOnly: !!process.env.CI,
@@ -30,7 +40,16 @@ export default defineConfig({
         trace: "retain-on-failure",
         screenshot: "only-on-failure",
     },
-    projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 1000 } } }],
+    projects: [
+        {
+            name: "chromium",
+            use: {
+                ...devices["Desktop Chrome"],
+                viewport: { width: 1440, height: 1000 },
+                ...(chromiumPath ? { launchOptions: { executablePath: chromiumPath } } : {}),
+            },
+        },
+    ],
     webServer: externalBaseURL
         ? undefined
         : {

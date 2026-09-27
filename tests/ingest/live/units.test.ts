@@ -128,6 +128,19 @@ describe("resolveEndpoint", () => {
         expect(resolveEndpoint("nope").ok).toBe(false);
     });
 
+    it("keeps loopback behaviour and refuses unsafe URLs", () => {
+        expect(resolveEndpoint("http://127.0.0.1:11435/v1/observability/events")).toMatchObject({ ok: true, loopback: true });
+        expect(resolveEndpoint("http://127.0.0.2:1/sse")).toMatchObject({ ok: true, loopback: true });
+        expect(resolveEndpoint("ws://[::1]:8765")).toMatchObject({ ok: true, kind: "websocket", loopback: true });
+        expect(resolveEndpoint("wss://node.example/ws")).toMatchObject({ ok: true, loopback: false });
+        expect(resolveEndpoint("http://192.168.1.2:11435/sse").message).toMatch(/use https:\/\/ for 192\.168\.1\.2/);
+        expect(resolveEndpoint("ws://10.0.0.1/ws").message).toMatch(/use wss:\/\//);
+        expect(resolveEndpoint("https://u:p@node.example/sse").ok).toBe(false);
+        expect(resolveEndpoint("https://node.example/sse?token=x").ok).toBe(false);
+        expect(resolveEndpoint("ws://127.0.0.1/ws?ACCESS_TOKEN=x").ok).toBe(false);
+        expect(resolveEndpoint("https://node.example/sse?format=ndjson&last_event_id=a-1").ok).toBe(true);
+    });
+
     it("sets a resume query parameter", () => {
         expect(withQueryParam("ws://h:1/ws?a=1", "last_event_id", "e 1")).toBe("ws://h:1/ws?a=1&last_event_id=e+1");
     });

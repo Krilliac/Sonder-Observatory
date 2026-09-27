@@ -46,12 +46,22 @@ export class TimelineView {
         private readonly container: HTMLElement,
         private readonly onClick: (click: TimelineClick) => void,
     ) {
-        this.canvas = h("canvas", { role: "img", "aria-label": "Event timeline by class", class: "timeline-canvas" });
+        this.canvas = h("canvas", {
+            role: "img",
+            "aria-label": "Event timeline by class",
+            "aria-describedby": "timeline-summary",
+            class: "timeline-canvas",
+        });
         this.canvas.addEventListener("click", (ev) => this.handleClick(ev, this.canvas));
     }
 
     get currentMode(): TimelineMode | null {
         return this.mode;
+    }
+
+    /** Re-reads the colours on the next canvas frame (after a theme change). */
+    invalidatePalette(): void {
+        this.palette = null;
     }
 
     render(state: TimelineRenderState): void {
@@ -106,7 +116,14 @@ export class TimelineView {
         const { width, height, labelW, rowH, plotW } = g;
         const duration = Math.max(index.durationNs, 1);
         const xOf = (rel: number) => labelW + (rel / duration) * plotW;
-        const root = svg("svg", { width, height, viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": "Event timeline by class" });
+        const root = svg("svg", {
+            width,
+            height,
+            viewBox: `0 0 ${width} ${height}`,
+            role: "img",
+            "aria-label": "Event timeline by class",
+            "aria-describedby": "timeline-summary",
+        });
         const cursorRel = state.cursorRel;
 
         TRACKS.forEach((cls, row) => {
@@ -156,7 +173,7 @@ export class TimelineView {
         this.container.replaceChildren(root);
     }
 
-    /** Palette from the CSS custom properties used by styles.css, read once. */
+    /** Palette from the design-token CSS custom properties, read once per theme. */
     private readPalette(): TimelinePalette {
         if (this.palette) {
             return this.palette;
@@ -167,22 +184,22 @@ export class TimelineView {
         this.palette = {
             background: v("--color-surface", d.background),
             trackBg: v("--color-background", d.trackBg),
-            label: v("--muted", d.label),
-            cursor: v("--text", d.cursor),
-            selected: d.selected,
+            label: v("--color-muted", d.label),
+            cursor: v("--color-text", d.cursor),
+            selected: v("--color-markSelected", d.selected),
             evidence: v("--semantic-warning", d.evidence),
             span: v("--semantic-token", d.span),
             spanFailed: v("--semantic-error", d.spanFailed),
             tracks: [
-                v("--muted", d.tracks[0]!),
+                v("--color-muted", d.tracks[0]!),
                 v("--semantic-token", d.tracks[1]!),
                 v("--semantic-activation", d.tracks[2]!),
                 v("--semantic-attention", d.tracks[3]!),
                 v("--semantic-healthy", d.tracks[4]!),
                 v("--semantic-warning", d.tracks[5]!),
                 v("--semantic-error", d.tracks[6]!),
-                d.tracks[7]!,
-                d.tracks[8]!,
+                v("--color-trackTelemetry", d.tracks[7]!),
+                v("--color-trackOther", d.tracks[8]!),
             ],
         };
         return this.palette;

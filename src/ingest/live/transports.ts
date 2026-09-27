@@ -30,6 +30,47 @@ export interface TransportRequest {
     lastEventId: string | null;
     /** Query parameter used to request resume on WebSocket. */
     resumeParam: string;
+    /**
+     * Extra request headers for HTTP streams (for example Authorization).
+     * WebSocket handshakes cannot carry them from a browser; the client
+     * refuses a token on ws(s) before a transport is opened.
+     */
+    headers?: Readonly<Record<string, string>>;
+}
+
+/** Status line text for a failed HTTP stream response, with a hint. */
+/**
+ * Streams and discovery are fetched with `redirect: "manual"`: a redirect is
+ * never followed, so a producer cannot move the viewer to an endpoint the
+ * endpoint policy (resolveEndpoint) would have refused, such as plain http://
+ * on a non-loopback host.
+ */
+export const NO_REDIRECTS: RequestRedirect = "manual";
+
+/** A redirect answer: a 3xx, or the opaque redirect a browser reports for "manual". */
+export function isRedirect(response: Response): boolean {
+    return response.type === "opaqueredirect" || (response.status >= 300 && response.status < 400);
+}
+
+export const REDIRECT_REFUSED =
+    "the producer answered with a redirect, which is not followed (the endpoint policy applies to the URL entered); enter the final URL instead";
+
+export function describeHttpFailure(status: number): string {
+    if (status === 0 || (status >= 300 && status < 400)) {
+        return `${status === 0 ? "redirect" : `HTTP ${status}`}: ${REDIRECT_REFUSED}`;
+    }
+    switch (status) {
+        case 401:
+            return "HTTP 401: the producer requires a bearer token (or rejected the one given)";
+        case 403:
+            return "HTTP 403: the producer refused this request (origin, host or token not allowed)";
+        case 404:
+            return "HTTP 404: no telemetry stream at this URL (is export enabled on the producer?)";
+        case 429:
+            return "HTTP 429: the producer has too many telemetry subscribers; retrying";
+        default:
+            return `HTTP ${status}`;
+    }
 }
 
 export interface TransportHandle {
@@ -113,6 +154,7 @@ export function openHttpStream(
 
     const run = async () => {
         const headers: Record<string, string> = {
+            ...request.headers,
             Accept:
                 request.kind === "ndjson"
                     ? "application/x-ndjson, application/jsonl;q=0.9, text/event-stream;q=0.5"
@@ -126,9 +168,15 @@ export function openHttpStream(
             headers,
             signal: controller.signal,
             cache: "no-store",
+            redirect: NO_REDIRECTS,
         });
+        if (isRedirect(response)) {
+            await response.body?.cancel().catch(() => undefined);
+            finish(describeHttpFailure(response.type === "opaqueredirect" ? 0 : response.status), true);
+            return;
+        }
         if (!response.ok || !response.body) {
-            finish(`HTTP ${response.status}`, true);
+            finish(describeHttpFailure(response.status), true);
             return;
         }
         const contentType = (response.headers.get("content-type") ?? "").toLowerCase();

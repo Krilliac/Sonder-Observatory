@@ -80,6 +80,9 @@ export function* generateEvents(count, seed = DEFAULT_SEED) {
     let seq = 0;
     let ms = 0;
     let reqCounter = 0;
+    // telemetry.dropped counts are cumulative per producer instance
+    // (docs/RECORDING_FORMAT.md): each report carries the running total.
+    let droppedTotal = 0;
     let toolCounter = 0;
     const open = [];
     const pendingTools = [];
@@ -138,7 +141,7 @@ export function* generateEvents(count, seed = DEFAULT_SEED) {
         } else if (roll < 0.105) {
             yield make("kv.pressure", { device_id: "dev_gpu0" }, { occupancy: Math.round((0.85 + rand() * 0.14) * 100) / 100 });
         } else if (roll < 0.1055) {
-            yield make("telemetry.dropped", { run_id: run }, { dropped_count: between(1, 5), reason: "synthetic producer queue full" });
+            yield make("telemetry.dropped", { run_id: run }, { dropped_count: (droppedTotal += between(1, 5)), reason: "synthetic producer queue full" });
         } else if (open.length < MAX_OPEN_REQUESTS && (open.length === 0 || roll > 0.97)) {
             reqCounter += 1;
             const req = {

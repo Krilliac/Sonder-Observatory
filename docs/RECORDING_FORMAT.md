@@ -41,13 +41,20 @@ protocol. It is computed from the recorded events when saving:
 | `complete` | every session in the file has a `session.ended` event |
 | `event_count` | number of event lines |
 | `schema_versions` | distinct `schema` values seen |
-| `producers` | distinct producer name/version/node, with `synthetic` flag |
+| `producers` | distinct producer name/version/node, with `role` (`producer.role`: `inference`, `runtime`, `fixture`, or `null` when no event declares one) and `synthetic` (true if any of its events is synthetic) |
 | `session_ids`, `run_ids` | distinct correlation ids |
 | `sampling_levels` | distinct `sampling.level` values |
 | `capture_policy` | `attributes.text_capture` from `session.started`, else `unspecified` |
-| `dropped_events` | sum of producer-reported `telemetry.dropped` counts |
+| `dropped_events` | producer-reported drops: for each producer instance the latest cumulative `dropped_events` (Inference, Runtime) or `dropped_count` (fixture) of its `telemetry.dropped` events, summed over instances; a report without a count adds nothing |
 | `time_origin` | wall/monotonic time of the first event |
 | `synthetic` | any producer marked `synthetic: true` |
+
+A recording can hold several producers (for example Sonder Runtime and
+Sonder-Inference connected together through the live connection manager).
+Their events are interleaved in replay order (`mono_ns`, then `sequence`);
+each event keeps its own `producer` block, so the per-producer view survives
+the round trip. Files written before `role` existed omit the key; readers
+treat a missing `role` as `null`.
 
 Not yet recorded (need producer support or later milestones): redaction
 policy details, model/backend/device descriptors beyond event ids, storage

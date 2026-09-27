@@ -1,85 +1,112 @@
-/* Styles for the analysis views (tabs) and the panels wired into them. */
+/* Styles for the diagnostics and agents views and the panels wired into
+   them. Colours are design tokens only (see styles.css). */
 
-/* Analysis view tabs */
+/* View tabs */
 .tabs {
     display: flex;
-    gap: 4px;
-    margin-bottom: 8px;
-    border-bottom: 1px solid var(--color-border, #24334a);
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    border-bottom: 1px solid var(--color-border);
 }
 
 .tab {
     border-bottom-left-radius: 0;
     border-bottom-right-radius: 0;
     border-bottom: none;
+    background: transparent;
+    border-color: transparent;
+    color: var(--color-muted);
+    font-weight: var(--font-weight-medium);
 }
 
 .tab.active {
-    background: color-mix(in srgb, var(--color-primary, #3b82f6) 30%, var(--color-elevated, #162238));
+    background: var(--color-surface);
+    border-color: var(--color-border);
+    color: var(--color-text);
+    box-shadow: inset 0 2px 0 var(--color-primary);
 }
 
 /* Diagnostics evidence highlighting */
 .tick.evidence {
-    fill: var(--color-warning, #f59e0b);
+    fill: var(--color-warning);
     opacity: 1;
 }
 
 table.events tr.evidence td:first-child {
-    box-shadow: inset 3px 0 0 var(--color-warning, #f59e0b);
+    box-shadow: inset 3px 0 0 var(--color-warning);
 }
 
 /* Diagnostics findings list (src/diagnostics/panel.ts) */
+#view-diagnostics,
+#view-agents {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-4) var(--space-5);
+    overflow: auto;
+}
+
 .diag-findings {
     list-style: none;
     padding: 0;
     margin: 0;
-    max-height: 40vh;
-    overflow: auto;
 }
 
 .diag-finding {
     display: block;
     width: 100%;
     text-align: left;
-    margin: 2px 0;
+    margin: var(--space-1) 0;
     background: transparent;
+    white-space: normal;
 }
 
 .diag-finding.selected {
-    background: color-mix(in srgb, var(--color-primary, #3b82f6) 25%, transparent);
+    background: color-mix(in srgb, var(--color-primary) 22%, var(--color-surface));
 }
 
-/* Muted text on selected findings and event-table rows: --muted is 4.46:1 on
-   the selected background (#1a325a); this mix (#a6b3c7) is 6.0:1 (WCAG AA). */
+/* Muted text on selected findings and event rows: blend toward the text
+   colour so it keeps AA contrast on the tinted selection background. */
 .diag-finding.selected .muted,
 table.events tr.selected .muted {
-    color: color-mix(in srgb, var(--muted) 70%, var(--text));
+    color: color-mix(in srgb, var(--color-muted) 60%, var(--color-text));
 }
 
 .sev-label {
     display: inline-block;
     min-width: 3.5em;
-    font-weight: 600;
-    font-size: 12px;
+    font-weight: var(--font-weight-bold);
+    font-size: var(--font-size-sm);
 }
 
-.sev-label.sev-info { color: var(--color-cyan, #22d3ee); }
-.sev-label.sev-warning { color: var(--color-warning, #f59e0b); }
-.sev-label.sev-critical { color: var(--color-error, #ef4444); }
+.sev-label.sev-info { color: var(--color-link); }
+.sev-label.sev-warning { color: var(--color-textWarning); }
+.sev-label.sev-critical { color: var(--color-textError); }
 
 .diag-kind {
-    font-weight: 600;
+    font-weight: var(--font-weight-bold);
 }
 
 .diag-evidence {
     list-style: none;
-    margin: 2px 0 8px 3.5em;
+    margin: var(--space-1) 0 var(--space-4) 3.5em;
     padding: 0;
 }
 
 /* Agent topology (src/topology/view.ts) */
-.topology-svg { display: block; max-height: 60vh; }
+.topology-svg { display: block; max-width: 100%; height: auto; max-height: 60vh; }
 .topology-node, .topology-edge { cursor: pointer; outline: none; }
 .topology-node:focus-visible path, .topology-edge:focus-visible path { stroke-width: 4; }
-.topology-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; }
-.topology-legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.topology-legend { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-5); font-size: var(--font-size-sm); }
+.topology-legend-item { display: inline-flex; align-items: center; gap: var(--space-2); }
+
+/* Extra panels (ObservatoryPanel extension point) */
+.extra-panels {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr));
+    gap: var(--space-4);
+}
+
+.extra-panels:empty {
+    display: none;
+}

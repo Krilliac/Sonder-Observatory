@@ -46,10 +46,30 @@ describe("desktop bridge (browser)", () => {
 
 describe("desktop bridge (Tauri mocked)", () => {
     it("reads launch info", async () => {
-        const info = { connect: "ws://127.0.0.1:7070", session: null, capability: null, open: null, warnings: ["x"] };
+        const info = {
+            connect: "ws://127.0.0.1:7070/",
+            connectAll: ["ws://127.0.0.1:7070/", "http://127.0.0.1:11437/"],
+            connectTokens: [null, "inference-token"],
+            session: null,
+            capability: null,
+            open: null,
+            warnings: ["x"],
+        };
         tauri.handlers.get_launch_args = () => info;
         expect(desktop.isDesktop()).toBe(true);
-        expect(await desktop.getLaunchInfo()).toEqual(info);
+        const launched = await desktop.getLaunchInfo();
+        expect(launched).toEqual(info);
+        // connect still holds the first URL.
+        expect(launched!.connect).toBe(launched!.connectAll![0]);
+        expect(desktop.launchProducers(launched!)).toEqual([
+            { url: "ws://127.0.0.1:7070/" },
+            { url: "http://127.0.0.1:11437/", token: "inference-token" },
+        ]);
+    });
+
+    it("accepts launch info from a shell without connectAll", () => {
+        expect(desktop.launchProducers({ connect: "ws://127.0.0.1:7070" })).toEqual([{ url: "ws://127.0.0.1:7070" }]);
+        expect(desktop.launchProducers({ connect: null })).toEqual([]);
     });
 
     it("reads entries in 16 MiB chunks and joins them", async () => {

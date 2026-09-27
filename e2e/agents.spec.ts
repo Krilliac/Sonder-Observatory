@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { openFixture, scrubTo, shot } from "./helpers";
+import { openFixture, scrubTo, showView, shot } from "./helpers";
 
 async function graphCounts(page: Page): Promise<{ nodes: number; edges: number }> {
     const svg = page.locator("#view-agents svg.topology-svg");
@@ -59,7 +59,6 @@ test.describe("Agents (topology) tab", () => {
         await node.click();
         await expect(node).toHaveAttribute("aria-pressed", "true");
         await expect(page.locator("#view-agents .topology-side h3").first()).toContainText("Selected node");
-        expect(await page.locator("#timeline rect.tick.evidence").count()).toBeGreaterThan(0);
         // Evidence link inspects the event and moves the cursor.
         const evidence = page.locator("#view-agents .topology-side ul.related").first().locator("button").first();
         const label = ((await evidence.textContent()) ?? "").trim();
@@ -67,5 +66,8 @@ test.describe("Agents (topology) tab", () => {
         await evidence.click();
         await expect(page.locator("#inspector dl.kv dd").first()).toHaveText(eventId);
         await expect(page.locator("#follow-check")).not.toBeChecked();
+        // The node's evidence stays highlighted on the Overview timeline.
+        await showView(page, "Overview");
+        expect(await page.locator("#timeline rect.tick.evidence").count()).toBeGreaterThan(0);
     });
 });

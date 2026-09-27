@@ -40,7 +40,7 @@ Developer > Observatory:
 Observatory
   Installed           yes/no + version
   Telemetry           connected/disconnected
-  Runtime endpoint    ws://127.0.0.1:<port>
+  Producers           http://127.0.0.1:11435 (Runtime), http://127.0.0.1:11437 (Inference)
   [Open Embedded]
   [Launch Standalone]
   [Open Latest Recording]
@@ -59,25 +59,71 @@ Settings:
 
 ## Launch handshake
 
-1. Flutter requests/reads the active runtime telemetry endpoint.
-2. Runtime creates or returns a session capability.
-3. Flutter either:
-   - opens bundled Observatory web renderer in WebView, or
-   - launches Observatory executable with endpoint/session arguments.
-4. Observatory performs protocol negotiation.
-5. Runtime emits `session.started` + capability descriptor.
-6. Viewer begins live consumption.
+v1 (live producer protocol, docs/TELEMETRY_PROTOCOL.md). Observatory connects
+to each producer directly; Runtime does not relay Inference telemetry. Steps 1
+and 2 are the Sonder Runtime / Flutter side (contract sections 9 and 10; they
+are specified there and are not part of any merged Runtime release this
+document can point to yet); steps 3 and 4 are Observatory's
+(`LiveConnectionManager`, docs/integration/live-ingest.md).
 
-Illustrative launch contract:
+1. The Flutter app reads `GET /v1/sonder/ecosystem` from the runtime (admin
+   authorization). Its `observatory.connect_urls` lists the base URLs of the
+   runtime and of each provider that publishes telemetry (loopback listener
+   addresses), and `observatory.warnings` explains missing pieces.
+2. Flutter launches Observatory (`LocalManager.launchObservatory(connectUrls)`):
+   - Executable, resolved in order: the Settings "Observatory executable",
+     env `SONDER_OBSERVATORY_BIN`, then `sonder-observatory` on PATH. It is
+     started detached with one `--connect <url>` per URL. Flutter never passes
+     tokens or API keys.
+   - Otherwise, if an Observatory web URL is configured, the OS opener
+     (`xdg-open`, `open`, `cmd start`) opens
+     `<webUrl>?fixture=0&connect=<url>&connect=<url>`. The Vite dev server
+     (`http://127.0.0.1:5173/`) or the preview build (`:4173`) are the local
+     options; which default the app ships is the app's decision.
+   - Otherwise the app shows guidance. Web builds show a copyable URL only.
+   - When the app talks to a non-loopback runtime, launching is disabled with
+     an explanation: producer telemetry is loopback on the runtime host.
+3. For each URL, Observatory fetches `/.well-known/sonder-telemetry`,
+   validates it (`sonder.telemetry.producer/1`), and opens the SSE stream
+   (then NDJSON, then WebSocket). Status in this repo:
+   `LiveConnectionManager` does this for every URL it is given, but the
+   renderer does not use the manager yet (producer cards and `connectAll`
+   wiring are the renderer/UX work, obs-ux-upgrade). Until that lands the
+   desktop shell's frontend opens only the first URL (`LaunchInfo.connect`)
+   through the single-URL path, which also resolves a base URL through
+   discovery but sends no token; further URLs and their tokens are ignored.
+4. Each producer replays its retained window, then streams live. Observatory
+   merges them in one session and correlates Runtime turns with Inference
+   requests by `run_id` and `parent_request_id`.
+
+Desktop launch arguments (src-tauri/src/launch.rs,
+docs/integration/tauri-shell.md):
 
 ```text
 sonder-observatory
-  --endpoint ws://127.0.0.1:49152/telemetry
-  --session ses_...
-  --capability <short-lived-token>
+  --connect http://127.0.0.1:11435
+  --connect http://127.0.0.1:11437 [--token-file <path>]
 ```
 
-Do not put long-lived secrets in process arguments on platforms where other users/processes can inspect them; prefer inherited handles/files/IPC as implementation matures.
+- `--connect` / `--endpoint` are repeatable; `ws`, `wss`, `http`, `https`;
+  plain `ws` / `http` only to loopback; credentials and token query
+  parameters are rejected.
+- `--token-file` (alias `--capability-file`) is read once (max 4 KiB,
+  trimmed, printable ASCII without spaces), kept in memory only, never
+  logged. It binds to the `--connect` it follows and becomes that producer's
+  `Authorization: Bearer` token. Tokens are never taken from the command
+  line or URLs: the legacy `--capability <token>` argument is passed to the
+  frontend as `capability` for older frontends but never used to
+  authenticate a `--connect` URL.
+- Browser URL parameters (contract section 8.2, renderer work):
+  `?connect=` (repeatable), `?ws=` (legacy alias), `?fixture=0`, `?view=`,
+  `?theme=`; `?token=` / `?access_token=` are ignored with a visible warning.
+  The manager already refuses any URL that carries a token.
+
+Not specified yet: a short-lived, read-only telemetry capability issued by
+Runtime. Until it exists, Runtime telemetry needs Runtime's admin
+authorization, which local-open loopback mode grants; see
+docs/SECURITY_PRIVACY.md.
 
 ## Embedded vs standalone
 
@@ -116,4 +162,9 @@ Sonder Runtime contributes orchestration events:
 - budgets
 - compaction/recovery
 
-Observatory joins both using session/run/request/agent correlation IDs.
+Observatory connects to both directly and joins them using session, run,
+request and agent correlation IDs: a Runtime chat turn's id is the `run_id` of
+the Inference request it caused, and `attributes.parent_request_id` links the
+two requests (docs/TELEMETRY_PROTOCOL.md, "Correlation across producers").
+Same-host producers share the host monotonic clock, so their events merge in
+time order.

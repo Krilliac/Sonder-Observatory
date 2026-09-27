@@ -202,6 +202,49 @@ describe("DesktopIntegration", () => {
         expect(input.siblingsAfter[1]!.textContent).toMatch(/--open and --connect/);
     });
 
+    it("connects every --connect URL with its own token", async () => {
+        const { doc } = fakeDoc();
+        const host = { openRecordingText: vi.fn(), connectProducers: vi.fn(), connectLive: vi.fn() };
+        const info: LaunchInfo = {
+            connect: "http://127.0.0.1:11435",
+            connectAll: ["http://127.0.0.1:11435", "http://127.0.0.1:11437", "ws://127.0.0.1:8766/ws"],
+            connectTokens: ["runtime-key", null, null],
+            session: null,
+            capability: "argv-capability",
+            open: null,
+            warnings: [],
+        };
+        await new DesktopIntegration(host, doc, fakeBridge({ getLaunchInfo: async () => info })).mount();
+        expect(host.connectProducers).toHaveBeenCalledOnce();
+        expect(host.connectProducers).toHaveBeenCalledWith([
+            { url: "http://127.0.0.1:11435", token: "runtime-key" },
+            { url: "http://127.0.0.1:11437" },
+            { url: "ws://127.0.0.1:8766/ws" },
+        ]);
+        // The argv capability is never used as a bearer token; connectLive is only a fallback.
+        expect(JSON.stringify(host.connectProducers.mock.calls)).not.toContain("argv-capability");
+        expect(host.connectLive).not.toHaveBeenCalled();
+    });
+
+    it("older hosts get each tokenless URL; token-bound URLs are skipped with a message", async () => {
+        const { doc, input } = fakeDoc();
+        const host = { openRecordingText: vi.fn(), connectLive: vi.fn() };
+        const info: LaunchInfo = {
+            connect: "http://127.0.0.1:11435",
+            connectAll: ["http://127.0.0.1:11435", "http://127.0.0.1:11437"],
+            connectTokens: ["runtime-key", null],
+            session: null,
+            capability: null,
+            open: null,
+            warnings: [],
+        };
+        await new DesktopIntegration(host, doc, fakeBridge({ getLaunchInfo: async () => info })).mount();
+        expect(host.connectLive.mock.calls).toEqual([["http://127.0.0.1:11437"]]);
+        const status = input.siblingsAfter[1]!;
+        expect(status.textContent).toMatch(/cannot send tokens\): http:\/\/127\.0\.0\.1:11435/);
+        expect(status.textContent).not.toContain("runtime-key");
+    });
+
     it("ignores --connect when the host cannot connect", async () => {
         const { doc } = fakeDoc();
         const host = { openRecordingText: vi.fn() };
