@@ -1129,11 +1129,16 @@ table.events tr.cls-error td:nth-child(3) {
     margin: 0;
 }
 
+/* WCAG 2.2 target size (2.5.8): at least 24x24 CSS px; --space-7 is 24px
+   (tests/tokens.test.ts checks this). */
 button.link {
+    display: inline-flex;
+    align-items: center;
     background: none;
     border: none;
     padding: 1px 0;
-    min-height: 0;
+    min-height: var(--space-7);
+    min-width: var(--space-7);
     color: var(--color-link);
     font-family: var(--font-family-mono);
     font-size: var(--font-size-sm);

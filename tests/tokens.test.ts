@@ -85,6 +85,20 @@ describe("design tokens", () => {
         }
     });
 
+    it("button.link meets the WCAG 2.2 24x24 CSS px target size (2.5.8)", () => {
+        const css = read("../src/renderer/styles.css").replace(/\/\*[\s\S]*?\*\//g, "");
+        const rule = /(?:^|\n)button\.link\s*\{([^}]*)\}/.exec(css);
+        expect(rule, "button.link rule").not.toBeNull();
+        const vars = tokensToCssVariables(tokens);
+        const px = (decl: string) => {
+            const m = new RegExp(`(?:^|;|\\s)${decl}:\\s*var\\((--[\\w-]+)\\)`).exec(rule![1]!);
+            expect(m, `${decl} uses a token`).not.toBeNull();
+            return parseFloat(vars[m![1]!]!);
+        };
+        expect(px("min-height")).toBeGreaterThanOrEqual(24);
+        expect(px("min-width")).toBeGreaterThanOrEqual(24);
+    });
+
     it("the favicon in index.html is the app icon (no /favicon.ico request)", () => {
         const html = read("../index.html");
         const m = /<link rel="icon" type="image\/svg\+xml" href="data:image\/svg\+xml,([^"]+)"/.exec(html);

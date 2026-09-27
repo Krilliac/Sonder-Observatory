@@ -24,7 +24,9 @@ generated `target/**/__global-api-script.js` makes `npm run lint` fail locally
 **Done (integrator, 2026-09-26):** the lockfiles workflow gained an `icons`
 input that runs the steps below in CI and commits the set; `.gitignore` and
 `bundle.icon` were updated as described. The ESLint ignores above and the
-`rust-version = "1.87"` bump (Cargo.lock section) landed in PR #17.
+`rust-version = "1.87"` bump (Cargo.lock section) landed in PR #17. The
+placeholder generator in `build.rs` has since been removed (ported from #21),
+so the committed icon set is now required.
 
 The GitHub MCP `push_files` / `create_or_update_file` tools only take text
 content, so the PNG/ICO/ICNS set generated on the box could not be committed

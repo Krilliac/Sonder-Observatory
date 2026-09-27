@@ -52,7 +52,7 @@ jobs:
           npm install --package-lock-only --legacy-peer-deps --ignore-scripts --no-audit --no-fund
       - uses: dtolnay/rust-toolchain@stable
         if: ${{ inputs.cargo }}
-      # "fallback" prefers crate versions compatible with rust-version (1.87).
+      # "fallback" prefers crate versions compatible with rust-version (1.88).
       - name: src-tauri/Cargo.lock
         if: ${{ inputs.cargo }}
         working-directory: src-tauri
