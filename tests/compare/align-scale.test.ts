@@ -7,7 +7,7 @@ function unit(key: string): UnitStats {
 }
 
 function group(keys: string[]): UnitGroup {
-    return { mode: "requests", keySource: "reported", units: keys.map(unit), unattributedEvents: 0 } as UnitGroup;
+    return { mode: "request", keySource: "reported", units: keys.map(unit), unattributedEvents: 0 } as UnitGroup;
 }
 
 describe("alignUnits at scale", () => {
