@@ -212,7 +212,8 @@ describe("token metrics: rate over active generation time", () => {
         }
         const m = deriveMetrics(events);
         expect(m.tokens.total).toBe(11);
-        expect(m.tokens.overallRate).toBeCloseTo(11, 6);
+        // 10 intervals over 1.0 s (the first token opens the span).
+        expect(m.tokens.overallRate).toBeCloseTo(10, 6);
     });
 });
 

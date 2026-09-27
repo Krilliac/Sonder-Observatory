@@ -113,8 +113,14 @@ function sumOrNull(values: readonly (number | null)[]): number | null {
 }
 
 function maxOrNull(values: readonly (number | null)[]): number | null {
-    const present = values.filter((v): v is number => v !== null);
-    return present.length === 0 ? null : Math.max(...present);
+    // A loop, not Math.max(...values): spreading throws RangeError past ~125k values.
+    let max: number | null = null;
+    for (const v of values) {
+        if (v !== null && (max === null || v > max)) {
+            max = v;
+        }
+    }
+    return max;
 }
 
 /** Token-weighted decode rate over requests: sum(tokens) / sum(decode seconds). */

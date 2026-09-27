@@ -138,7 +138,13 @@ function round(v: number): number {
 export function buildScene(graph: TopologyGraph, layout: TopologyLayout, options: SceneOptions = {}): TopologyScene {
     const selection = options.selection ?? null;
     const windowNs = options.fadeWindowNs ?? 10_000_000_000;
-    const latest = Math.max(0, ...graph.nodes.map((n) => n.lastMonoNs), ...graph.edges.map((e) => e.lastMonoNs));
+    // A loop, not Math.max(...list): spreading throws RangeError past ~125k values.
+    let latest = 0;
+    for (const item of [graph.nodes, graph.edges]) {
+        for (const x of item) {
+            latest = Math.max(latest, x.lastMonoNs);
+        }
+    }
     const at = options.atMonoNs ?? graph.atMonoNs ?? latest;
 
     const nodes: SceneNode[] = [];
