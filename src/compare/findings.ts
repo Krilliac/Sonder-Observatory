@@ -7,18 +7,43 @@
  * never times or event ids. Findings with the same signature are paired in
  * start-time order, same-severity pairs first. Unpaired B findings are new; unpaired A findings are
  * resolved; pairs persist (with any severity change).
+ *
+ * Subject facts per detector: budget-pressure `budget`/`scope`, compaction
+ * `scope`, duplicate-worker `task`, no-progress-loop `actor`+`tool`,
+ * cache-thrash `scope`, resource-pressure `scope`, model-churn `models`
+ * (list), retry-storm `targets` (list), latency-outlier `request_id`.
+ * error-burst has no subject (its `breakdown` embeds counts). Subject values
+ * that are unit ids (request ids, which differ between recordings) can be
+ * mapped onto A's ids with a `SubjectMap` built from the request alignment.
  */
 import { SEVERITY_RANK, type Finding } from "../diagnostics";
 
 /** Fact keys that identify the subject of a finding across sessions. */
-export const SIGNATURE_FACT_KEYS = ["scope", "budget", "task", "actor", "tool", "models", "kind", "device_id"] as const;
+export const SIGNATURE_FACT_KEYS = ["scope", "budget", "task", "actor", "tool", "models", "targets", "request_id", "kind", "device_id"] as const;
 
-export function findingSignature(f: Finding): string {
+/** Facts whose value is a ", "-joined set; normalised (mapped, deduped, sorted) before signing. */
+const LIST_FACT_KEYS: ReadonlySet<string> = new Set(["models", "targets"]);
+
+/** Most list items kept in a signature (bounds its size for very large bursts). */
+export const MAX_SIGNATURE_LIST_ITEMS = 32;
+
+/** Maps a B-side subject id (e.g. a request id) to its A-side equivalent. */
+export type SubjectMap = (id: string) => string;
+
+const identity: SubjectMap = (id) => id;
+
+export function findingSignature(f: Finding, subject: SubjectMap = identity): string {
     const parts: string[] = [f.kind];
     for (const key of SIGNATURE_FACT_KEYS) {
         const v = f.facts[key];
-        if (typeof v === "string" && v !== "") {
-            parts.push(`${key}=${v}`);
+        if (typeof v !== "string" || v === "") {
+            continue;
+        }
+        if (LIST_FACT_KEYS.has(key)) {
+            const items = [...new Set(v.split(",").map((s) => subject(s.trim())).filter((s) => s !== ""))].sort();
+            parts.push(`${key}=${items.slice(0, MAX_SIGNATURE_LIST_ITEMS).join(",")}`);
+        } else {
+            parts.push(`${key}=${key === "request_id" ? subject(v) : v}`);
         }
     }
     return parts.join("|");
@@ -39,10 +64,10 @@ export interface FindingsDiff {
     persisting: PersistingFinding[];
 }
 
-function bySignature(findings: readonly Finding[]): Map<string, Finding[]> {
+function bySignature(findings: readonly Finding[], subject: SubjectMap): Map<string, Finding[]> {
     const map = new Map<string, Finding[]>();
     for (const f of [...findings].sort((x, y) => x.startNs - y.startNs || (x.id < y.id ? -1 : 1))) {
-        const sig = findingSignature(f);
+        const sig = findingSignature(f, subject);
         const list = map.get(sig) ?? [];
         list.push(f);
         map.set(sig, list);
@@ -50,9 +75,10 @@ function bySignature(findings: readonly Finding[]): Map<string, Finding[]> {
     return map;
 }
 
-export function diffFindings(a: readonly Finding[], b: readonly Finding[]): FindingsDiff {
-    const aMap = bySignature(a);
-    const bMap = bySignature(b);
+/** `bSubject` maps B's subject ids onto A's (identity by default). */
+export function diffFindings(a: readonly Finding[], b: readonly Finding[], bSubject: SubjectMap = identity): FindingsDiff {
+    const aMap = bySignature(a, identity);
+    const bMap = bySignature(b, bSubject);
     const out: FindingsDiff = { added: [], resolved: [], persisting: [] };
     for (const sig of new Set([...aMap.keys(), ...bMap.keys()])) {
         const as = aMap.get(sig) ?? [];
