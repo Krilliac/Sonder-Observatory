@@ -1,7 +1,8 @@
 version: 2
 # Weekly, grouped so each ecosystem opens at most one PR for minor/patch
 # updates; major versions come as their own PRs. PRs into main get squash
-# auto-merge and merge only once the required checks pass.
+# auto-merge and merge only once the required checks pass; major updates are
+# never auto-merged (.github/workflows/auto-merge.yml) and wait for review.
 updates:
   - package-ecosystem: npm
     directory: /
