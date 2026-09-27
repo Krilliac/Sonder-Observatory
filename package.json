@@ -27,7 +27,8 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.11.1"
+    "@tauri-apps/api": "^2.11.1",
+    "three": "0.186.1"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.13.0",
@@ -35,6 +36,7 @@
     "@playwright/test": "1.63.0",
     "@tauri-apps/cli": "^2.11.5",
     "@types/node": "^22.19.0",
+    "@types/three": "0.186.0",
     "@types/ws": "^8.18.1",
     "eslint": "^10.11.0",
     "globals": "^17.12.0",
