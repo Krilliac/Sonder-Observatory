@@ -129,32 +129,34 @@ export class SessionStore {
             return;
         }
         fresh.sort(compareEvents);
-        const last = this.events[this.events.length - 1];
-        if (last === undefined || compareEvents(last, fresh[0]!) <= 0) {
-            for (const e of fresh) {
-                this.events.push(e);
-            }
-        } else {
-            // Merge the sorted batch into the tail it overlaps.
-            const at = upperBound(this.events, fresh[0]!);
-            const tail = this.events.splice(at);
-            let i = 0;
-            let j = 0;
-            while (i < tail.length && j < fresh.length) {
-                if (compareEvents(tail[i]!, fresh[j]!) <= 0) {
-                    this.events.push(tail[i++]!);
-                } else {
-                    this.events.push(fresh[j++]!);
-                }
-            }
-            while (i < tail.length) {
-                this.events.push(tail[i++]!);
-            }
-            while (j < fresh.length) {
-                this.events.push(fresh[j++]!);
+        // `events` is replaced, never mutated: views cache derived data per
+        // array identity (navigation, timelineModel, the replay cursor). The
+        // copy is linear; only the new batch is sorted.
+        const old = this.events;
+        const drop = this.retentionDrop(old.length + fresh.length);
+        const next: ObservatoryEvent[] = [];
+        const last = old[old.length - 1];
+        const at = last === undefined || compareEvents(last, fresh[0]!) <= 0 ? old.length : upperBound(old, fresh[0]!);
+        // Merge the sorted batch into the tail it overlaps (an in-order batch has no overlap).
+        let i = 0;
+        let j = 0;
+        while (i < at) {
+            next.push(old[i++]!);
+        }
+        while (i < old.length && j < fresh.length) {
+            if (compareEvents(old[i]!, fresh[j]!) <= 0) {
+                next.push(old[i++]!);
+            } else {
+                next.push(fresh[j++]!);
             }
         }
-        this.enforceRetention();
+        while (i < old.length) {
+            next.push(old[i++]!);
+        }
+        while (j < fresh.length) {
+            next.push(fresh[j++]!);
+        }
+        this.events = drop > 0 ? this.evict(next, drop) : next;
     }
 
     addRejected(lines: readonly RejectedLine[]): void {
@@ -196,18 +198,22 @@ export class SessionStore {
         return policies.size > 0 ? [...policies].join(",") : "unspecified";
     }
 
-    /** Live sessions only: evicts the oldest events past the limit (down to 90% of it, amortised). */
-    private enforceRetention(): void {
-        if (this.source !== "live" || this.events.length <= this.maxLiveEvents) {
-            return;
+    /** Live sessions only: how many of `total` events to evict (down to 90% of the limit, amortised). */
+    private retentionDrop(total: number): number {
+        if (this.source !== "live" || total <= this.maxLiveEvents) {
+            return 0;
         }
-        const keep = Math.max(1, Math.floor(this.maxLiveEvents * 0.9));
-        const evicted = this.events.splice(0, this.events.length - keep);
-        for (const e of evicted) {
-            this.seen.delete(e.event_id);
+        return total - Math.max(1, Math.floor(this.maxLiveEvents * 0.9));
+    }
+
+    /** Drops the `drop` oldest of `events` and records them as dropped by retention. */
+    private evict(events: ObservatoryEvent[], drop: number): ObservatoryEvent[] {
+        for (let k = 0; k < drop; k += 1) {
+            this.seen.delete(events[k]!.event_id);
         }
-        this.evictedUpTo = evicted[evicted.length - 1]!;
-        this.droppedByRetention += evicted.length;
+        this.evictedUpTo = events[drop - 1]!;
+        this.droppedByRetention += drop;
+        return events.slice(drop);
     }
 
     /**

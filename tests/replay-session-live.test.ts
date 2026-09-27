@@ -110,3 +110,21 @@ describe("live SessionStore incremental ordering", () => {
         expect(elapsed).toBeLessThan(4000);
     });
 });
+
+describe("live SessionStore array identity", () => {
+    it("replaces events on every append (views cache per array identity)", () => {
+        const store = new SessionStore({ maxLiveEvents: 50 });
+        store.reset("live", "u");
+        store.append([ev(1)]);
+        const first = store.events;
+        store.append([ev(2)]);
+        expect(store.events).not.toBe(first);
+        expect(first.map((e) => e.event_id)).toEqual(["e1"]);
+        const second = store.events;
+        store.append([ev(0, { event_id: "early", mono_ns: 500 })]);
+        expect(store.events).not.toBe(second);
+        expect(second).toHaveLength(2);
+        store.append(Array.from({ length: 60 }, (_, i) => ev(10 + i)));
+        expect(store.events.length).toBeLessThanOrEqual(50);
+    });
+});
