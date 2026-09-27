@@ -187,6 +187,43 @@ describe("LiveConnectionManager", () => {
         expect(store.source).toBe("live");
     });
 
+    it("reads backend capabilities from the discovery health link (same origin, with the token)", async () => {
+        const health = {
+            status: "ready",
+            backends: [{ name: "ollama", available: true, capabilities: ["streaming", "remote_process"], version: "0.12" }],
+            models: [{ id: "qwen3:14b", backend: "ollama", default: true }],
+            telemetry: { level: "standard" },
+        };
+        const routes = inferenceRoutes();
+        routes[`${INF}/.well-known/sonder-telemetry`] = () =>
+            Response.json({ ...discoveryDoc("sonder-inference", "inference", "tel-aaaa"), links: { health: "/v1/sonder/health" } });
+        routes[`${INF}/v1/sonder/health`] = () => Response.json(health);
+        const { fetch, calls } = fakeFetch(routes);
+        const m = manager(new SessionStore(), { fetch });
+        await m.add({ url: INF, token: "secret-token" });
+        await waitFor(() => m.list()[0]!.health !== null, "health");
+        expect(m.list()[0]!.health).toEqual({
+            backends: [{ name: "ollama", available: true, capabilities: ["streaming", "remote_process"] }],
+            models: [{ id: "qwen3:14b", backend: "ollama" }],
+            telemetryLevel: "standard",
+        });
+        const healthCall = calls.find((c) => c.url.endsWith("/v1/sonder/health"))!;
+        expect(healthCall.headers.Authorization).toBe("Bearer secret-token");
+        expect(healthCall.redirect).toBe("manual");
+    });
+
+    it("never fetches a health link on another origin", async () => {
+        const routes = inferenceRoutes();
+        routes[`${INF}/.well-known/sonder-telemetry`] = () =>
+            Response.json({ ...discoveryDoc("sonder-inference", "inference", "tel-aaaa"), links: { health: "http://127.0.0.1:9/health" } });
+        const { fetch, calls } = fakeFetch(routes);
+        const m = manager(new SessionStore(), { fetch });
+        await m.add({ url: INF, token: "secret-token" });
+        await waitFor(() => calls.some((c) => c.url.endsWith("/events/sse")), "stream");
+        expect(calls.some((c) => c.url.includes(":9/"))).toBe(false);
+        expect(m.list()[0]!.health).toBeNull();
+    });
+
     it("also accepts an explicit discovery URL", async () => {
         const { fetch } = fakeFetch(inferenceRoutes());
         const m = manager(new SessionStore(), { fetch });

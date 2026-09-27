@@ -28,6 +28,7 @@ import type { WebSocketFactory } from "../../transport/live";
 import { LiveIngestClient, type LiveIngestStatus } from "./client";
 import { DEFAULT_DISCOVERY_TIMEOUT_MS, classifyProducerUrl, corsHint, fetchDiscovery, selectStream } from "./discovery";
 import { isLoopbackHost, resolveEndpoint, type TransportPreference } from "./endpoint";
+import { fetchProducerHealth, healthUrl, type ProducerHealth } from "./health";
 import { NO_REDIRECTS, describeHttpFailure, isRedirect, type FetchLike } from "./transports";
 
 export type { FetchLike } from "./transports";
@@ -60,6 +61,11 @@ export interface ProducerConnection {
     discovery: ProducerDiscovery | null;
     /** From discovery, or from the first events of a direct stream. */
     identity: ProducerIdentity | null;
+    /**
+     * Backends and capabilities from the discovery `links.health` document
+     * (same origin only); null until fetched, or when there is none.
+     */
+    health: ProducerHealth | null;
     status: LiveIngestStatus;
 }
 
@@ -312,6 +318,7 @@ export class LiveConnectionManager {
                 streamUrl: null,
                 discovery: null,
                 identity: null,
+                health: null,
                 status: initialStatus(input.url),
             },
             client: null,
@@ -394,6 +401,7 @@ export class LiveConnectionManager {
             }
             entry.connection.discovery = fetched.discovery;
             entry.connection.identity = identityFromDiscovery(fetched.discovery);
+            void this.loadHealth(entry, classified.discoveryUrl!, fetched.discovery.links?.health, token);
             const selected = selectStream(fetched.discovery, classified.discoveryUrl!, {
                 transport: input.transport,
                 hasToken: token !== undefined,
@@ -448,6 +456,19 @@ export class LiveConnectionManager {
         this.ensureLiveStore(streamUrl);
         this.updateSourceLabel();
         client.start();
+    }
+
+    /** Fetches the optional health document; failures are silent (in-stream backend.registered still works). */
+    private async loadHealth(entry: Entry, discoveryUrl: string, link: unknown, token: string | undefined): Promise<void> {
+        const url = healthUrl(discoveryUrl, link);
+        if (url === null) {
+            return;
+        }
+        const health = await fetchProducerHealth(url, { token, fetch: this.options.fetch, timeoutMs: this.options.discoveryTimeoutMs });
+        if (health !== null && !entry.removed) {
+            entry.connection.health = health;
+            this.notify();
+        }
     }
 
     private fail(entry: Entry, message: string): void {
