@@ -11,8 +11,8 @@ least-privilege native surface. See `docs/ARCHITECTURE.md`,
 |---|---|
 | `tauri.conf.json` | window, CSP, bundle; `devUrl` = Vite dev server, `frontendDist` = `../dist` |
 | `capabilities/main-window.json` | the **only** permissions granted to the webview |
-| `build.rs` | tauri-build with an explicit app-command manifest; rasterises placeholder icons (same dome mark as `icons/app-icon.svg`) if they are missing |
-| `icons/app-icon.svg` | icon source for `tauri icon` |
+| `build.rs` | tauri-build with an explicit app-command manifest |
+| `icons/` | committed icon set; `icons/app-icon.svg` is the source for `tauri icon` |
 | `src/launch.rs` | CLI contract (`--connect`, `--session`, `--capability-file`, `--open`) + validation, unit-tested |
 | `src/recording.rs` | read grants for user-chosen recordings (path-escape safe), unit-tested |
 | `src/recent.rs` | recent-recordings list persisted in the app data dir (opaque ids, no paths to the webview), unit-tested |
@@ -116,8 +116,8 @@ npm run tauri icon src-tauri/icons/app-icon.svg
 rm -rf src-tauri/icons/android src-tauri/icons/ios   # desktop-only shell
 ```
 
-`build.rs` still rasterises placeholder PNG/ICO files if any are missing; with
-the committed set it does nothing.
+The icons are required: `build.rs` no longer generates placeholders, so a
+missing file listed in `bundle.icon` (`tauri.conf.json`) fails the build.
 
 ## Licenses
 
