@@ -16,7 +16,7 @@ import { ConnectionPanel } from "./connectionPanel";
 import { byId, h } from "./dom";
 import { mountDropZone, RECORDING_FILE_EXTENSIONS } from "./dropZone";
 import { EventTable } from "./eventTable";
-import { fmtBytes, fmtMs, fmtPct, fmtRate, fmtRelNs } from "./format";
+import { fmtBytes, fmtMs, fmtPct, fmtRelNs } from "./format";
 import { errorSearchStart, findMatching, producersInSession, syntheticBannerText, timelineSummaryText } from "./navigation";
 import { Onboarding } from "./onboarding";
 import type { ObservatoryPanel } from "./panels";
@@ -27,6 +27,7 @@ import { mountSplitter } from "./splitter";
 import { safeStorage, type ThemeController } from "./theme";
 import { getEventIndex, TRACKS } from "./timelineModel";
 import { TimelineView } from "./timelineView";
+import { tokenCardModel } from "./tokenCard";
 
 const SPEEDS = [0.25, 0.5, 1, 2, 4, 8];
 /** Main views, shown as tabs; the inspector is docked beside every view. */
@@ -1117,6 +1118,7 @@ export class ObservatoryApp {
                 extra,
                 h("div", { class: "evidence", text: evidence }),
             );
+        const tokenCard = tokenCardModel(m);
         const derived = (n: number, what: string) => (n > 0 ? `derived · ${n} ${what}` : "unavailable · no events yet");
         const errorTypes = Object.entries(m.errors.byType)
             .map(([t, n]) => `${t} ×${n}`)
@@ -1147,12 +1149,7 @@ export class ObservatoryApp {
                 `p95 ${fmtMs(m.timeToFirstToken.p95Ms)}`,
                 derived(m.timeToFirstToken.count, "requests with a first token"),
             ),
-            card(
-                "Token rate",
-                `${fmtRate(m.tokens.recentRate)} tok/s`,
-                `last ${m.tokens.windowMs / 1000}s · overall ${fmtRate(m.tokens.overallRate)} tok/s · ${m.tokens.total} tokens`,
-                derived(m.tokens.total, "inference.token.generated"),
-            ),
+            card("Token rate", tokenCard.value, tokenCard.sub, tokenCard.evidence),
             card(
                 "Errors",
                 `${m.errors.total}`,

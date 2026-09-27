@@ -70,6 +70,44 @@ export function backendTokenCount(event: ObservatoryEvent): number | null {
 }
 
 /**
+ * Tokens carried by an `inference.token.generated` event, or null when the
+ * event is output that carries no token count.
+ *
+ * `attributes.unit` decides (Sonder-Inference 912503a+): `"token"` is exactly
+ * `count` tokens (default 1); any other unit, notably `"chunk"` (a
+ * backend-streamed piece of visible text whose token count is unknown, with
+ * hidden thinking tokens producing no chunk at all), is never a token count.
+ * An event with no `unit` is read as one token, or an integer `count`
+ * (the synthetic fixture and pre-912503a producers).
+ *
+ * `sampling.sampled` is deliberately not consulted: every current producer
+ * (Inference, Runtime, the synthetic fixture) sets `sampled: true` on every
+ * event, per-token or not, so it does not distinguish chunks from tokens.
+ */
+export function outputTokenCount(event: ObservatoryEvent): number | null {
+    const unit = event.attributes.unit;
+    if (unit !== undefined && unit !== null && unit !== "token") {
+        return null;
+    }
+    const n = event.attributes.count;
+    return typeof n === "number" && Number.isInteger(n) && n > 0 ? n : 1;
+}
+
+/**
+ * Backend decode (eval) time in ms on `inference.decode.completed`
+ * (`backend_eval_ms`, Sonder-Inference from Ollama `eval_duration`). It covers
+ * every generated token, including hidden thinking tokens that never appear
+ * as chunks. Null when not reported.
+ */
+export function backendEvalMs(event: ObservatoryEvent): number | null {
+    if (event.event_type !== "inference.decode.completed") {
+        return null;
+    }
+    const n = finite(event.attributes.backend_eval_ms);
+    return n !== null && n > 0 ? n : null;
+}
+
+/**
  * True for a `model.load.completed` that reports a backend load inside a
  * request (for example Sonder-Inference's Ollama timing helper, which emits it
  * with the request's context and `load_duration_ns`). Such reports are timing
