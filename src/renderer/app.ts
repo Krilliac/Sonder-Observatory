@@ -1164,7 +1164,10 @@ export class ObservatoryApp {
         const save = byId<HTMLButtonElement>("save-btn");
         save.disabled = s.events.length === 0;
         byId<HTMLButtonElement>("export-btn").disabled = s.events.length === 0;
-        save.textContent = s.source === "live" ? `Save live session (${s.events.length} events)` : `Save (${RECORDING_EXTENSION})`;
+        save.textContent =
+            s.source === "live"
+                ? `Save live session (${s.events.length} events${s.droppedByRetention > 0 ? `, ${s.droppedByRetention} older dropped` : ""})`
+                : `Save (${RECORDING_EXTENSION})`;
         byId<HTMLButtonElement>("play-btn").textContent = this.playing ? "Pause" : "Play";
     }
 
@@ -1172,9 +1175,13 @@ export class ObservatoryApp {
     private renderWarnings(): void {
         const s = this.store;
         const items: string[] = [...this.launchNotices, ...this.notices, ...(this.navNotice ? [this.navNotice] : []), ...(this.exportNotice ? [this.exportNotice] : [])];
-        if (s.rejected.length > 0) {
+        const retention = s.retentionNotice;
+        if (retention !== null) {
+            items.push(retention);
+        }
+        if (s.rejectedCount > 0) {
             const first = s.rejected[0]!;
-            items.push(`${s.rejected.length} line(s) rejected by the schema validator (first: line ${first.line}: ${first.reason})`);
+            items.push(`${s.rejectedCount} line(s) rejected by the schema validator (first: line ${first.line}: ${first.reason})`);
         }
         if (s.gaps.length > 0) {
             const missing = s.gaps.reduce((n, g) => n + (g.to - g.from + 1), 0);
@@ -1268,7 +1275,7 @@ export class ObservatoryApp {
             card(
                 "Telemetry",
                 `${m.eventCount} events`,
-                `dropped (producer-reported) ${m.droppedEvents} · rejected ${this.store.rejected.length}`,
+                `dropped (producer-reported) ${m.droppedEvents} · rejected ${this.store.rejectedCount}${this.store.droppedByRetention > 0 ? ` · ${this.store.droppedByRetention} older not retained` : ""}`,
                 "measured · events received at the cursor",
                 m.droppedEvents > 0 ? "tone-warning" : "",
             ),
