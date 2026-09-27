@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sonder.local/schemas/producer-discovery-v1.json",
+  "title": "Sonder Telemetry Producer Discovery v1 (sonder.telemetry.producer/1)",
+  "description": "Served by a live telemetry producer at GET /.well-known/sonder-telemetry. See docs/TELEMETRY_PROTOCOL.md, section 'Live producer protocol v1'. Consumers ignore unknown keys.",
+  "type": "object",
+  "required": ["schema", "producer", "event_schema", "streams", "resume", "auth", "clock"],
+  "properties": {
+    "schema": { "const": "sonder.telemetry.producer/1" },
+    "producer": {
+      "type": "object",
+      "required": ["name", "version", "node_id", "instance_id", "role", "synthetic"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string" },
+        "node_id": { "type": "string" },
+        "instance_id": { "type": "string", "minLength": 1 },
+        "role": { "enum": ["inference", "runtime", "fixture"] },
+        "synthetic": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "event_schema": { "const": "sonder.observatory.event/1" },
+    "streams": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["transport", "url"],
+        "properties": {
+          "transport": { "enum": ["sse", "ndjson", "websocket"] },
+          "url": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Absolute, or relative to the discovery URL."
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "resume": {
+      "type": "object",
+      "required": ["header", "query", "retained_events", "oldest_sequence", "next_sequence"],
+      "properties": {
+        "header": { "const": "Last-Event-ID" },
+        "query": { "const": "last_event_id" },
+        "retained_events": { "type": "integer", "minimum": 0 },
+        "oldest_sequence": { "type": ["integer", "null"], "minimum": 0 },
+        "next_sequence": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "auth": {
+      "type": "object",
+      "required": ["required", "schemes"],
+      "properties": {
+        "required": { "type": "boolean" },
+        "schemes": { "type": "array", "items": { "enum": ["bearer"] } }
+      },
+      "additionalProperties": true
+    },
+    "clock": {
+      "type": "object",
+      "required": ["mono_ns"],
+      "properties": {
+        "mono_ns": { "const": "host-monotonic" }
+      },
+      "additionalProperties": true
+    },
+    "sampling_level": { "enum": ["off", "metrics", "standard", "deep"] },
+    "text_capture": { "type": "string" },
+    "links": {
+      "type": "object",
+      "additionalProperties": { "type": "string", "minLength": 1 }
+    },
+    "vocabularies": {
+      "type": "object",
+      "description": "Event vocabulary majors, for example {\"sonder.runtime.events\": 1}.",
+      "additionalProperties": { "type": "integer", "minimum": 1 }
+    }
+  },
+  "additionalProperties": true
+}

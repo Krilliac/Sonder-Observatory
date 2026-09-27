@@ -98,8 +98,12 @@ export interface RowFilter {
     text: string;
 }
 
-function haystack(e: ObservatoryEvent): string {
-    return `${e.event_type} ${e.event_id} ${e.request_id ?? ""} ${e.agent_id ?? ""}`.toLowerCase();
+/**
+ * Text the event filter (#filter-text) matches: event type, event id,
+ * request id, run id, agent id and producer name (contract section 8.6).
+ */
+export function eventSearchText(e: ObservatoryEvent): string {
+    return `${e.event_type} ${e.event_id} ${e.request_id ?? ""} ${e.run_id ?? ""} ${e.agent_id ?? ""} ${e.producer.name}`.toLowerCase();
 }
 
 export class FilteredRows {
@@ -129,7 +133,7 @@ export class FilteredRows {
             const out = new Uint32Array(narrowing && !this.all ? this.positions.length : events.length);
             let n = 0;
             const test = (i: number) =>
-                (want < 0 || index.cls[i] === want) && (filter.text === "" || haystack(events[i]!).includes(filter.text));
+                (want < 0 || index.cls[i] === want) && (filter.text === "" || eventSearchText(events[i]!).includes(filter.text));
             if (narrowing && !this.all) {
                 for (const i of this.positions) {
                     if (test(i)) {

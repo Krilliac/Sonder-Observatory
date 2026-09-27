@@ -2,19 +2,25 @@
  * Desktop integration for the app shell: mode badge, native "Open recording…",
  * a recent-recordings menu and the --open / --connect launch arguments.
  * main.ts calls mountDesktopIntegration(app) once after ObservatoryApp.start();
- * the app is the host (openRecordingText, connectLive). fileInputHost() is the
- * fallback host that goes through the app's `#file-input` change handler.
+ * the app is the host (openRecordingText, connectProducers). Every validated
+ * `--connect` URL (LaunchInfo.connectAll) is connected, each with the bearer
+ * token bound to it (LaunchInfo.connectTokens, never sent to ws(s) URLs and
+ * never shown). fileInputHost() is the fallback host that goes through the
+ * app's `#file-input` change handler.
  *
  * In a browser nothing changes except the "browser" badge: the existing
  * `<input type="file">` stays the open path and no recent menu is shown.
  */
+import type { ProducerEndpointInput } from "../ingest/live/manager";
 import * as bridge from "./desktop";
-import type { OpenedRecording, RecentRecording } from "./desktop";
+import { launchProducers, type OpenedRecording, type RecentRecording } from "./desktop";
 import { modeBadge, runtimeMode } from "./mode";
 
 export interface RecordingHost {
     openRecordingText(text: string, label: string): void;
-    /** Starts a live connection (`--connect` launch argument). Optional so file-only hosts still fit. */
+    /** Connects every launch producer, with its own token. Optional so file-only hosts still fit. */
+    connectProducers?(inputs: readonly ProducerEndpointInput[]): void;
+    /** Older hosts: one URL, no token. Used only when connectProducers is absent. */
     connectLive?(url: string): void;
 }
 
@@ -129,17 +135,38 @@ export class DesktopIntegration {
                 this.setStatus(info.warnings.join(" · "));
             }
             const open = info.open;
+            const producers = launchProducers(info);
             if (open) {
-                if (info.connect) {
+                if (producers.length > 0) {
                     // One source at a time: the recording wins over --connect.
                     this.setStatus([...info.warnings, "--open and --connect both given; opened the recording"].join(" · "));
                 }
                 await this.run(() => this.api.readGrantText(open), false);
-            } else if (info.connect && this.host.connectLive) {
-                this.host.connectLive(info.connect);
+            } else if (producers.length > 0) {
+                this.connectLaunchProducers(producers, info.warnings);
             }
         } catch (err) {
             this.setStatus(`launch arguments unavailable: ${errorText(err)}`);
+        }
+    }
+
+    private connectLaunchProducers(producers: ProducerEndpointInput[], warnings: readonly string[]): void {
+        if (this.host.connectProducers) {
+            this.host.connectProducers(producers);
+            return;
+        }
+        if (!this.host.connectLive) {
+            return;
+        }
+        // A host without token support must not silently drop a token: skip those URLs and say so.
+        const skipped = producers.filter((p) => p.token !== undefined).map((p) => p.url);
+        for (const p of producers) {
+            if (p.token === undefined) {
+                this.host.connectLive(p.url);
+            }
+        }
+        if (skipped.length > 0) {
+            this.setStatus([...warnings, `not connected (this viewer cannot send tokens): ${skipped.join(", ")}`].join(" · "));
         }
     }
 

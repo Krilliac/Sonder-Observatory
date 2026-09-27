@@ -106,13 +106,61 @@ describe("deriveMetrics", () => {
             at(5, "device.compute.sample", { attributes: { utilization: 0.7 } }),
             at(6, "device.memory.sample", { attributes: { used_bytes: 5 } }), // no total: ignored
             at(7, "telemetry.dropped", { attributes: { dropped_count: 4 } }),
+            // A report without a count adds nothing (it used to count as 1).
             at(8, "telemetry.dropped"),
         ]);
         expect(m.resources.latest!.fraction).toBe(0.6);
         expect(m.resources.peak!.fraction).toBe(0.95);
         expect(m.resources.pressureEvents).toBe(1);
         expect(m.resources.latestComputeUtilization).toBe(0.7);
-        expect(m.droppedEvents).toBe(5);
+        expect(m.droppedEvents).toBe(4);
+    });
+});
+
+describe("multi-producer metrics", () => {
+    const producer = (name: string, instance: string) => ({
+        name,
+        version: "1",
+        node_id: "host",
+        instance_id: instance,
+        role: name === "sonder-runtime" ? "runtime" : "inference",
+    });
+    const rt = producer("sonder-runtime", "rt-000000000001");
+    const inf = producer("sonder-inference", "tel-0000000000000001");
+
+    it("keys request spans by producer stream and request_id", () => {
+        // Both producers happen to use request_id "shared".
+        const m = deriveMetrics([
+            at(0, "request.started", { request_id: "shared", producer: rt, sequence: 0, event_id: "rt-000000000001-0" }),
+            at(10, "request.started", { request_id: "shared", producer: inf, sequence: 0, event_id: "tel-0000000000000001-0" }),
+            at(20, "inference.token.generated", { request_id: "shared", producer: inf, sequence: 1, event_id: "tel-0000000000000001-1" }),
+            at(90, "request.completed", { request_id: "shared", producer: inf, sequence: 2, event_id: "tel-0000000000000001-2" }),
+            at(120, "request.completed", { request_id: "shared", producer: rt, sequence: 1, event_id: "rt-000000000001-1" }),
+        ]);
+        expect(m.requests).toHaveLength(2);
+        expect(m.requests.map((r) => [r.producer, r.requestId, r.outcome, r.tokens])).toEqual([
+            ["sonder-runtime", "shared", "completed", 0],
+            ["sonder-inference", "shared", "completed", 1],
+        ]);
+        expect(new Set(m.requests.map((r) => r.streamKey)).size).toBe(2);
+        expect(m.requestLatency.count).toBe(2);
+        expect(m.requestLatencyByProducer["sonder-runtime"]).toEqual({ count: 1, p50Ms: 120, p95Ms: 120, maxMs: 120 });
+        expect(m.requestLatencyByProducer["sonder-inference"]).toEqual({ count: 1, p50Ms: 80, p95Ms: 80, maxMs: 80 });
+        expect(m.timeToFirstToken.count).toBe(1);
+    });
+
+    it("sums the latest cumulative drop count of each producer instance", () => {
+        const dropped = (ms: number, p: ReturnType<typeof producer>, seq: number, n: number) =>
+            at(ms, "telemetry.dropped", {
+                producer: p,
+                sequence: seq,
+                event_id: `${p.instance_id}-${seq}`,
+                attributes: { dropped_events: n },
+            });
+        expect(deriveMetrics([dropped(1, inf, 0, 5), dropped(2, inf, 1, 7)]).droppedEvents).toBe(7);
+        expect(deriveMetrics([dropped(1, inf, 0, 5), dropped(2, inf, 1, 7), dropped(3, rt, 0, 2)]).droppedEvents).toBe(9);
+        const restarted = producer("sonder-inference", "tel-0000000000000002");
+        expect(deriveMetrics([dropped(1, inf, 0, 5), dropped(2, restarted, 0, 1)]).droppedEvents).toBe(6);
     });
 });
 

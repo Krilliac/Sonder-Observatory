@@ -153,11 +153,40 @@ the read surface.
 Not verified: Windows/macOS runtime and `tauri build` bundling (the Windows CI
 job covers `cargo check/test`).
 
+## Launch arguments for several producers (live producer protocol v1)
+
+`src-tauri/src/launch.rs` now accepts:
+
+- `--connect` / `--endpoint` repeatedly, with `ws`, `wss`, `http` or `https`
+  URLs. Plain `ws` / `http` only to loopback; URLs with credentials or a
+  `token` / `access_token` query parameter are rejected (the warning does not
+  echo the URL).
+- `--token-file <path>`, an alias of `--capability-file`: read once, at most
+  4 KiB, trimmed, never logged. Given right after a `--connect`, the token
+  binds to that URL; a token file without a preceding `--connect` is the
+  legacy `capability`, applied only when exactly one http(s) URL is launched.
+  Tokens are never applied to ws(s) URLs and must be printable ASCII without
+  spaces (the same rule as `LiveConnectionManager`; others are rejected with a
+  warning at startup).
+- `--capability <token>` on the command line is still accepted for older
+  frontends (reported as `capability`, with a warning) but is never used as a
+  bearer token for a `--connect` URL: command lines are readable by other
+  local users. Use `--token-file`.
+
+`LaunchInfo` keeps `connect` (the first accepted URL) and adds `connectAll`
+(every accepted URL) and `connectTokens` (the bearer token per URL, or null).
+`launchProducers(info)` in `src/integrations/desktop.ts` turns that into
+`LiveConnectionManager.add()` inputs, and accepts launch info from older
+shells that only report `connect`. Rust unit tests in `launch.rs` cover
+repeatable `--connect`, the URL policy, token binding, the single-URL
+fallback, ws refusal and the token-file limits.
+
 ## Follow-ups (not in this branch)
 
 - `--connect` is applied since PR #17 (`ObservatoryApp.connectLive()`, `--open`
-  wins when both are given). `--session/--capability` from launch info are not
-  yet applied to the live connection, and the Rust `--connect` validation still
-  accepts only `ws(s)://`.
+  wins when both are given) for the first URL. Connecting every `connectAll`
+  URL through `LiveConnectionManager` with its token is renderer/UX work
+  (`src/integrations/desktopUi.ts`, `src/renderer/`). `--session` is not
+  applied to live connections.
 - Drag-and-drop of recordings onto the window (HTML5 DnD works because
   `dragDropEnabled` is false; needs an app hook).

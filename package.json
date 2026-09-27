@@ -19,6 +19,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
+    "test:ecosystem": "node scripts/ecosystem-e2e.mjs",
     "fixture": "node scripts/generate-fixture.mjs",
     "fixture:large": "node scripts/gen-large-fixture.mjs",
     "fake-producer": "node scripts/fake-producer.mjs",
