@@ -14,6 +14,7 @@
 import { parseNdjson, type RejectedLine } from "../recording/ndjson";
 import { loadRecording, RECORDING_FORMAT, type LoadedRecording, type RecordingManifest } from "../recording/sobs";
 import type { ObservatoryEvent } from "../protocol/events";
+import { MAX_RECORDING_BYTES, MAX_RECORDING_LINE_CHARS, recordingTooLarge } from "../recording/limits";
 
 export interface LoadProgress {
     bytesDone: number;
@@ -35,7 +36,13 @@ export interface ChunkedLoadOptions {
     yieldToEventLoop?: () => Promise<void>;
     /** Clock (ms); injectable for tests. */
     now?: () => number;
+    /** Streams only: total size limit in bytes. Default MAX_RECORDING_BYTES. */
+    maxBytes?: number;
+    /** Streams only: longest line kept, in UTF-16 code units. Default MAX_RECORDING_LINE_CHARS. */
+    maxLineChars?: number;
 }
+
+export { MAX_RECORDING_BYTES, MAX_RECORDING_LINE_CHARS };
 
 /** Below this size the plain synchronous loader is used. */
 export const CHUNKED_LOAD_THRESHOLD_CHARS = 2 * 1024 * 1024;
@@ -103,6 +110,12 @@ class SliceParser {
 
     get rejectedCount(): number {
         return this.rejected.length;
+    }
+
+    /** Rejects the next line without parsing it (it was dropped unread). */
+    rejectLine(reason: string): void {
+        this.lineOffset += 1;
+        this.rejected.push({ line: this.lineOffset, reason, raw: "" });
     }
 
     /** Same manifest rules as loadRecording: one manifest, only on line 1. */
@@ -186,32 +199,93 @@ export async function loadRecordingStream(
     const parser = new SliceParser();
     const state = { chunk: options.chunkChars ?? options.initialChunkChars ?? 256 * 1024 };
     const totalBytes = options.totalBytes ?? 0;
+    const maxBytes = options.maxBytes ?? MAX_RECORDING_BYTES;
+    const maxLine = options.maxLineChars ?? MAX_RECORDING_LINE_CHARS;
+    const lineTooLong = `line exceeds the ${maxLine}-character limit; not parsed`;
     let bytesRead = 0;
-    let carry = "";
+    /** Pieces of the unterminated last line (no newline in any of them). */
+    let carry: string[] = [];
+    let carryChars = 0;
+    /** Dropping an overlong line up to its newline. */
+    let skipping = false;
+    let head = "";
     let first = true;
+    if (totalBytes > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        reader.releaseLock();
+        throw recordingTooLarge(maxBytes);
+    }
     try {
         for (;;) {
             if (options.signal?.aborted) {
                 throw abortError();
             }
             const { done, value } = await reader.read();
-            let text = done ? carry + decoder.decode() : carry + decoder.decode(value, { stream: true });
+            let piece = done ? decoder.decode() : decoder.decode(value, { stream: true });
             if (!done) {
                 bytesRead += value.byteLength;
+                if (bytesRead > maxBytes) {
+                    await reader.cancel().catch(() => undefined);
+                    throw recordingTooLarge(maxBytes);
+                }
             }
-            if (first && text.length >= 2) {
+            if (first) {
+                // The ZIP check needs the first two characters.
+                head += piece;
+                if (head.length < 2 && !done) {
+                    continue;
+                }
                 first = false;
-                if (text.startsWith("PK")) {
+                piece = head;
+                head = "";
+                if (piece.startsWith("PK")) {
                     await reader.cancel();
                     return loadRecording("PK");
                 }
             }
-            if (!done) {
-                const cut = text.lastIndexOf("\n");
-                carry = cut < 0 ? text : text.slice(cut + 1);
-                text = cut < 0 ? "" : text.slice(0, cut + 1);
-            } else {
-                carry = "";
+            if (skipping) {
+                const nl = piece.indexOf("\n");
+                if (nl >= 0) {
+                    skipping = false;
+                    parser.rejectLine(lineTooLong);
+                    piece = piece.slice(nl + 1);
+                } else {
+                    piece = "";
+                }
+            }
+            // Only the new piece is searched for a newline: a long line is never rescanned.
+            let text = "";
+            const cut = skipping ? -1 : piece.lastIndexOf("\n");
+            if (cut >= 0) {
+                const firstNl = piece.indexOf("\n");
+                if (carryChars + firstNl > maxLine) {
+                    // The line that spans reads ends here, over the limit.
+                    parser.rejectLine(lineTooLong);
+                    text = piece.slice(firstNl + 1, cut + 1);
+                } else {
+                    carry.push(piece.slice(0, cut + 1));
+                    text = carry.join("");
+                }
+                carry = [piece.slice(cut + 1)];
+                carryChars = carry[0]!.length;
+            } else if (piece.length > 0) {
+                carry.push(piece);
+                carryChars += piece.length;
+            }
+            if (carryChars > maxLine) {
+                // The unterminated line is already too long: drop it unread.
+                carry = [];
+                carryChars = 0;
+                skipping = true;
+            }
+            if (done) {
+                if (skipping) {
+                    parser.rejectLine(lineTooLong);
+                    skipping = false;
+                }
+                text += carry.join("");
+                carry = [];
+                carryChars = 0;
             }
             if (text.length > 0) {
                 await parseSlices(text, parser, options, state, () =>

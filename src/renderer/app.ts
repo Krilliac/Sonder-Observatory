@@ -252,6 +252,11 @@ export class ObservatoryApp {
         this.afterLiveStopped(() => this.loadText(text, "file", label));
     }
 
+    /** Streams a large recording (desktop native open): no whole-file string. */
+    openRecordingStream(stream: ReadableStream<Uint8Array>, label: string): void {
+        this.afterLiveStopped(() => this.loadChunked((opts) => loadRecordingStream(stream, opts), "file", label));
+    }
+
     /** Connects to one live endpoint (older desktop shells: `--connect` without tokens). */
     connectLive(url: string): void {
         this.addProducer({ url });

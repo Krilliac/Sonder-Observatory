@@ -18,6 +18,11 @@ import { modeBadge, runtimeMode } from "./mode";
 
 export interface RecordingHost {
     openRecordingText(text: string, label: string): void;
+    /**
+     * Loads a large recording from a byte stream (never one big string).
+     * Optional for older hosts: without it the stream is decoded to text.
+     */
+    openRecordingStream?(stream: ReadableStream<Uint8Array>, label: string): void;
     /** Connects every launch producer, with its own token. Optional so file-only hosts still fit. */
     connectProducers?(inputs: readonly ProducerEndpointInput[]): void;
     /** Older hosts: one URL, no token. Used only when connectProducers is absent. */
@@ -173,8 +178,13 @@ export class DesktopIntegration {
     private async run(load: () => Promise<OpenedRecording | null>, clearStatus = true): Promise<void> {
         try {
             const opened = await load();
+            if (opened?.stream !== undefined && this.host.openRecordingStream) {
+                this.host.openRecordingStream(opened.stream, opened.label);
+            } else if (opened) {
+                const text = opened.text ?? (opened.stream ? await new Response(opened.stream).text() : "");
+                this.host.openRecordingText(text, opened.label);
+            }
             if (opened) {
-                this.host.openRecordingText(opened.text, opened.label);
                 if (clearStatus) {
                     this.setStatus("");
                 }
