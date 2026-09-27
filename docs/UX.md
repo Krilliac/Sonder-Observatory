@@ -44,7 +44,10 @@ Implemented (src/renderer/, see src/renderer/README.md):
 - Shell: header with the app mark, status badges and actions; a collapsible
   sidebar with **Producers** and **Sources**; views as tabs: **Overview**
   (metric cards and timeline), **Events** (table), **Diagnostics**,
-  **Agents**; one replay bar for all views; the inspector docked beside every
+  **Agents**, **Compare** (two sessions, A = baseline and B = candidate, each
+  a recording or the current session, aligned by run, request or turn; a
+  growing live session is re-analysed at most once per second); one replay
+  bar for all views; the inspector docked beside every
   view with a keyboard-resizable splitter.
 - Connection flow: producer URL, transport, in-memory bearer token, **Test**
   (discovery details, or which setting or token to fix), **Connect**, local
@@ -54,12 +57,21 @@ Implemented (src/renderer/, see src/renderer/README.md):
   synthetic demo.
 - Timeline legend, a text alternative and keyboard stepping; Previous and
   Next error; a shortcuts dialog.
+- **Export…** in the header opens a modal dialog: format (HTML report,
+  Markdown summary, findings and metrics JSON, `.sobs` recording) and range
+  (whole session, or the current view: the Events filters up to the replay
+  cursor). Every write, including **Save**, goes through
+  `exportWithConfirmation`, so a session with full text capture or tool
+  payloads shows the sensitive-data warning (Cancel focused) first. The
+  result or failure is announced in the warnings region.
+- The Token rate card states provenance (backend-reported, derived from
+  token events, mixed, or unavailable when only output chunks were seen) and
+  never shows chunk events as tokens.
 - Light and dark themes from design/tokens.json (AA contrast for every text
   role, checked by tests and axe), reduced-motion support, visible load
   progress with cancel, a polite warnings region.
 
-Planned (not built): Live Session scene views, Replay comparison of two runs,
-Models, Memory and Settings views, the Flutter embedded view, 3D views,
+Planned (not built): Live Session scene views, Models, Memory and Settings views, the Flutter embedded view, 3D views,
 multi-select class chips and event-type facets.
 
 UX decisions:
@@ -70,6 +82,10 @@ UX decisions:
   Diagnostics or Agents is visible without switching tabs.
 - Views that are hidden are not rendered; switching tabs renders them at
   their real size.
+- Dialogs (Shortcuts, Export, the sensitive-export warning) are native modal
+  `<dialog>`s: Esc closes them, focus returns to the opener, and single-key
+  shortcuts are off while one is open. Export is a dialog rather than a
+  menu so the format and range choices are plain radio groups.
 - Shortcuts use single keys and are ignored while typing, with modifiers held,
   and for Space on controls Space already activates. Because they are active
   page-wide, WCAG 2.1.4 (Character Key Shortcuts, level A) requires a way to

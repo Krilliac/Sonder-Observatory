@@ -1,0 +1,118 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { expect, test, type Page } from "@playwright/test";
+import { FIXTURE_EVENTS, openFixture } from "./helpers";
+
+/**
+ * Export menu (header "Export…" → #export-dialog) and Save, wired to
+ * src/export through exportWithConfirmation: formats, "Current view" range,
+ * keyboard handling, and the sensitive-data warning (never skipped).
+ */
+const fixtureText = () => readFileSync(fileURLToPath(new URL("../fixtures/synthetic-session.ndjson", import.meta.url)), "utf8");
+
+/** The synthetic fixture with its session declaring full text capture (a sensitive export). */
+function fullCaptureText(): string {
+    const text = fixtureText();
+    const out = text.replace('"text_capture":"none"', '"text_capture":"full"');
+    expect(out).not.toBe(text);
+    return out;
+}
+
+async function openRecording(page: Page, name: string, text: string): Promise<void> {
+    await page.goto("./?fixture=0");
+    await page.locator("#file-input").setInputFiles({ name, mimeType: "application/x-ndjson", buffer: Buffer.from(text) });
+    await expect(page.locator("#source-badge")).toContainText(`recording · ${name}`);
+    await expect(page.locator("#cursor-label")).toContainText(`${FIXTURE_EVENTS}/${FIXTURE_EVENTS} events`);
+}
+
+async function downloadText(page: Page, action: () => Promise<void>): Promise<{ name: string; text: string }> {
+    const [download] = await Promise.all([page.waitForEvent("download"), action()]);
+    const file = await download.path();
+    return { name: download.suggestedFilename(), text: readFileSync(file, "utf8") };
+}
+
+test.describe("export", () => {
+    test("the dialog is keyboard operable and returns focus", async ({ page }) => {
+        await openFixture(page);
+        const button = page.locator("#export-btn");
+        await button.focus();
+        await page.keyboard.press("Enter");
+        const dialog = page.getByRole("dialog", { name: "Export" });
+        await expect(dialog).toBeVisible();
+        await expect(page.locator("#export-format-html")).toBeFocused();
+        await expect(page.locator("#export-scope-view-help")).toContainText("all events");
+        // Single-key shortcuts stay off while the dialog is open (J would select an event).
+        await page.keyboard.press("j");
+        await expect(page.locator("#inspector")).not.toContainText("event_id");
+        await page.keyboard.press("Escape");
+        await expect(dialog).toBeHidden();
+        await expect(button).toBeFocused();
+    });
+
+    test("Markdown summary of the whole session downloads", async ({ page }) => {
+        await openFixture(page);
+        await page.locator("#export-btn").click();
+        await page.getByRole("radio", { name: "Markdown summary" }).check();
+        const { name, text } = await downloadText(page, () => page.getByRole("button", { name: "Export", exact: true }).click());
+        expect(name).toMatch(/^observatory-ses_synthetic_0001-.*-summary\.md$/);
+        expect(text).toContain("| Tokens (decode rate) | 334 derived");
+        await expect(page.locator("#warnings")).toContainText(`Exported Markdown summary: ${name}`);
+    });
+
+    test("HTML report is self-contained", async ({ page }) => {
+        await openFixture(page);
+        await page.locator("#export-btn").click();
+        const { name, text } = await downloadText(page, () => page.getByRole("button", { name: "Export", exact: true }).click());
+        expect(name).toMatch(/-report\.html$/);
+        expect(text).toContain("Content-Security-Policy");
+        expect(text).not.toMatch(/<script/i);
+    });
+
+    test("Current view exports the filtered range as a .sobs recording", async ({ page }) => {
+        await openFixture(page, "view=events");
+        await page.locator("#filter-class").selectOption("error");
+        await page.locator("#export-btn").click();
+        await expect(page.locator("#export-scope-view-help")).toContainText("class=error");
+        await page.getByRole("radio", { name: "Observatory recording (.sobs)" }).check();
+        await page.getByRole("radio", { name: "Current view" }).check();
+        const { name, text } = await downloadText(page, () => page.getByRole("button", { name: "Export", exact: true }).click());
+        expect(name).toMatch(/\.sobs$/);
+        const lines = text.trim().split("\n").map((l) => JSON.parse(l) as { event_type?: string; kind?: string });
+        const events = lines.slice(1);
+        expect(events.length).toBeGreaterThan(0);
+        expect(events.length).toBeLessThan(FIXTURE_EVENTS);
+        expect(events.every((e) => /failed|retry|guard/.test(e.event_type ?? ""))).toBe(true);
+    });
+
+    test("a sensitive session asks first; Cancel writes nothing, Export anyway downloads", async ({ page }) => {
+        await openRecording(page, "full-capture.ndjson", fullCaptureText());
+        let downloads = 0;
+        page.on("download", () => {
+            downloads += 1;
+        });
+        await page.locator("#export-btn").click();
+        await page.getByRole("button", { name: "Export", exact: true }).click();
+        const warning = page.getByRole("dialog", { name: "This export may contain sensitive data" });
+        await expect(warning).toBeVisible();
+        await expect(warning.getByRole("button", { name: "Cancel" })).toBeFocused();
+        await warning.getByRole("button", { name: "Cancel" }).click();
+        await expect(warning).toBeHidden();
+        await expect(page.locator("#warnings")).toContainText("HTML report export cancelled; nothing was written.");
+        expect(downloads).toBe(0);
+
+        await page.locator("#export-btn").click();
+        await page.getByRole("button", { name: "Export", exact: true }).click();
+        const { name } = await downloadText(page, () => warning.getByRole("button", { name: "Export anyway" }).click());
+        expect(name).toMatch(/-report\.html$/);
+    });
+
+    test("Save asks before writing a sensitive session too", async ({ page }) => {
+        await openRecording(page, "full-capture.ndjson", fullCaptureText());
+        await page.locator("#save-btn").click();
+        const warning = page.getByRole("dialog", { name: "This export may contain sensitive data" });
+        await expect(warning).toBeVisible();
+        await page.keyboard.press("Escape");
+        await expect(warning).toBeHidden();
+        await expect(page.locator("#warnings")).toContainText("export cancelled; nothing was written.");
+    });
+});
