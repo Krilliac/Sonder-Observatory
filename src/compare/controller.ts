@@ -47,8 +47,15 @@ export interface CompareControllerOptions {
 
 export const SIDE_TITLES: Record<SideId, string> = { a: "A · Baseline", b: "B · Candidate" };
 
+/**
+ * Content signal of the analysed current session. The host's SessionStore
+ * replaces its events array on every append, so array identity says nothing:
+ * the first event identifies the session (a reset or a different source
+ * starts with another event object), and length + last event detect growth.
+ */
 interface CurrentCache {
-    events: readonly ObservatoryEvent[];
+    first: ObservatoryEvent;
+    last: ObservatoryEvent;
     length: number;
     at: number;
     analysis: SessionAnalysis;
@@ -165,18 +172,22 @@ export class CompareController {
         if (this.current.length === 0) {
             return null;
         }
+        const events = this.current;
+        const first = events[0]!;
+        const last = events[events.length - 1]!;
         const cache = this.currentCache;
-        const now = this.now();
-        if (cache && cache.events === this.current && cache.length === this.current.length) {
+        const sameSession = cache !== null && cache.first === first;
+        if (sameSession && cache.length === events.length && cache.last === last) {
             this.pendingSince = null;
             return cache.analysis;
         }
-        if (cache && cache.events === this.current && now - cache.at < this.throttleMs) {
+        const now = this.now();
+        if (sameSession && now - cache.at < this.throttleMs) {
             this.pendingSince ??= cache.at;
             return cache.analysis;
         }
         this.pendingSince = null;
-        this.currentCache = { events: this.current, length: this.current.length, at: now, analysis: this.register(analyzeSession(this.current)) };
+        this.currentCache = { first, last, length: events.length, at: now, analysis: this.register(analyzeSession(events)) };
         return this.currentCache.analysis;
     }
 

@@ -6,6 +6,7 @@ import { compareSessions } from "../../src/compare/compare";
 import { metricDelta, METRICS } from "../../src/compare/delta";
 import { formatDelta } from "../../src/compare/present";
 import { parseNdjson } from "../../src/recording/ndjson";
+import { SessionStore } from "../../src/replay/session";
 
 const baseText = readFileSync("fixtures/synthetic-session.ndjson", "utf8");
 const regressedText = regressFixtureText(baseText);
@@ -99,5 +100,35 @@ describe("CompareController", () => {
         expect(ctl.analysis("a")).not.toBe(first);
         expect(ctl.loadRecordingText("b", "garbage\n", "bad.ndjson").ok).toBe(false);
         expect(ctl.side("b").error).toContain("bad.ndjson");
+    });
+
+    it("throttles a live session whose store replaces the events array on every append", () => {
+        let now = 0;
+        const ctl = new CompareController({ now: () => now, liveThrottleMs: 1000 });
+        ctl.setRecording("b", b, "reg.ndjson");
+        ctl.useCurrent("a");
+        const store = new SessionStore();
+        store.reset("live", "live");
+        store.append(a.slice(0, 100));
+        ctl.setCurrent(store.events);
+        const first = ctl.analysis("a");
+        now = 10;
+        store.append(a.slice(100, 150)); // new array, same session
+        ctl.setCurrent(store.events);
+        expect(ctl.analysis("a")).toBe(first);
+        expect(ctl.pendingRefreshMs()).toBe(990);
+        store.append([]); // new array, same content
+        ctl.setCurrent(store.events);
+        expect(ctl.analysis("a")).toBe(first);
+        now = 1000;
+        const second = ctl.analysis("a");
+        expect(second).not.toBe(first);
+        expect(ctl.pendingRefreshMs()).toBeNull();
+        // A different session replaces the current one: re-analysed immediately.
+        now = 1001;
+        store.reset("fixture", "other");
+        store.append(b.slice(0, 50));
+        ctl.setCurrent(store.events);
+        expect(ctl.analysis("a")).not.toBe(second);
     });
 });
