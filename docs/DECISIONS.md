@@ -156,6 +156,10 @@ Tauri bundle metadata say `Apache-2.0`.
 builds with stable Rust. This replaces pinning `yoke-derive` to an older
 release.
 
+Update: raised to `rust-version = "1.88"` because the committed `Cargo.lock`
+pins `time` 0.3.55 (dependabot #9), whose `time`, `time-core` 0.1.9 and
+`time-macros` 0.2.32 all declare `rust-version = "1.88.0"` (ported from #21).
+
 ## 2026-09-26 — Live ingest in the renderer
 
 The renderer connects through `src/ingest/live` (`connectLiveSession`) instead

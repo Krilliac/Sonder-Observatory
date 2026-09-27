@@ -20,7 +20,7 @@ least-privilege native surface. See `docs/ARCHITECTURE.md`,
 
 ## Prerequisites
 
-Rust **1.87+** (stable, via rustup) and Node (for the frontend).
+Rust **1.88+** (stable, via rustup) and Node (for the frontend).
 
 **Windows 10/11**
 1. Microsoft C++ Build Tools / Visual Studio 2022 with the *Desktop development with C++* workload (MSVC + Windows SDK).
@@ -131,8 +131,11 @@ MPL-2.0 is file-level copyleft and only matters if those files are modified.
 
 `Cargo.lock` is committed and CI runs `cargo check/test --locked` on stable.
 It is what `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo
-generate-lockfile` produces. The declared `rust-version` is **1.87** because
-`yoke-derive` 0.8.3 in that lockfile uses `str::from_utf8` (stable in 1.87)
-while claiming an older MSRV (docs/DECISIONS.md, 2026-09-26). To build on an
-older toolchain anyway, run `cargo update -p yoke-derive --precise 0.8.2`
-locally (adds `synstructure` 0.13.2) and do not commit the result.
+generate-lockfile` produces. The declared `rust-version` is **1.88**: `time`
+0.3.55 in that lockfile, with `time-core` 0.1.9 and `time-macros` 0.2.32, declares
+`rust-version = "1.88.0"`, and `yoke-derive` 0.8.3 uses `str::from_utf8`
+(stable in 1.87) while claiming an older MSRV (docs/DECISIONS.md, 2026-09-26).
+To build on an older toolchain anyway, downgrade those crates locally (for
+example `cargo update -p yoke-derive --precise 0.8.2`, which adds
+`synstructure` 0.13.2, plus an older `time` release) and do not commit the
+result.
