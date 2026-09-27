@@ -531,7 +531,7 @@ export class ObservatoryApp {
             });
         });
         document.addEventListener("keydown", (ev) => {
-            if (!this.shortcuts?.enabled || this.shortcuts.isOpen || this.exportDialog?.isOpen || ev.defaultPrevented) {
+            if (!this.shortcuts?.enabled || document.querySelector("dialog[open]") || ev.defaultPrevented) {
                 return;
             }
             const action = shortcutAction(ev);

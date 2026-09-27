@@ -106,6 +106,23 @@ test.describe("export", () => {
         expect(name).toMatch(/-report\.html$/);
     });
 
+    test("single-key shortcuts stay off while the sensitive-export warning is open", async ({ page }) => {
+        await openRecording(page, "full-capture.ndjson", fullCaptureText());
+        await page.locator("#export-btn").click();
+        await page.getByRole("button", { name: "Export", exact: true }).click();
+        const warning = page.getByRole("dialog", { name: "This export may contain sensitive data" });
+        await expect(warning).toBeVisible();
+        await expect(page.locator("#export-dialog")).toBeHidden();
+
+        await page.keyboard.press("t");
+        await page.keyboard.press("?");
+        await page.keyboard.press("j");
+        await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+        await expect(page.locator("#shortcuts-dialog")).toBeHidden();
+        await expect(page.locator("#inspector")).not.toContainText("event_id");
+        await expect(warning).toBeVisible();
+    });
+
     test("Save asks before writing a sensitive session too", async ({ page }) => {
         await openRecording(page, "full-capture.ndjson", fullCaptureText());
         await page.locator("#save-btn").click();
