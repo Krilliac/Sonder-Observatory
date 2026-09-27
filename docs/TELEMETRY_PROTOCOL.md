@@ -77,6 +77,32 @@ Optional correlation IDs:
 - `inference.speculation.accepted`
 - `inference.speculation.rejected`
 
+#### Tokens versus chunks
+
+`inference.token.generated` reports visible output. Its `attributes.unit` says
+what one event is:
+
+- `"token"`: exactly `count` tokens (default 1). Only these events are token
+  counts (Sonder-Inference emits them when it samples tokens itself, with
+  `token_id` and `probability`).
+- `"chunk"` (or any other non-`token` unit): a piece of backend-streamed text
+  whose token count is unknown. Hidden reasoning ("thinking") tokens produce no
+  chunk at all, so the number of chunk events says nothing about how many
+  tokens were generated.
+- no `unit`: read as `count` tokens (default 1) for producers that predate
+  the attribute (the synthetic fixture, Sonder-Inference before `912503a`).
+
+Authoritative counts arrive when the request ends: `request.completed`
+`completion_tokens` with `token_counts_from_backend: true`, `chunks`, `ttft_ms`
+(first visible output) and `total_ms`, and `inference.decode.completed`
+`backend_eval_ms` (backend decode time, covering hidden tokens). Observatory
+therefore takes a request's token count from the backend when reported and
+from `unit: "token"` events otherwise, and never counts chunks. The token rate
+divides by decode time (`backend_eval_ms`, else `total_ms - ttft_ms`, else
+first output to the end of the request), never by session wall time.
+`sampling.sampled` is not used to tell tokens from chunks: producers set it to
+`true` on every event.
+
 ### Model/backend
 
 - `model.load.started`

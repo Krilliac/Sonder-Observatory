@@ -71,7 +71,11 @@ describe("Sonder-Inference fixture", () => {
 
     it("keeps streamed chunks and backend-reported token counts apart", () => {
         const m = deriveMetrics(load());
-        expect(m.tokens.total).toBe(4);
+        // b2170c0 token events carry no `unit`, so they are read as one token
+        // each; a request's backend count replaces them (req 1: 5, not 3), and
+        // the cancelled request (no backend count) keeps its 1 event.
+        expect(m.tokens.total).toBe(6);
+        expect(m.tokens.provenance).toBe("mixed");
         expect(m.tokens.backendReported).toBe(5);
         expect(m.requests.map((r) => [r.tokens, r.backendTokens])).toEqual([
             [3, 5],
@@ -151,8 +155,11 @@ describe("Sonder-Inference 912503a mock run (recorded)", () => {
     it("derives one completed request with streamed and backend-reported tokens", () => {
         const m = deriveMetrics(load912());
         expect(m.requests).toHaveLength(1);
-        expect(m.requests[0]).toMatchObject({ outcome: "completed", producer: "sonder-inference", tokens: 8, backendTokens: 8 });
+        // The 8 token events are `unit: "chunk"`: output, never counted as tokens.
+        expect(m.requests[0]).toMatchObject({ outcome: "completed", producer: "sonder-inference", tokens: 0, chunks: 8, backendTokens: 8, tokenCount: 8 });
         expect(m.tokens.total).toBe(8);
+        expect(m.tokens.provenance).toBe("backend-reported");
+        expect(m.tokens.chunks).toBe(8);
         expect(m.tokens.backendReported).toBe(8);
         expect(m.requestLatencyByProducer["sonder-inference"]!.count).toBe(1);
         expect(m.timeToFirstToken.count).toBe(1);

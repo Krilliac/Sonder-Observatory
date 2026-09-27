@@ -15,7 +15,7 @@
 .export-warning h2 {
     margin: 0 0 8px;
     font-size: 1.1rem;
-    color: var(--color-warning, #f59e0b);
+    color: var(--color-textWarning, #f59e0b);
 }
 
 .export-warning ul {
