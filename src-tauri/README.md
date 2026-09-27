@@ -13,7 +13,7 @@ least-privilege native surface. See `docs/ARCHITECTURE.md`,
 | `capabilities/main-window.json` | the **only** permissions granted to the webview |
 | `build.rs` | tauri-build with an explicit app-command manifest |
 | `icons/` | committed icon set; `icons/app-icon.svg` is the source for `tauri icon` |
-| `src/launch.rs` | CLI contract (`--connect`, `--session`, `--capability-file`, `--open`) + validation, unit-tested |
+| `src/launch.rs` | CLI contract (`--connect`, `--token-file`, `--session`, `--open`) + validation, unit-tested |
 | `src/recording.rs` | read grants for user-chosen recordings (path-escape safe), unit-tested |
 | `src/recent.rs` | recent-recordings list persisted in the app data dir (opaque ids, no paths to the webview), unit-tested |
 | `src/lib.rs` | commands + app builder |
@@ -59,24 +59,44 @@ cargo test  -j 4
 ## Launch contract
 
 ```text
-sonder-observatory [--connect|--endpoint <ws-url>] [--session <id>]
+sonder-observatory [--connect|--endpoint <url> [--token-file <path>]]...
+                   [--session <id>]
                    [--capability-file <path> | --capability <token>]
                    [--open <recording>]
 ```
 
-- `--connect` accepts `wss://` (any host) or `ws://` to loopback only
-  (`127.0.0.1`, `localhost`, `::1`). URLs with embedded credentials are refused.
-- `--capability-file` is preferred over `--capability`: process arguments are
-  visible to other local processes (docs/INTEGRATION.md). The token is capped at 4 KiB.
+Implemented and unit-tested in `src/launch.rs` (`parse`, `validate`,
+`validate_connect_url`); docs/INTEGRATION.md has the Flutter launch flow.
+
+- `--connect` (alias `--endpoint`) is repeatable. Each URL must be `wss://` or
+  `https://` (any host), or plain `ws://` / `http://` to a loopback host only
+  (`localhost`, any `127.0.0.0/8` address, `[::1]`). URLs with embedded
+  credentials (`user:pass@`) or a `token` / `access_token` query parameter are
+  refused. `connect` is the first accepted URL, `connectAll` lists all of them
+  in order.
+- Bearer tokens never come from the URL or the command line. `--token-file`
+  (alias `--capability-file`) is read once: at most 4 KiB, UTF-8, trimmed, kept
+  in memory and never logged. A token file directly after a `--connect` binds to
+  that URL only (`connectTokens[i]`); the webview sends it as
+  `Authorization: Bearer` on that http(s) connection. Tokens for `ws://` /
+  `wss://` URLs are dropped with a warning (a browser cannot send the header
+  there). A token file not bound to a URL becomes `capability` and is applied
+  only when exactly one http(s) URL was given. Tokens must be 1-4096 bytes of
+  printable ASCII without spaces.
+- `--capability <token>` (argv) is kept for older frontends as `capability`
+  only and always warns: process arguments are visible to other local
+  processes, so it is never used as a bearer token for a `--connect` URL.
+- `--session` is 1-128 characters of `[A-Za-z0-9_.:-]`.
 - `--open` accepts a recording file (`events.ndjson`, `*.json`, `*.sobs`) or a
   session folder; a `manifest.json` path grants its parent session folder.
-- Invalid values never abort startup; they are dropped and reported in `warnings`.
+- Both `--flag value` and `--flag=value` work. Invalid values never abort
+  startup; they are dropped and reported in `warnings`.
 
 ## Command surface (webview → Rust)
 
 | Command | Args | Returns |
 |---|---|---|
-| `get_launch_args` | — | `{ connect, session, capability, warnings, open: Grant \| null }` |
+| `get_launch_args` | — | `{ connect, connectAll, connectTokens, session, capability, warnings, open: Grant \| null }` |
 | `pick_recording` | `{ folder?: boolean }` | `Grant \| null` (native dialog; null = cancelled) |
 | `list_recording_entries` | `{ grant }` | `[{ path, size }]` |
 | `read_recording_entry` | `{ grant, entry?, offset?, maxBytes? }` | `ArrayBuffer` (≤16 MiB per call) |
