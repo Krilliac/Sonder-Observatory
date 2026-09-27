@@ -23,7 +23,11 @@ import {
  * - agent.message: recipient in `attributes.to_agent_id` | `to` | `target_agent_id`.
  * - route.*: model in envelope `model_instance_id` | `attributes.model_instance_id`
  *   | `attributes.to_model`; previous model in `attributes.from_model` |
- *   `previous_model_instance_id`.
+ *   `previous_model_instance_id`. Sonder-Runtime routes to providers and
+ *   reports no agent or model instance: its target is `attributes.to_provider`
+ *   | `provider` (route.selected also names the `model`), the previous one
+ *   `attributes.from_provider`. Without an agent_id only the target node and
+ *   the change edge are drawn.
  * - model.*: display name in `attributes.model`.
  * - tool.*: `attributes.tool_call_id` (or envelope `tool_call_id`), tool name in
  *   `attributes.tool` | `tool_name`.
@@ -256,12 +260,21 @@ function applyAgent(b: GraphBuilder, e: ObservatoryEvent): void {
 }
 
 function applyRoute(b: GraphBuilder, e: ObservatoryEvent): void {
-    const model = envelopeOrAttr(e, "model_instance_id", "to_model");
+    const instance = envelopeOrAttr(e, "model_instance_id", "to_model");
+    const provider = instance ? null : attr(e, "to_provider", "provider");
+    const model = instance ?? provider;
     const agent = model ? b.agent(e) : null;
-    if (!agent || !model) {
+    if (!model || (!agent && !provider)) {
         return;
     }
-    const modelNode = b.node("model", model, e);
+    const modelName = provider && e.event_type === "route.selected" ? attr(e, "model") : null;
+    const modelNode = b.node("model", model, e, modelName ? `${provider} · ${modelName}` : null);
+    if (!agent) {
+        // Sonder-Runtime: a provider route with no agent; draw no agent edge.
+        setStatus(modelNode, "active");
+        applyRouteChange(b, e, model, modelNode);
+        return;
+    }
     const edge = b.edge("route", agent.id, modelNode.id, e);
     edge.count += 1;
     const previous = b.activeRoute.get(agent.id);
@@ -274,12 +287,18 @@ function applyRoute(b: GraphBuilder, e: ObservatoryEvent): void {
     }
     setEdgeStatus(edge, "active");
     b.activeRoute.set(agent.id, edge.id);
-    if (e.event_type === "route.changed") {
-        const from = attr(e, "from_model", "previous_model_instance_id");
-        if (from && from !== model) {
-            const fromNode = b.node("model", from, e);
-            b.edge("route_change", fromNode.id, modelNode.id, e).count += 1;
-        }
+    applyRouteChange(b, e, model, modelNode);
+}
+
+/** route.changed with a reported previous target: previous -> new edge. */
+function applyRouteChange(b: GraphBuilder, e: ObservatoryEvent, model: string, modelNode: TopologyNode): void {
+    if (e.event_type !== "route.changed") {
+        return;
+    }
+    const from = attr(e, "from_model", "previous_model_instance_id", "from_provider");
+    if (from && from !== model) {
+        const fromNode = b.node("model", from, e);
+        b.edge("route_change", fromNode.id, modelNode.id, e).count += 1;
     }
 }
 

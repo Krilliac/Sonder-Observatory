@@ -111,6 +111,10 @@ export interface Metrics {
          * per-token events in it, plus backend counts spread evenly over their decode window.
          */
         recentRate: number | null;
+        /**
+         * Length (ms) of that trailing window: RECENT_WINDOW_MS, or less when
+         * the session has not yet lasted that long.
+         */
         windowMs: number;
         /**
          * Sum of backend-reported completion tokens over requests that report
@@ -159,11 +163,18 @@ export function percentile(values: readonly number[], p: number): number | null 
 
 function latencyStats(durationsNs: readonly number[]): LatencyStats {
     const ms = durationsNs.map((d) => d / 1e6);
+    // A loop, not Math.max(...ms): spreading throws RangeError past ~125k values.
+    let maxMs: number | null = null;
+    for (const v of ms) {
+        if (maxMs === null || v > maxMs) {
+            maxMs = v;
+        }
+    }
     return {
         count: ms.length,
         p50Ms: percentile(ms, 50),
         p95Ms: percentile(ms, 95),
-        maxMs: ms.length > 0 ? Math.max(...ms) : null,
+        maxMs,
     };
 }
 
@@ -235,6 +246,7 @@ function tokenMetrics(
     work: ReadonlyMap<RequestSpan, SpanWork>,
     looseTokens: readonly TokenTime[],
     chunks: number,
+    firstNs: number | null,
     lastNs: number | null,
 ): Metrics["tokens"] {
     let fromBackend = 0;
@@ -260,7 +272,9 @@ function tokenMetrics(
             span.tokenCount = span.tokens;
             fromEvents += span.tokens;
             eventCounted += w.tokenTimes.length;
-            counted.push(...w.tokenTimes);
+            for (const x of w.tokenTimes) {
+                counted.push(x);
+            }
         }
         span.decode = decodeWindow(span, w);
         if (span.decode) {
@@ -277,24 +291,32 @@ function tokenMetrics(
     eventCounted += looseTokens.length;
     if (looseTokens.length >= 2) {
         // Token events with no request: their first-to-last span, as one stream.
+        // The first event opens the span, so its tokens are not in it (N events
+        // bound N-1 intervals), as decodeWindow does for a request.
         const ns = looseTokens[looseTokens.length - 1]!.ns - looseTokens[0]!.ns;
         if (ns > 0) {
-            decodeTokens += looseTokens.reduce((sum, x) => sum + x.n, 0);
+            decodeTokens += looseTokens.reduce((sum, x) => sum + x.n, 0) - looseTokens[0]!.n;
             decodeNs += ns;
         }
     }
     const provenance: TokenProvenance =
         backendSpans > 0 && eventCounted > 0 ? "mixed" : backendSpans > 0 ? "backend-reported" : eventCounted > 0 ? "derived" : "unavailable";
     let recentRate: number | null = null;
-    if (provenance !== "unavailable" && lastNs !== null) {
-        const windowStart = lastNs - RECENT_WINDOW_MS * 1e6;
+    // The trailing window never reaches back before the first event: a session
+    // shorter than RECENT_WINDOW_MS is rated over the time actually observed.
+    let windowMs = RECENT_WINDOW_MS;
+    if (firstNs !== null && lastNs !== null) {
+        windowMs = Math.min(RECENT_WINDOW_MS, (lastNs - firstNs) / 1e6);
+    }
+    if (provenance !== "unavailable" && lastNs !== null && windowMs > 0) {
+        const windowStart = lastNs - windowMs * 1e6;
         let recent = counted.filter((x) => x.ns > windowStart).reduce((sum, x) => sum + x.n, 0);
         for (const d of spread) {
             if (d.ns > 0) {
                 recent += (d.tokens * overlapNs(d.startNs, d.endNs, windowStart, lastNs)) / d.ns;
             }
         }
-        recentRate = recent / (RECENT_WINDOW_MS / 1000);
+        recentRate = recent / (windowMs / 1000);
     }
     return {
         total: fromBackend + fromEvents,
@@ -306,7 +328,7 @@ function tokenMetrics(
         overallRate: decodeNs > 0 ? decodeTokens / (decodeNs / 1e9) : null,
         activeDecodeMs: decodeNs > 0 ? decodeNs / 1e6 : null,
         recentRate,
-        windowMs: RECENT_WINDOW_MS,
+        windowMs,
         backendReported: backendSpans > 0 ? fromBackend : null,
     };
 }
@@ -489,7 +511,7 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
     }
     const withFirstToken = requests.filter((s) => s.firstTokenNs !== null);
 
-    const tokens = tokenMetrics(requests, work, looseTokens, chunkEvents, events[events.length - 1]?.mono_ns ?? null);
+    const tokens = tokenMetrics(requests, work, looseTokens, chunkEvents, events[0]?.mono_ns ?? null, events[events.length - 1]?.mono_ns ?? null);
     return {
         eventCount: events.length,
         requests,

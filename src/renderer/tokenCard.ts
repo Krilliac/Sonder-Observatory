@@ -18,7 +18,8 @@ function plural(n: number, one: string, many = `${one}s`): string {
 
 export function tokenCardModel(m: Metrics): TokenCardModel {
     const t = m.tokens;
-    const window = `last ${t.windowMs / 1000}s`;
+    // windowMs is shorter than RECENT_WINDOW_MS while the session is young.
+    const window = `last ${Number((t.windowMs / 1000).toFixed(1))}s`;
     const notes: string[] = [];
     if (t.chunks > 0 && t.provenance !== "unavailable") {
         notes.push(`${plural(t.chunks, "output chunk")} not counted as tokens`);

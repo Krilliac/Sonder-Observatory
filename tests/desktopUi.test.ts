@@ -115,6 +115,29 @@ describe("DesktopIntegration", () => {
         expect(listRecent).toHaveBeenCalledTimes(2);
     });
 
+    it("hands a streamed (large) recording to the host as a stream, not a string", async () => {
+        const { doc, label } = fakeDoc();
+        const stream = new ReadableStream<Uint8Array>();
+        const host = { openRecordingText: vi.fn(), openRecordingStream: vi.fn() };
+        const api = fakeBridge({ openRecordingNative: async () => ({ stream, label: "big.sobs" }) });
+        await new DesktopIntegration(host, doc, api).mount();
+        expect(label.fire("click")).toBe(true);
+        await flush();
+        expect(host.openRecordingStream).toHaveBeenCalledWith(stream, "big.sobs");
+        expect(host.openRecordingText).not.toHaveBeenCalled();
+    });
+
+    it("decodes a streamed recording for a host without stream support", async () => {
+        const { doc, label } = fakeDoc();
+        const host = { openRecordingText: vi.fn() };
+        const api = fakeBridge({ openRecordingNative: async () => ({ stream: new Response("{}\n").body!, label: "old.sobs" }) });
+        await new DesktopIntegration(host, doc, api).mount();
+        expect(label.fire("click")).toBe(true);
+        await flush();
+        await flush();
+        expect(host.openRecordingText).toHaveBeenCalledWith("{}\n", "old.sobs");
+    });
+
     it("opens and clears recent entries from the menu", async () => {
         const { doc, input } = fakeDoc();
         const host = { openRecordingText: vi.fn() };
