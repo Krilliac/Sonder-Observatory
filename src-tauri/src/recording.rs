@@ -93,13 +93,14 @@ impl Grants {
         Ok(RecordingGrant { id, name, kind })
     }
 
-    fn resolve(&self, id: &str, entry: Option<&str>) -> Result<PathBuf, String> {
+    /// The grant root and the checked, canonical path of `entry` in it.
+    fn resolve(&self, id: &str, entry: Option<&str>) -> Result<(PathBuf, PathBuf), String> {
         let map = self.map.lock().map_err(|_| "grant lock poisoned")?;
         let grant = map.get(id).ok_or("unknown recording grant")?;
         let entry = entry.unwrap_or("").trim();
-        match grant.kind {
-            GrantKind::File if entry.is_empty() => Ok(grant.root.clone()),
-            GrantKind::File => Err("file recordings have no entries".into()),
+        let path: PathBuf = match grant.kind {
+            GrantKind::File if entry.is_empty() => grant.root.clone(),
+            GrantKind::File => return Err("file recordings have no entries".into()),
             GrantKind::Folder => {
                 let rel = safe_relative(entry)?;
                 let joined = fs::canonicalize(grant.root.join(rel))
@@ -108,9 +109,10 @@ impl Grants {
                 if !joined.starts_with(&grant.root) || !joined.is_file() {
                     return Err("entry is outside the recording or not a file".into());
                 }
-                Ok(joined)
+                joined
             }
-        }
+        };
+        Ok((grant.root.clone(), path))
     }
 
     pub fn list(&self, id: &str) -> Result<Vec<RecordingEntry>, String> {
@@ -131,14 +133,61 @@ impl Grants {
 
     /// Read up to `max_bytes` (capped at [`MAX_CHUNK_BYTES`]) from `offset`.
     pub fn read(&self, id: &str, entry: Option<&str>, offset: u64, max_bytes: Option<u64>) -> Result<Vec<u8>, String> {
-        let path = self.resolve(id, entry)?;
+        self.read_with(id, entry, offset, max_bytes, |_| ())
+    }
+
+    /// `read`, with a hook that runs between the path check and the open
+    /// (tests use it to swap the path in that window).
+    fn read_with(
+        &self,
+        id: &str,
+        entry: Option<&str>,
+        offset: u64,
+        max_bytes: Option<u64>,
+        before_open: impl FnOnce(&Path),
+    ) -> Result<Vec<u8>, String> {
+        let (root, path) = self.resolve(id, entry)?;
         let len = max_bytes.unwrap_or(MAX_CHUNK_BYTES).min(MAX_CHUNK_BYTES);
-        let mut f = fs::File::open(&path).map_err(|e| format!("cannot read entry: {e}"))?;
+        before_open(&path);
+        let mut f = open_contained(&root, &path)?;
         f.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
         let mut buf = Vec::new();
         f.take(len).read_to_end(&mut buf).map_err(|e| e.to_string())?;
         Ok(buf)
     }
+}
+
+/// Opens a path that `resolve` checked, then verifies the open handle: a
+/// local writer could swap a directory in the path for a link between the
+/// check and the open. After opening, the path must still resolve to itself
+/// inside `root`, and the handle must be the same file the path names now
+/// (so a swap that was undone right after the open is caught too).
+fn open_contained(root: &Path, path: &Path) -> Result<fs::File, String> {
+    let f = fs::File::open(path).map_err(|e| format!("cannot read entry: {e}"))?;
+    let now = fs::canonicalize(path).map_err(|e| format!("cannot read entry: {e}"))?;
+    if now != path || !now.starts_with(root) {
+        return Err("entry changed while it was opened".into());
+    }
+    let opened = f.metadata().map_err(|e| e.to_string())?;
+    let named = fs::metadata(&now).map_err(|e| e.to_string())?;
+    if !opened.is_file() || !same_file(&opened, &named) {
+        return Err("entry changed while it was opened".into());
+    }
+    Ok(f)
+}
+
+#[cfg(unix)]
+fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+/// Stable std has no file id on Windows (`file_index` is unstable), so the
+/// handle is compared by size and creation / modification
+/// timestamps, which differ between distinct files in practice.
+#[cfg(not(unix))]
+fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    a.len() == b.len() && a.modified().ok() == b.modified().ok() && a.created().ok() == b.created().ok()
 }
 
 /// Accept only plain relative paths (no root, prefix, `..`, or `.` tricks).
@@ -212,6 +261,50 @@ mod tests {
         assert!(g.read(&grant.id, Some(d.join("secret.txt").to_str().unwrap()), 0, None).is_err());
         assert!(g.read(&grant.id, Some("snapshots"), 0, None).is_err());
         assert!(g.read("rec-999", Some("events.ndjson"), 0, None).is_err());
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[cfg(unix)]
+    fn link_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn link_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_dir(target, link)
+    }
+
+    #[test]
+    fn entry_swapped_for_a_link_after_the_check_is_refused() {
+        let d = tmp("race");
+        fs::create_dir_all(d.join("session/data")).unwrap();
+        fs::write(d.join("session/data/events.ndjson"), b"{\"seq\":1}\n").unwrap();
+        fs::create_dir_all(d.join("outside/data")).unwrap();
+        fs::write(d.join("outside/data/events.ndjson"), b"TOP SECRET\n").unwrap();
+        // Probe: without symlink rights (Windows without developer mode) the race cannot be staged.
+        if link_dir(&d.join("outside/data"), &d.join("probe")).is_err() {
+            eprintln!("SKIPPED entry_swapped_for_a_link_after_the_check_is_refused: cannot create symlinks here");
+            let _ = fs::remove_dir_all(d);
+            return;
+        }
+        let g = Grants::default();
+        let grant = g.grant(&d.join("session")).unwrap();
+        let swap = |_: &Path| {
+            fs::rename(d.join("session/data"), d.join("session/data-real")).unwrap();
+            link_dir(&d.join("outside/data"), &d.join("session/data")).unwrap();
+        };
+        let got = g.read_with(&grant.id, Some("data/events.ndjson"), 0, None, swap);
+        assert!(got.is_err(), "read through a swapped link returned {:?}", got.map(|b| String::from_utf8_lossy(&b).into_owned()));
+
+        // Swapped for the open and restored before the re-check: the handle is another file.
+        let _ = fs::remove_dir(d.join("session/data")).or_else(|_| fs::remove_file(d.join("session/data")));
+        fs::rename(d.join("session/data-real"), d.join("session/data")).unwrap();
+        let root = fs::canonicalize(d.join("session")).unwrap();
+        let path = fs::canonicalize(d.join("session/data/events.ndjson")).unwrap();
+        assert!(open_contained(&root, &path).is_ok());
+        let outside = fs::canonicalize(d.join("outside/data/events.ndjson")).unwrap();
+        let f = fs::File::open(&outside).unwrap();
+        assert!(!same_file(&f.metadata().unwrap(), &fs::metadata(&path).unwrap()));
         let _ = fs::remove_dir_all(d);
     }
 

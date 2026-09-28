@@ -25,6 +25,19 @@ export interface ExportSensitivity {
 const FULL_TEXT_POLICIES = new Set(["full", "on"]);
 const SESSION_DECLARATIONS = new Set(["session.started", "session.created"]);
 const TOOL_PAYLOAD_KEYS = ["args", "arguments", "input", "result", "output", "payload", "content"] as const;
+/**
+ * Attributes that carry prompt or output text on any event. `token_text` is
+ * this repo's fixture shape; Sonder-Inference sends captured chunk text as
+ * `text` on inference.token.generated.
+ */
+const TEXT_KEYS = ["token_text", "prompt", "response", "completion", "messages"] as const;
+
+function carriesText(e: ObservatoryEvent): boolean {
+    if (TEXT_KEYS.some((k) => !isRedacted(e.attributes[k]))) {
+        return true;
+    }
+    return e.event_type === "inference.token.generated" && !isRedacted(e.attributes.text);
+}
 
 /** Null, empty, a "[redacted…]" marker or a content hash count as no payload. */
 function isRedacted(value: unknown): boolean {
@@ -59,7 +72,7 @@ export function assessExportSensitivity(events: readonly ObservatoryEvent[], ran
     let fullText = capturePolicy.split(",").some((p) => FULL_TEXT_POLICIES.has(p.trim().toLowerCase()));
     let toolPayloadEvents = 0;
     for (const e of selected) {
-        if (!fullText && typeof e.attributes.token_text === "string" && !isRedacted(e.attributes.token_text)) {
+        if (!fullText && carriesText(e)) {
             fullText = true;
         }
         if (e.event_type.startsWith("tool.") && TOOL_PAYLOAD_KEYS.some((k) => !isRedacted(e.attributes[k]))) {

@@ -72,7 +72,8 @@ See **Krilliac/Sonder-Inference** for the execution-engine research and architec
 Milestone 1 in progress (2026-09-26): a small, trustworthy live viewer + replay
 recorder, web renderer first, before heavier 3D interpretation layers. What
 exists: Overview (metric cards and event timeline), Events (table and evidence
-inspector), Diagnostics and Agents views; live ingest from several producers at
+inspector), Diagnostics, Agents and Compare views; export to an HTML report,
+Markdown summary, JSON or a `.sobs` range; live ingest from several producers at
 once (WebSocket, SSE, NDJSON, with producer discovery and bearer tokens), a
 Sources panel and producer cards, an onboarding empty state, light and dark
 themes, keyboard shortcuts, the `.sobs` recorder, replay with a scrubber, a
@@ -124,7 +125,9 @@ npm run fake-live-producer -- --pace timeline   # http://127.0.0.1:8766 (discove
   producers merge into one session in replay order.
 - **Views**: Overview (cards and timeline with a legend and a text summary),
   Events (table with a producer column; the filter matches event type, ids,
-  request, run, agent and producer), Diagnostics and Agents. The inspector is
+  request, run, agent and producer), Diagnostics, Agents and Compare (A =
+  baseline, B = candidate: a recording or the current session, aligned by
+  run, request or turn). The inspector is
   docked beside every view and lists related events across producers (same
   request, parent and child requests, same run, agent, tool call).
 - **No source**: the empty state can look for local producers (1 s per
@@ -135,6 +138,15 @@ npm run fake-live-producer -- --pace timeline   # http://127.0.0.1:8766 (discove
   They are off while typing in a field, and the dialog has a **Single-key
   shortcuts** switch to turn them off (remembered in this browser; the
   Shortcuts button still opens the list).
+- **Export…** (header): HTML report, Markdown summary, findings and
+  metrics JSON, or a `.sobs` recording, of the whole session or the current
+  view (Events filters up to the replay cursor). A session with full text
+  capture or tool payloads asks for confirmation first; **Save** goes through
+  the same check. The desktop shell shows its native save dialog.
+- **Token rate** (Overview): chunk events (`unit: "chunk"`) are never
+  counted as tokens; totals prefer backend-reported counts and say which
+  (backend-reported, derived, mixed), and the rate is over decode time, not
+  the session span.
 - **Theme**: follows the system; the theme button (or T) switches and is
   remembered in this browser.
 
@@ -145,7 +157,7 @@ URL parameters:
 | `?connect=<url>` | Connect a producer; repeat for several. Base URL (discovery), discovery URL or stream URL. |
 | `?ws=<url>` | Legacy alias of `connect`. |
 | `?fixture=0` | Start without the synthetic fixture (onboarding). |
-| `?view=overview\|events\|diagnostics\|agents` | Open that view. |
+| `?view=overview\|events\|diagnostics\|agents\|compare` | Open that view. |
 | `?theme=light\|dark` | Theme for this load (not saved). |
 
 `token` and `access_token` parameters are ignored with a visible warning and

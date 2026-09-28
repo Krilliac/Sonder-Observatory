@@ -43,7 +43,7 @@ Inference envelopes are valid against the v1 schema as they are.
 | `request_id` | `req-…` on request, decode, token, scheduler and KV events | request spans, TTFT |
 | `model_instance_id`, `device_id` | `model-…`, `cpu:0` | topology model node, resource grouping |
 | `producer` | `{name: "sonder-inference", version, node_id: host name, instance_id: "tel-…"}` | `instance_id` names the sequence stream |
-| `sampling` | `{level: <level this event was emitted at>, sampled: true}` | not interpreted yet |
+| `sampling` | `{level: <level this event was emitted at>, sampled: true}` | not interpreted; `sampled` is `true` on every event, so it does not mark chunk or subsampled output |
 | `attributes` | object, always present | per event below |
 
 **Stream identity.** `streamKey` (src/replay/order.ts) uses the producer
@@ -80,10 +80,10 @@ telemetry is enabled; `standard` adds per-token and per-step detail.
 | `session.closed` | metrics | `requests` | class `session` |
 | `request.queued` | metrics | `kind` (`generate`), `priority`, `workload`, `prompt_bytes` | class `request` |
 | `request.started` | metrics | `kind`, `sampling{…}`, `scheduled`, `sampler` | request span start |
-| `request.completed` / `.cancelled` / `.failed` | metrics | `outcome`, `stop_reason`, token counts, `token_counts_from_backend`, `ttft_ms`, `total_ms`, scheduler fields; `.failed` adds `error_code`, `error` | span end; `completion_tokens` → `backendTokens` when `token_counts_from_backend`; errors |
+| `request.completed` / `.cancelled` / `.failed` | metrics | `outcome`, `stop_reason`, token counts, `chunks`, `token_counts_from_backend`, `ttft_ms` (first visible output), `total_ms`, scheduler fields; `.failed` adds `error_code`, `error` | span end; `completion_tokens` → `backendTokens` (the request's token count) when `token_counts_from_backend`; `total_ms - ttft_ms` is the decode window when no `backend_eval_ms`; errors |
 | `inference.decode.started` | metrics | `ttft_ms` | class `inference`; TTFT is derived from the first token event |
-| `inference.token.generated` | standard | `index`, `bytes`, `elapsed_ms`, `unit` (`token` with `count`, `token_id`, `probability`; or `chunk`), optional `text` with capture | token rate, TTFT; an integer `count` is honoured, otherwise one event counts as one |
-| `inference.prefill.completed`, `inference.decode.completed` | metrics | prompt/completion counts and timings | class `inference` |
+| `inference.token.generated` | standard | `index`, `bytes`, `elapsed_ms`, `unit` (`token` with `count`, `token_id`, `probability`; or `chunk`), optional `text` with capture | TTFT (first event of either unit). Only `unit: "token"` (or no `unit`) counts as tokens; `chunk` never does. A request's backend `completion_tokens` replaces its token events. See TELEMETRY_PROTOCOL.md "Tokens versus chunks" |
+| `inference.prefill.completed`, `inference.decode.completed` | metrics | prompt/completion counts and timings; `.decode.completed` has `backend_eval_ms` / `backend_tokens_per_sec` when the backend reports eval time | class `inference`; `backend_eval_ms` is the preferred decode window for the token rate |
 | `sampling.configured`, `sampling.failed` | metrics | sampler chain, failure status | class `other` (`sampling.failed` is an error) |
 | `scheduler.enqueued` / `rejected` / `admitted` / `preempted` / `prefill.chunk` / `prefill.completed` / `batch.formed` / `batch.completed` | metrics or standard | see Inference docs | class `resource`; no scheduler metrics derived yet |
 | `kv.allocated` / `reused` / `evicted` / `pressure` / `freed` | standard or metrics | `kv.pressure` has `level`, `occupancy` (0..1) | cache-thrash (`kv.reused` hit, `kv.allocated` miss), resource-pressure and the pressure counter (`occupancy`) |

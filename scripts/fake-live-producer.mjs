@@ -45,7 +45,9 @@
 //       [--retry-ms N] [--cors-origin ORIGIN]...
 //
 // Also importable: `startFakeLiveProducer(options)` (see the .d.mts file).
-// Binds to loopback by default (docs/SECURITY_PRIVACY.md).
+// Binds to loopback by default (docs/SECURITY_PRIVACY.md); a non-loopback
+// --host is refused unless --token-file is given. At most maxConnections
+// (default 32, --max-connections) streams are served at once; more get 503.
 import { execFileSync } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -78,6 +80,15 @@ export const ROLE_MODES = {
 };
 
 const MAX_TOKEN_BYTES = 4096;
+
+/** Concurrent stream connections (SSE + NDJSON + WebSocket) served by default. */
+export const DEFAULT_MAX_CONNECTIONS = 32;
+
+/** True for a loopback bind address (127.0.0.0/8, ::1, localhost). */
+export function isLoopbackHost(host) {
+    const h = String(host).replace(/^\[|\]$/g, "").toLowerCase();
+    return h === "localhost" || h === "::1" || /^127(\.\d{1,3}){3}$/.test(h);
+}
 
 /** Reads an NDJSON/.sobs file into events sorted in replay order. */
 export function loadEvents(file = DEFAULT_FIXTURE) {
@@ -192,6 +203,15 @@ export async function startFakeLiveProducer(options = {}) {
     if (!Number.isFinite(heartbeatMs) || heartbeatMs <= 0) {
         throw new Error("heartbeatMs must be a positive number");
     }
+    // Fail closed: off loopback, anyone on the network could read the replay.
+    if (!isLoopbackHost(host) && token === null) {
+        throw new Error(`refusing to bind ${host} without a bearer token: a non-loopback listener requires --token-file`);
+    }
+    const maxConnections = options.maxConnections ?? DEFAULT_MAX_CONNECTIONS;
+    if (!Number.isInteger(maxConnections) || maxConnections <= 0) {
+        throw new Error("maxConnections must be a positive integer");
+    }
+    let activeStreams = 0;
     const first = events[0];
     const producer = {
         name: first.producer?.name ?? "sonder-observatory-fixture",
@@ -210,6 +230,7 @@ export async function startFakeLiveProducer(options = {}) {
         byTransport: { websocket: 0, sse: 0, ndjson: 0 },
         discovery: 0,
         unauthorized: 0,
+        refused: 0,
     };
     const sockets = new Set();
 
@@ -412,6 +433,24 @@ export async function startFakeLiveProducer(options = {}) {
             res.end(`fake live producer: use ${DISCOVERY_PATH}, /ws (WebSocket), /sse or /ndjson\n`);
             return;
         }
+        if (activeStreams >= maxConnections) {
+            stats.refused += 1;
+            res.writeHead(503, { "Content-Type": "application/json", "Cache-Control": "no-store", "Retry-After": "2", ...cors });
+            res.end(
+                JSON.stringify({
+                    error: { message: "too many telemetry subscribers", type: "overloaded_error", code: "too_many_subscribers", param: null },
+                }) + "\n",
+            );
+            return;
+        }
+        activeStreams += 1;
+        let released = false;
+        const release = () => {
+            if (!released) {
+                released = true;
+                activeStreams -= 1;
+            }
+        };
         const header = req.headers["last-event-id"];
         const lastId = (Array.isArray(header) ? header[0] : header) || url.searchParams.get("last_event_id");
         stats.connections += 1;
@@ -443,6 +482,7 @@ export async function startFakeLiveProducer(options = {}) {
         const cleanup = () => {
             stop();
             clearInterval(heartbeat);
+            release();
         };
         req.on("close", cleanup);
         res.on("close", cleanup);
@@ -469,6 +509,12 @@ export async function startFakeLiveProducer(options = {}) {
             socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
             return;
         }
+        if (activeStreams >= maxConnections) {
+            stats.refused += 1;
+            socket.end("HTTP/1.1 503 Service Unavailable\r\nRetry-After: 2\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+            return;
+        }
+        activeStreams += 1;
         wss.handleUpgrade(req, socket, head, (ws) => {
             stats.connections += 1;
             stats.byTransport.websocket += 1;
@@ -481,7 +527,10 @@ export async function startFakeLiveProducer(options = {}) {
                 () => Promise.resolve(),
                 () => ws.terminate(),
             );
-            ws.on("close", stop);
+            ws.on("close", () => {
+                stop();
+                activeStreams -= 1;
+            });
         });
     });
 
@@ -555,6 +604,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
         tokenFile: tokenFile ? resolve(process.cwd(), tokenFile) : undefined,
         heartbeatMs: Number(option("heartbeat-ms", "15000")),
         retryMs: Number(option("retry-ms", "2000")),
+        maxConnections: Number(option("max-connections", String(DEFAULT_MAX_CONNECTIONS))),
         corsOrigins: corsOrigins.length > 0 ? [...DEFAULT_CORS_ORIGINS, ...corsOrigins] : undefined,
         log: (m) => console.log(m),
     }).catch((error) => {

@@ -4,6 +4,10 @@ name: auto-merge
 # once the required checks on main's branch protection pass. Stacked PRs (base
 # other than main) are left alone: their base branch has no required checks,
 # so auto-merge would merge them immediately, before any CI ran.
+#
+# Dependabot PRs are auto-merged only for patch and minor updates: a major
+# version (or an update Dependabot cannot classify) waits for a human review.
+# For a grouped PR the update type is the largest in the group.
 
 on:
   pull_request:
@@ -19,7 +23,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
+      - name: Dependabot update type
+        id: deps
+        if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
       - name: Enable squash auto-merge
+        if: ${{ github.event.pull_request.user.login != 'dependabot[bot]' || steps.deps.outputs.update-type == 'version-update:semver-patch' || steps.deps.outputs.update-type == 'version-update:semver-minor' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh pr merge ${{ github.event.pull_request.number }} --auto --squash --repo ${{ github.repository }}

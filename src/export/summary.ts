@@ -20,8 +20,11 @@ export function metricRows(m: Metrics): MetricRow[] {
         { label: "Request latency p50 / p95 / max", value: `${fmtMs(m.requestLatency.p50Ms)} / ${fmtMs(m.requestLatency.p95Ms)} / ${fmtMs(m.requestLatency.maxMs)}` },
         { label: "Time to first token p50 / p95", value: `${fmtMs(m.timeToFirstToken.p50Ms)} / ${fmtMs(m.timeToFirstToken.p95Ms)}` },
         {
-            label: "Tokens (overall rate)",
-            value: `${m.tokens.total} (${fmtRate(m.tokens.overallRate)} tok/s)${m.tokens.backendReported !== null ? `, backend-reported ${m.tokens.backendReported}` : ""}`,
+            label: "Tokens (decode rate)",
+            value:
+                m.tokens.provenance === "unavailable"
+                    ? `— (${m.tokens.chunks > 0 ? `${m.tokens.chunks} output chunks, no token count reported` : "no token events"})`
+                    : `${m.tokens.total} ${m.tokens.provenance} (${fmtRate(m.tokens.overallRate)} tok/s over ${fmtMs(m.tokens.activeDecodeMs)} of decode)${m.tokens.chunks > 0 ? `, ${m.tokens.chunks} output chunks not counted` : ""}`,
         },
         { label: "Errors", value: m.errors.total === 0 ? "0" : `${m.errors.total} (${errorTypes})` },
         { label: "Agents spawned / completed", value: `${m.agents.spawned} / ${m.agents.completed}` },

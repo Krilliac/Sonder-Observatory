@@ -85,7 +85,11 @@ export function layoutTopology(graph: TopologyGraph, options: LayoutOptions = {}
     const margin = options.margin ?? 60;
 
     const depths = agentDepths(graph);
-    const maxDepth = Math.max(-1, ...depths.values());
+    // Loops, not Math.max(...list): spreading throws RangeError past ~125k values.
+    let maxDepth = -1;
+    for (const d of depths.values()) {
+        maxDepth = Math.max(maxDepth, d);
+    }
     const columnsNodes: { label: string; nodes: TopologyNode[] }[] = [];
     for (let d = 0; d <= maxDepth; d += 1) {
         columnsNodes.push({ label: d === 0 ? "Agents" : `Agents (depth ${d})`, nodes: [] });
@@ -105,7 +109,10 @@ export function layoutTopology(graph: TopologyGraph, options: LayoutOptions = {}
         }
     }
 
-    const tallest = Math.max(1, ...columnsNodes.map((c) => c.nodes.length));
+    let tallest = 1;
+    for (const c of columnsNodes) {
+        tallest = Math.max(tallest, c.nodes.length);
+    }
     const height = margin * 2 + (tallest - 1) * rowGap;
     const width = margin * 2 + Math.max(0, columnsNodes.length - 1) * columnGap;
     const positions = new Map<string, Point>();

@@ -113,6 +113,7 @@ test.describe("keyboard navigation", () => {
         const events = page.getByRole("tab", { name: "Events" });
         const diag = page.getByRole("tab", { name: "Diagnostics" });
         const agents = page.getByRole("tab", { name: "Agents" });
+        const compare = page.getByRole("tab", { name: "Compare" });
         // Roving tabindex: only the active tab is a Tab stop.
         await expect(overview).toHaveAttribute("tabindex", "0");
         await expect(agents).toHaveAttribute("tabindex", "-1");
@@ -124,13 +125,16 @@ test.describe("keyboard navigation", () => {
         await expect(overview).toHaveAttribute("tabindex", "-1");
         await expect(page.locator("#view-events")).toBeVisible();
         await page.keyboard.press("End");
-        await expect(agents).toBeFocused();
-        await expect(page.locator("#view-agents")).toBeVisible();
+        await expect(compare).toBeFocused();
+        await expect(page.locator("#view-compare")).toBeVisible();
         await page.keyboard.press("ArrowRight"); // wraps
         await expect(overview).toBeFocused();
         await expect(overview).toHaveAttribute("aria-selected", "true");
         await page.keyboard.press("ArrowLeft"); // wraps back
-        await expect(agents).toHaveAttribute("aria-selected", "true");
+        await expect(compare).toHaveAttribute("aria-selected", "true");
+        await page.keyboard.press("ArrowLeft");
+        await expect(agents).toBeFocused();
+        await expect(page.locator("#view-agents")).toBeVisible();
         await page.keyboard.press("ArrowLeft");
         await expect(diag).toBeFocused();
         await expect(page.locator("#view-diagnostics")).toBeVisible();
