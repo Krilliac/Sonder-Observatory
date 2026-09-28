@@ -13,6 +13,14 @@ updates:
         update-types: [minor, patch]
     commit-message:
       prefix: deps
+    ignore:
+      # `typescript` stays on 6.x only as the compiler API typescript-eslint
+      # loads; it has no TS 7 support yet (8.71 peers typescript <6.1). The
+      # project type-checks with TS 7 via the `typescript-native` alias
+      # (npm run typecheck), which Dependabot still updates. Drop this once
+      # typescript-eslint supports TS 7.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: cargo
     directory: /src-tauri
