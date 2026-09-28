@@ -78,7 +78,7 @@ describe("design tokens", () => {
     });
 
     it("renderer CSS uses tokens, not hardcoded colours", () => {
-        for (const file of ["../src/renderer/styles.css", "../src/renderer/views.css", "../src/renderer/eventTable.css"]) {
+        for (const file of ["../src/renderer/styles.css", "../src/renderer/views.css", "../src/renderer/eventTable.css", "../src/inference3d/inference3d.css"]) {
             const css = read(file).replace(/\/\*[\s\S]*?\*\//g, "");
             expect(css.match(/#[0-9a-f]{3,8}\b/gi) ?? [], file).toEqual([]);
             expect(css.match(/\b(?:rgba?|hsla?)\(/gi) ?? [], file).toEqual([]);

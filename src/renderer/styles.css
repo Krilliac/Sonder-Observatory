@@ -175,7 +175,8 @@ kbd {
 
 .topbar h1 {
     font-size: var(--font-size-lg);
-    letter-spacing: 0.02em;
+    font-weight: var(--font-weight-bold);
+    letter-spacing: -0.01em;
     white-space: nowrap;
 }
 
@@ -317,6 +318,71 @@ kbd {
 
 .conn[data-tone="error"]::before {
     color: var(--semantic-error);
+}
+
+/* Header status chips (design board "Status indicators"): dot + word, never colour alone. */
+.chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-3);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-elevated);
+    padding: var(--space-1) var(--space-5);
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-medium);
+    white-space: nowrap;
+}
+
+.chip:empty {
+    display: none;
+}
+
+.chip::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--color-muted);
+    flex: none;
+}
+
+.chip[data-tone="ok"] {
+    border-color: color-mix(in srgb, var(--semantic-healthy) 55%, var(--color-border));
+}
+
+.chip[data-tone="ok"]::before {
+    background: var(--semantic-healthy);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--semantic-healthy) 25%, transparent);
+}
+
+.chip[data-tone="live"] {
+    border-color: color-mix(in srgb, var(--semantic-token) 55%, var(--color-border));
+}
+
+.chip[data-tone="live"]::before {
+    background: var(--semantic-token);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--semantic-token) 25%, transparent);
+}
+
+.chip[data-tone="warn"]::before {
+    background: var(--semantic-warning);
+}
+
+.chip[data-tone="error"]::before {
+    background: var(--semantic-error);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+    .chip[data-tone="live"]::before {
+        animation: chip-live 2s ease-in-out infinite;
+    }
+}
+
+@keyframes chip-live {
+    50% {
+        box-shadow: 0 0 0 5px color-mix(in srgb, var(--semantic-token) 10%, transparent);
+    }
 }
 
 .workspace {
@@ -819,6 +885,98 @@ kbd {
     gap: var(--space-4);
 }
 
+/* Metric strip (above the tabs): value + sparkline per metric. */
+.metric-strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: var(--space-4);
+}
+
+.strip-card {
+    --tone: var(--semantic-token);
+    min-width: 0;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-4) var(--space-5);
+}
+
+.strip-card.tone-latency {
+    --tone: var(--semantic-activation);
+}
+
+.strip-card.tone-kv {
+    --tone: var(--semantic-attention);
+}
+
+.strip-card.tone-model {
+    --tone: var(--semantic-healthy);
+}
+
+.strip-card.tone-agent {
+    --tone: var(--semantic-warning);
+}
+
+.strip-card h3 {
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-medium);
+    color: var(--color-muted);
+}
+
+.strip-main {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: var(--space-3);
+    min-height: 34px;
+}
+
+.strip-value {
+    font-size: var(--font-size-xxl);
+    font-weight: var(--font-weight-bold);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+    line-height: 1.2;
+    flex: none;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tone-model .strip-value {
+    font-size: var(--font-size-lg);
+    color: var(--color-link);
+}
+
+.spark {
+    flex: 0 1 96px;
+    min-width: 32px;
+    width: 96px;
+    overflow: visible;
+}
+
+.spark-line {
+    fill: none;
+    stroke: var(--tone);
+    stroke-width: 1.5;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+}
+
+.spark-area {
+    fill: color-mix(in srgb, var(--tone) 16%, transparent);
+    stroke: none;
+}
+
+.strip-sub {
+    font-size: var(--font-size-xs);
+    color: var(--color-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .card {
     padding: var(--space-4) var(--space-5);
     border-top: 3px solid var(--color-primary);
@@ -829,12 +987,13 @@ kbd {
     font-size: var(--font-size-sm);
     color: var(--color-muted);
     font-weight: var(--font-weight-medium);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
 }
 
 .card .value {
     font-size: var(--font-size-xl);
+    font-weight: var(--font-weight-bold);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
     margin: var(--space-2) 0 var(--space-1);
 }
 

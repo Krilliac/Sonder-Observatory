@@ -4,7 +4,7 @@
  * - `?connect=<url>` (repeatable) adds a live producer; `?ws=<url>` is the
  *   legacy alias and is added after the connect URLs;
  * - `?fixture=0` starts without the synthetic fixture;
- * - `?view=overview|events|diagnostics|agents|compare` picks the tab;
+ * - `?view=overview|events|3d|diagnostics|agents|compare` picks the tab;
  * - `?theme=light|dark` overrides the theme for this load.
  *
  * Tokens never travel in URLs: `token` and `access_token` parameters are

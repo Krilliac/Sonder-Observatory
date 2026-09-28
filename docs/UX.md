@@ -208,6 +208,10 @@ Recommended mappings:
 
 Every mapping needs a visible legend.
 
+The 3D Inference tab applies these to the reported request pipeline (depth =
+stages, rows = model × node, size = backend tokens, pulse = stage event rate,
+opacity = age); see [3D Inference notes](integration/inference3d.md).
+
 ## Visual system
 
 Base direction from the concept board:

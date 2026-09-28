@@ -23,7 +23,11 @@
     background: var(--color-surface);
     border-color: var(--color-border);
     color: var(--color-text);
-    box-shadow: inset 0 2px 0 var(--color-primary);
+    box-shadow: inset 0 -2px 0 var(--color-primary);
+}
+
+.tab:hover:not(.active) {
+    color: var(--color-text);
 }
 
 /* Diagnostics evidence highlighting */

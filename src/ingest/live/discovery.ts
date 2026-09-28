@@ -98,10 +98,10 @@ export function corsHint(origin: string = viewerOrigin()): string {
     );
 }
 
-type BoundedRead = { ok: true; text: string } | { ok: false; error: string };
+export type BoundedRead = { ok: true; text: string } | { ok: false; error: string };
 
 /** Reads a response body as text, refusing more than `limit` bytes. */
-async function readBoundedText(response: Response, limit: number): Promise<BoundedRead> {
+export async function readBoundedText(response: Response, limit: number): Promise<BoundedRead> {
     const tooLarge = { ok: false as const, error: `larger than ${Math.round(limit / 1024)} KiB` };
     const declared = Number(response.headers.get("content-length"));
     if (Number.isFinite(declared) && declared > limit) {

@@ -1,0 +1,673 @@
+/* 3D Inference view. Token-only colours (design/tokens.json); tests/tokens.test.ts
+   checks this file for colour literals like the renderer CSS. */
+
+.i3d {
+    /* Containing block for .sr-only text inside the scrolling tab, so it cannot stretch the page. */
+    position: relative;
+    container-type: inline-size;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    min-width: 0;
+}
+
+.i3d:focus {
+    outline: none;
+}
+
+.i3d-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--space-3) var(--space-5);
+}
+
+.i3d-head h2 {
+    font-size: var(--font-size-xl);
+    font-weight: var(--font-weight-bold);
+    letter-spacing: -0.01em;
+}
+
+.i3d-lede,
+.i3d-summary {
+    margin: 0;
+}
+
+/* Camera toolbar floats over the scene's top-right corner. */
+.i3d-camera {
+    position: absolute;
+    top: var(--space-4);
+    right: var(--space-4);
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: var(--space-2);
+    max-width: calc(100% - 2 * var(--space-4));
+}
+
+.i3d-camera button {
+    background: color-mix(in srgb, var(--color-surface) 88%, transparent);
+}
+
+.i3d-cam-btn {
+    min-width: 30px;
+    justify-content: center;
+}
+
+/* ------------------------------------------------------------ capabilities */
+
+.i3d-caps {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-4) var(--space-5);
+}
+
+.i3d-caps h3,
+.i3d-block h3,
+.i3d-entities h3 {
+    font-size: var(--font-size-md);
+    font-weight: var(--font-weight-bold);
+    margin-bottom: var(--space-3);
+}
+
+.i3d-caps-rows {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+}
+
+.i3d-caps-who {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--space-3);
+    margin-bottom: var(--space-2);
+    overflow-wrap: anywhere;
+}
+
+.i3d-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.i3d-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-pill);
+    padding: var(--space-1) var(--space-4);
+    font-size: var(--font-size-sm);
+    background: var(--color-background);
+}
+
+.i3d-chip::before {
+    font-size: var(--font-size-xs);
+    color: var(--color-muted);
+}
+
+.i3d-chip-status {
+    color: var(--color-muted);
+}
+
+.i3d-chip[data-status="available"] {
+    border-color: var(--semantic-healthy);
+}
+
+.i3d-chip[data-status="available"]::before {
+    content: "●";
+    color: var(--semantic-healthy);
+}
+
+.i3d-chip[data-status="available"] .i3d-chip-status {
+    color: var(--color-textSuccess);
+}
+
+.i3d-chip[data-status="unavailable"]::before {
+    content: "○";
+}
+
+.i3d-chip[data-status="waiting"] {
+    border-color: var(--semantic-warning);
+}
+
+.i3d-chip[data-status="waiting"]::before {
+    content: "◐";
+    color: var(--semantic-warning);
+}
+
+.i3d-chip[data-status="not-applicable"] {
+    border-style: dashed;
+}
+
+.i3d-chip[data-status="not-applicable"]::before {
+    content: "–";
+}
+
+.i3d-reasons {
+    margin-top: var(--space-3);
+    font-size: var(--font-size-sm);
+}
+
+.i3d-reasons summary {
+    cursor: pointer;
+    color: var(--color-link);
+}
+
+.i3d-reasons ul,
+.i3d-notice ul,
+.i3d-unavailable ul {
+    margin: var(--space-2) 0 0;
+    padding-left: var(--space-6);
+}
+
+.i3d code {
+    font-family: var(--font-family-mono);
+    font-size: 0.92em;
+    background: var(--color-elevated);
+    border-radius: var(--radius-sm);
+    padding: 0 var(--space-2);
+}
+
+/* ------------------------------------------------------------ body */
+
+.i3d-body {
+    display: grid;
+    grid-template-columns: minmax(220px, 270px) minmax(0, 1fr);
+    grid-template-areas: "rail stage";
+    gap: var(--space-4);
+    min-width: 0;
+}
+
+.i3d-rail {
+    grid-area: rail;
+}
+
+.i3d-stage {
+    grid-area: stage;
+}
+
+/* The tab sits beside the inspector, so the rail stacks by the view's own width. */
+@container (max-width: 860px) {
+    .i3d-body {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-areas: "stage" "rail";
+    }
+
+    .i3d-rail {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        align-items: start;
+    }
+}
+
+.i3d-rail {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    min-width: 0;
+}
+
+.i3d-block {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-4) var(--space-5);
+}
+
+.i3d-block h4 {
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-medium);
+    color: var(--color-muted);
+    margin: var(--space-4) 0 var(--space-2);
+}
+
+/* Stage list: a vertical pipeline; the connector line is the depth axis. */
+.i3d-stages,
+.i3d-layers {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.i3d-stages > li {
+    position: relative;
+    padding-left: var(--space-6);
+}
+
+.i3d-stages > li::before {
+    content: "";
+    position: absolute;
+    left: 5px;
+    top: 0;
+    bottom: 0;
+    border-left: 1px dashed var(--color-borderStrong);
+}
+
+.i3d-stages > li::after {
+    content: "";
+    position: absolute;
+    left: 1px;
+    top: 13px;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--color-background);
+    border: 2px solid var(--semantic-token);
+}
+
+.i3d-stages > li[data-stage="route"]::after {
+    border-color: var(--semantic-attention);
+}
+
+.i3d-stages > li[data-stage="layers"]::after {
+    border-color: var(--semantic-activation);
+}
+
+.i3d-stages > li:first-child::before {
+    top: 16px;
+}
+
+.i3d-stages > li:last-of-type::before {
+    bottom: calc(100% - 16px);
+}
+
+.i3d-stage-btn,
+.i3d-layer-btn,
+.i3d-output-row {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0;
+    white-space: normal;
+    text-align: left;
+    background: transparent;
+    border-color: transparent;
+    padding: var(--space-2) var(--space-4);
+    margin: var(--space-1) 0;
+}
+
+.i3d-stage-btn[aria-pressed="true"],
+.i3d-layer-btn[aria-pressed="true"] {
+    border-color: var(--color-primary);
+    background: var(--color-elevated);
+}
+
+.i3d-stage-name {
+    font-weight: var(--font-weight-medium);
+}
+
+.i3d-stage-meta,
+.i3d-output-meta {
+    font-size: var(--font-size-sm);
+    color: var(--color-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.i3d-stage-absent {
+    padding: var(--space-2) var(--space-4) 0 var(--space-6);
+}
+
+.i3d-layers {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    gap: 0 var(--space-2);
+}
+
+.i3d-layer-btn {
+    font-size: var(--font-size-sm);
+    font-variant-numeric: tabular-nums;
+}
+
+.i3d-output-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 260px;
+    overflow: auto;
+}
+
+.i3d-output-row {
+    border-bottom: 1px solid var(--color-border);
+    border-radius: 0;
+}
+
+.i3d-output-req {
+    font-family: var(--font-family-mono);
+    font-size: var(--font-size-sm);
+}
+
+.i3d-output-text {
+    font-family: var(--font-family-mono);
+    font-size: var(--font-size-sm);
+    color: var(--color-link);
+    overflow-wrap: anywhere;
+}
+
+.i3d-prob-list {
+    list-style: none;
+    margin: var(--space-2) 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+}
+
+.i3d-prob {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 90px 48px;
+    align-items: center;
+    gap: var(--space-3);
+    font-size: var(--font-size-sm);
+}
+
+.i3d-prob-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-family-mono);
+}
+
+.i3d-prob-bar {
+    height: 6px;
+    border-radius: var(--radius-pill);
+    background: var(--color-elevated);
+    overflow: hidden;
+}
+
+.i3d-prob-fill {
+    display: block;
+    height: 100%;
+    background: var(--semantic-warning);
+}
+
+.i3d-prob-value {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.i3d-unavailable {
+    font-size: var(--font-size-sm);
+    color: var(--color-muted);
+    border-left: 2px solid var(--color-borderStrong);
+    padding-left: var(--space-4);
+}
+
+.i3d-unavailable strong {
+    color: var(--color-text);
+}
+
+/* ------------------------------------------------------------ scene */
+
+.i3d-stage {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    min-width: 0;
+}
+
+.i3d-notices:empty {
+    display: none;
+}
+
+.i3d-notices {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+}
+
+.i3d-notice {
+    font-size: var(--font-size-sm);
+    border: 1px solid var(--color-borderStrong);
+    border-left: 3px solid var(--semantic-activation);
+    border-radius: var(--radius-md);
+    background: var(--color-surface);
+    padding: var(--space-3) var(--space-5);
+}
+
+.i3d-canvas-wrap {
+    position: relative;
+    height: clamp(360px, 56vh, 680px);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    background:
+        radial-gradient(ellipse at 55% 45%, color-mix(in srgb, var(--semantic-token) 10%, transparent), transparent 65%),
+        var(--color-background);
+}
+
+.i3d-canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    cursor: grab;
+    touch-action: none;
+}
+
+.i3d-canvas[hidden] {
+    display: none;
+}
+
+.i3d-canvas:active {
+    cursor: grabbing;
+}
+
+.i3d-labels {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    overflow: hidden;
+}
+
+.i3d-label {
+    position: absolute;
+    left: 0;
+    top: 0;
+    white-space: nowrap;
+    font-size: var(--font-size-xs);
+    color: var(--color-muted);
+    translate: -50% -100%;
+}
+
+.i3d-label-stage {
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-bold);
+    color: var(--color-text);
+    background: color-mix(in srgb, var(--color-background) 70%, transparent);
+    border-radius: var(--radius-sm);
+    padding: 0 var(--space-2);
+}
+
+.i3d-label-layer {
+    color: var(--color-link);
+}
+
+.i3d-label-lane {
+    translate: 0 -120%;
+    font-family: var(--font-family-mono);
+    color: var(--color-text);
+}
+
+.i3d-label-node {
+    translate: 0 -100%;
+    font-weight: var(--font-weight-bold);
+    color: var(--color-muted);
+    letter-spacing: 0.02em;
+}
+
+.i3d-fallback {
+    height: 100%;
+    overflow: auto;
+    padding: var(--space-4);
+}
+
+.i3d-fallback[hidden] {
+    display: none;
+}
+
+.i3d-legend {
+    font-size: var(--font-size-sm);
+}
+
+.i3d-sw {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    vertical-align: -1px;
+}
+
+.i3d-sw-depth {
+    border-radius: 0;
+    height: 2px;
+    width: 18px;
+    background: linear-gradient(90deg, var(--semantic-attention), var(--semantic-token), var(--semantic-healthy));
+}
+
+.i3d-sw-lane {
+    border-radius: 0;
+    height: 2px;
+    width: 18px;
+    background: var(--color-borderStrong);
+}
+
+.i3d-sw-active {
+    background: var(--semantic-token);
+}
+
+.i3d-sw-runtime {
+    background: var(--semantic-attention);
+}
+
+.i3d-sw-completed {
+    background: var(--semantic-healthy);
+}
+
+.i3d-sw-failed {
+    background: var(--semantic-error);
+}
+
+.i3d-sw-cancelled {
+    background: var(--semantic-warning);
+}
+
+.i3d-sw-size {
+    background: radial-gradient(circle, var(--color-muted) 30%, transparent 32%), radial-gradient(circle, transparent 55%, var(--color-muted) 57%, var(--color-muted) 64%, transparent 66%);
+}
+
+.i3d-sw-chunk {
+    width: 6px;
+    height: 6px;
+    margin: 0 3px;
+    background: var(--semantic-activation);
+}
+
+.i3d-sw-pulse {
+    border-radius: 2px;
+    background: transparent;
+    border: 2px solid var(--semantic-token);
+}
+
+.i3d-sw-age {
+    background: linear-gradient(90deg, var(--semantic-healthy), transparent);
+    border-radius: 2px;
+    width: 18px;
+}
+
+.i3d-sw-kv {
+    border-radius: 2px;
+    border: 1px solid var(--semantic-token);
+    background: linear-gradient(0deg, var(--semantic-token) 45%, transparent 45%);
+}
+
+.i3d-sw-layer {
+    border-radius: 1px;
+    width: 4px;
+    background: var(--semantic-activation);
+}
+
+.i3d-sw-op {
+    border-radius: 2px;
+    background: var(--semantic-attention);
+}
+
+.i3d-sw-prob {
+    border-radius: 1px;
+    height: 6px;
+    background: var(--semantic-warning);
+}
+
+.i3d-sw-selected {
+    border-radius: 2px;
+    border: 2px solid var(--color-markSelected);
+}
+
+/* ------------------------------------------------------------ selection + table */
+
+.i3d-selection {
+    font-size: var(--font-size-sm);
+}
+
+.i3d-selection p {
+    margin: 0 0 var(--space-2);
+}
+
+.i3d-evidence {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1) var(--space-4);
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.i3d-entities {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-4) var(--space-5);
+}
+
+.i3d-table-wrap {
+    max-height: 320px;
+    overflow: auto;
+}
+
+.i3d-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--font-size-sm);
+}
+
+.i3d-table th {
+    text-align: left;
+    font-weight: var(--font-weight-medium);
+    color: var(--color-muted);
+    position: sticky;
+    top: 0;
+    background: var(--color-surface);
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+}
+
+.i3d-table td {
+    padding: var(--space-1) var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+    vertical-align: top;
+    font-variant-numeric: tabular-nums;
+}
+
+.i3d-table tr.selected td {
+    background: var(--color-elevated);
+}
+
+.i3d-fallback-table th[scope="row"] {
+    position: static;
+    font-family: var(--font-family-mono);
+}

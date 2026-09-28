@@ -1,14 +1,17 @@
 import fixtureText from "../../fixtures/synthetic-session.ndjson?raw";
 import type { ComparePanel } from "../compare/panel";
+import type { Inference3DPanel } from "../inference3d/inference3dPanel";
 import { FindingsController, renderFindingsPanel, runDiagnostics } from "../diagnostics";
 import { renderInspector } from "../inspector/inspector";
 import { LiveConnectionManager, type ProducerConnection, type ProducerEndpointInput } from "../ingest/live/manager";
 import type { TransportPreference } from "../ingest/live/endpoint";
+import type { HealthBackend } from "../ingest/live/health";
 import type { ObservatoryEvent } from "../protocol/events";
 import { describeRange, isFullRange, type ExportRange } from "../export/filter";
 import { EXPORT_FORMATS } from "../export/save";
 import { EVENT_CLASSES, isErrorEvent, type EventClass } from "../query/classify";
 import { deriveMetrics, type Metrics } from "../query/metrics";
+import { stripSeries } from "../query/series";
 import { loadRecording, RECORDING_EXTENSION } from "../recording/sobs";
 import { ReplayCursor } from "../replay/controller";
 import { SessionStore } from "../replay/session";
@@ -21,6 +24,7 @@ import { mountDropZone, RECORDING_FILE_EXTENSIONS } from "./dropZone";
 import { EventTable } from "./eventTable";
 import { ExportDialog, type ExportChoice } from "./exportDialog";
 import { fmtBytes, fmtMs, fmtPct, fmtRelNs } from "./format";
+import { renderMetricStrip, stripItems } from "./metricStrip";
 import { errorSearchStart, findMatching, producersInSession, syntheticBannerText, timelineSummaryText } from "./navigation";
 import { Onboarding } from "./onboarding";
 import type { ObservatoryPanel, PanelContext } from "./panels";
@@ -38,6 +42,7 @@ const SPEEDS = [0.25, 0.5, 1, 2, 4, 8];
 const VIEWS = [
     { id: "overview", title: "Overview" },
     { id: "events", title: "Events" },
+    { id: "3d", title: "3D Inference" },
     { id: "diagnostics", title: "Diagnostics" },
     { id: "agents", title: "Agents" },
     { id: "compare", title: "Compare" },
@@ -137,6 +142,10 @@ export class ObservatoryApp {
      */
     private compare: ComparePanel | null = null;
     private compareLoading = false;
+    /** 3D Inference tab (src/inference3d, with three.js): its own lazy chunk, loaded on first use. */
+    private inference3d: Inference3DPanel | null = null;
+    private inference3dLoading = false;
+    private stripStamp = "";
     /** Last export result or failure, shown in #warnings until the next load. */
     private exportNotice: string | null = null;
     /** Bumped per load so a superseded chunked load is discarded. */
@@ -225,6 +234,7 @@ export class ObservatoryApp {
         this.theme?.bindToggle(byId<HTMLButtonElement>("theme-toggle"));
         this.theme?.onChange(() => {
             this.timelineView?.invalidatePalette();
+            this.inference3d?.invalidatePalette();
             this.render();
         });
         this.manager.subscribe((connections) => {
@@ -308,6 +318,8 @@ export class ObservatoryApp {
                 h(
                     "div",
                     { class: "badges" },
+                    h("span", { id: "conn-chip", class: "chip", "data-tone": "idle" }),
+                    h("span", { id: "mode-chip", class: "chip", "data-tone": "idle" }),
                     h("span", { id: "source-badge", class: "badge" }),
                     h("span", { id: "synthetic-badge", class: "badge badge-synthetic", hidden: true, text: "SYNTHETIC DATA" }),
                     h("span", { id: "capture-badge", class: "badge" }),
@@ -350,6 +362,7 @@ export class ObservatoryApp {
                     h(
                         "div",
                         { id: "analysis", class: "analysis" },
+                        h("section", { id: "metric-strip", class: "metric-strip", "aria-label": "Key metrics at the replay cursor" }),
                         h(
                             "div",
                             { class: "tabs", role: "tablist", "aria-label": "Views" },
@@ -422,6 +435,7 @@ export class ObservatoryApp {
                                         h("div", { id: "table-wrap", class: "table-wrap", tabindex: 0, role: "region", "aria-label": "Event table (Up and Down move the selection)" }),
                                     ),
                                 ),
+                                h("div", { id: "view-3d", class: "view view-3d", role: "tabpanel", "aria-labelledby": "tab-3d" }),
                                 h("div", { id: "view-diagnostics", class: "view", role: "tabpanel", "aria-labelledby": "tab-diagnostics" }),
                                 h("div", { id: "view-agents", class: "view", role: "tabpanel", "aria-labelledby": "tab-agents" }),
                                 h("div", { id: "view-compare", class: "view view-compare", role: "tabpanel", "aria-labelledby": "tab-compare" }),
@@ -984,6 +998,7 @@ export class ObservatoryApp {
         this.renderHeader();
         this.renderSources();
         this.renderWarnings();
+        this.renderStrip(visible, metrics);
         this.renderViews();
         if (this.view === "overview") {
             this.renderCards(metrics);
@@ -1023,6 +1038,7 @@ export class ObservatoryApp {
         this.renderDiagnostics();
         this.renderTopology();
         this.renderCompare();
+        this.render3d();
     }
 
     /** Hidden tabs are not rendered; the panel throttles re-analysis of a growing live session. */
@@ -1052,6 +1068,74 @@ export class ObservatoryApp {
             this.compare.render(container, this.panelContext(this.cursor.visibleEvents()));
         } catch (error) {
             container.replaceChildren(h("p", { class: "warning", text: `Compare failed: ${(error as Error).message}` }));
+        }
+    }
+
+    /** Metric strip: redrawn only when the cursor or the session changes. */
+    private renderStrip(visible: readonly ObservatoryEvent[], metrics: Metrics): void {
+        const stamp = `${this.store.events.length}|${visible.length}|${this.cursor.originNs}`;
+        if (stamp === this.stripStamp) {
+            return;
+        }
+        this.stripStamp = stamp;
+        renderMetricStrip(byId("metric-strip"), stripItems(metrics, stripSeries(visible, metrics)));
+    }
+
+    /** Health backends per producer instance (live connections that fetched their health link). */
+    private healthByInstance(): { map: Map<string, readonly HealthBackend[]>; stamp: string } {
+        const map = new Map<string, readonly HealthBackend[]>();
+        for (const c of this.connections) {
+            const instance = c.identity?.instance_id;
+            if (instance && c.health) {
+                map.set(instance, c.health.backends);
+            }
+        }
+        return { map, stamp: [...map.entries()].map(([k, v]) => `${k}:${v.map((b) => `${b.name}=${b.capabilities.join("+")}`).join(",")}`).join(";") };
+    }
+
+    /** 3D Inference tab: loads its chunk (and three.js) on first use; hidden tabs stop rendering. */
+    private render3d(): void {
+        const container = byId("view-3d");
+        if (container.hidden) {
+            this.inference3d?.setActive(false);
+            return;
+        }
+        if (!this.inference3d) {
+            if (!this.inference3dLoading) {
+                this.inference3dLoading = true;
+                container.replaceChildren(h("p", { class: "muted", text: "Loading the 3D view…" }));
+                import("../inference3d/inference3dPanel").then(
+                    ({ Inference3DPanel }) => {
+                        this.inference3d = new Inference3DPanel({
+                            onInspect: (event) => this.select(event),
+                            onEvidence: (ids) => {
+                                this.highlighted = new Set(ids);
+                            },
+                        });
+                        container.replaceChildren(this.inference3d.element);
+                        this.render();
+                    },
+                    (error: unknown) => {
+                        this.inference3dLoading = false;
+                        container.replaceChildren(h("p", { class: "warning", text: `The 3D view failed to load: ${(error as Error)?.message ?? String(error)}` }));
+                    },
+                );
+            }
+            return;
+        }
+        this.inference3d.setActive(true);
+        const health = this.healthByInstance();
+        try {
+            this.inference3d.update({
+                all: this.store.events,
+                visible: this.cursor.visibleEvents(),
+                nowNs: this.cursor.events.length > 0 ? this.cursor.originNs + this.cursor.position : null,
+                health: health.map,
+                healthStamp: health.stamp,
+                relativeTime: (ns) => fmtRelNs(ns - this.cursor.originNs),
+            });
+        } catch (error) {
+            container.append(h("p", { class: "warning", text: `3D view failed: ${(error as Error).message}` }));
         }
     }
 
@@ -1166,6 +1250,7 @@ export class ObservatoryApp {
         const live = this.liveSummary();
         status.textContent = `live: ${live.label}`;
         status.dataset.tone = live.tone;
+        this.renderChips(live.tone);
         const save = byId<HTMLButtonElement>("save-btn");
         save.disabled = s.events.length === 0;
         byId<HTMLButtonElement>("export-btn").disabled = s.events.length === 0;
@@ -1174,6 +1259,48 @@ export class ObservatoryApp {
                 ? `Save live session (${s.events.length} events${s.droppedByRetention > 0 ? `, ${s.droppedByRetention} older dropped` : ""})`
                 : `Save (${RECORDING_EXTENSION})`;
         byId<HTMLButtonElement>("play-btn").textContent = this.playing ? "Pause" : "Play";
+    }
+
+    /**
+     * Header status chips (design board "Status indicators"): the connection
+     * and whether the view follows live data or replays. Words carry the
+     * state; the dot colour only repeats it.
+     */
+    private renderChips(liveTone: string): void {
+        const conn = byId("conn-chip");
+        const mode = byId("mode-chip");
+        const n = this.connections.length;
+        let connText = "";
+        let connTone = "idle";
+        if (n > 0) {
+            connTone = liveTone === "ok" ? "ok" : liveTone;
+            connText = liveTone === "ok" ? `Connected · ${n} producer${n === 1 ? "" : "s"}` : liveTone === "error" ? "Connection failed" : "Connecting";
+        } else if (this.closed.size > 0) {
+            connText = "Disconnected";
+        } else if (this.store.source === "file" || this.store.source === "fixture") {
+            connText = "Offline · recording";
+        }
+        let modeText = "";
+        let modeTone = "idle";
+        if (this.store.events.length > 0) {
+            if (this.store.source === "live" && this.follow) {
+                modeText = "Live";
+                modeTone = "live";
+            } else if (this.playing) {
+                modeText = `Replaying · ${this.speed}×`;
+                modeTone = "live";
+            } else {
+                modeText = this.follow ? "Replay · at end" : "Replay · paused at cursor";
+            }
+        }
+        if (conn.textContent !== connText || conn.dataset.tone !== connTone) {
+            conn.textContent = connText;
+            conn.dataset.tone = connTone;
+        }
+        if (mode.textContent !== modeText || mode.dataset.tone !== modeTone) {
+            mode.textContent = modeText;
+            mode.dataset.tone = modeTone;
+        }
     }
 
     /** #warnings is a polite live region: it is rewritten only when its text changes. */

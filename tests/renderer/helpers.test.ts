@@ -87,6 +87,7 @@ function connection(overrides: Partial<ProducerConnection> = {}): ProducerConnec
         hasToken: false,
         streamUrl: "http://127.0.0.1:11437/v1/telemetry/sse",
         discovery: null,
+        health: null,
         identity: { name: "sonder-inference", version: "0.3.0", node_id: "host", instance_id: "tel-0123456789abcdef", role: "inference", synthetic: true },
         status: status(),
         ...overrides,

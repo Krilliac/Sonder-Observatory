@@ -169,6 +169,39 @@ first output to the end of the request), never by session wall time.
 - `recording.rotated`
 - `recording.completed`
 
+## 3D Inference: reserved and proposed events
+
+Status: **reserved / not yet emitted by Sonder Inference** (its
+`docs/TELEMETRY.md` "Not emitted yet" and `docs/OBSERVATORY_CONTRACT.md`
+"Deep backend mode", checked 2026-09-27 at `557d625`). The event names below
+are already in this taxonomy; the contract docs define no attributes for
+them, so the attribute shapes are **proposed** by Observatory for
+Sonder-Inference to implement or change. Observatory's 3D Inference tab reads
+exactly these shapes and draws nothing when they are absent
+(docs/integration/inference3d.md). Emit them only when the backend exposes a
+meaningful mapping (contract: "Do not fake architecture detail for
+visualization").
+
+| Event | Level | Proposed attributes (envelope carries `request_id`, `model_instance_id`, `device_id`) |
+| --- | --- | --- |
+| `backend.layer.exited` | deep | `layer` int (0-based), `layer_count` int, `phase` str (`prefill` / `decode`), `step` int (generated-token index; 0 for prefill), `duration_ms` num; optional `tokens` int (tokens processed in this pass), `activation_rms` num, `attention_entropy` num (nats). Only values the backend measures. |
+| `backend.layer.entered` | deep | optional; same `layer`, `phase`, `step`. Observatory counts it as layer activity only. |
+| `backend.operator.completed` | deep | `operator` str (backend's own name, e.g. `attention`, `mlp`, `rms_norm`), `layer` int or null, `phase` str, `step` int, `duration_ms` num |
+| `inference.sampling.candidates` | deep | per sampled token, only on backends with `token_logits` (Sonder's sampler): `index` int (same as the `inference.token.generated` `index`), `sampled_token_id` int, `candidates` arr of `{token_id int, probability num, text str (only with text capture)}`, most probable first, probabilities as the sampler chain saw them (same basis as `inference.token.generated.probability`) |
+
+What Observatory reads to explain an absent panel, per producer: the backend
+named by `session.created.backend` / `model.load.*.backend`; its
+capabilities from `backend.registered.capabilities` or, for live
+connections, the discovery `links.health` document (`backends[].capabilities`,
+same origin only); `request.started.sampler`; and the highest
+`sampling.level` seen. Layer planes need a backend advertising
+`layer_telemetry` plus `--telemetry-level deep`; token probabilities need
+`token_logits` (`unit: "token"` events carry `probability`); top
+alternatives need `inference.sampling.candidates`. Sonder-Inference v0.1
+backends advertise: `ollama` streaming, remote_process; `llamacpp`
+tokenization, streaming, batched_prefill, deterministic; `mock` optionally
+token_logits (docs/BACKENDS.md there).
+
 ## Text and sensitive payloads
 
 Raw prompt/output/tool payloads are not required for the event graph.
