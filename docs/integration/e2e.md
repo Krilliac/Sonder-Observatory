@@ -62,7 +62,7 @@ tested by accident).
 - **.gitignore**: add `/test-results/` and `/playwright-report/` (also keeps
   `eslint .` from walking them locally).
 - **tsconfig** (optional): `e2e/` and `playwright.config.ts` are not in
-  `include`, so `npm run lint`'s `tsc --noEmit` does not type-check them
+  `include`, so `npm run lint`'s type-check (`npm run typecheck`) does not check them
   (it would fail before `@playwright/test` is a devDependency). Once it is,
   add `"e2e", "playwright.config.ts"` to `include`. ESLint already lints them
   with the existing config (passes).

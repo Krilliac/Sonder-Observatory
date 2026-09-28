@@ -24,7 +24,9 @@ be revisited; record the replacement here rather than editing history.
 - **Tests:** Vitest 4 in the Node environment. Vitest 5 requires Node 22.12+;
   Vitest 4 keeps Node 20.19+ working.
 - **Lint:** ESLint 10 flat config + typescript-eslint recommended, plus
-  `tsc --noEmit` (strict, `noUncheckedIndexedAccess`).
+  `npm run typecheck`: the TypeScript 7 native compiler (`typescript-native`,
+  strict, `noUncheckedIndexedAccess`). `typescript` stays on 6.x only as the
+  compiler API typescript-eslint loads, until it supports TS 7.
 - **Node:** `>=20.19.0` (Vite 8 requirement). CI runs Node 20 and 22.
 - **UI framework:** none. The Milestone 1 UI is plain TypeScript + DOM/SVG to
   keep the dependency surface small; revisit when views multiply.
