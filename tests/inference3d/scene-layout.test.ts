@@ -29,6 +29,24 @@ describe("3D scene layout (pure)", () => {
         expect(layout.stageX.decode).toBeGreaterThan(layout.planes.find((p) => p.label === "L3")!.x);
     });
 
+    it("keeps one layer plane per producer stream when streams report the same layer indices", () => {
+        const m = derivePipeline(deepSyntheticFixture(3, 1));
+        const other = "other-producer\u0000node2\u0000#inf-2";
+        const layers = [...m.layers, ...m.layers.map((l) => ({ ...l, id: `layer:${other}|${l.layer}`, stream: other }))];
+        const layout = layoutScene({ ...m, layers });
+        const layerPlanes = layout.planes.filter((p) => p.stage === "layers");
+        // Every LayerEntity keeps its own pickable plane (its evidence stays reachable).
+        expect(layerPlanes.map((p) => p.id).sort()).toEqual(layers.map((l) => l.id).sort());
+        // Planes of different streams do not coincide.
+        expect(new Set(layerPlanes.map((p) => p.x)).size).toBe(layerPlanes.length);
+        // Each stream's layers stay in order and before decode.
+        for (const stream of new Set(layers.map((l) => l.stream))) {
+            const own = layerPlanes.filter((p) => layers.find((l) => l.id === p.id)!.stream === stream);
+            expect(own.map((p) => p.layer)).toEqual([0, 1, 2]);
+        }
+        expect(layout.stageX.decode).toBeGreaterThan(Math.max(...layerPlanes.map((p) => p.x)));
+    });
+
     it("maps tokens to size, age to opacity and event rate to pulse", () => {
         const r = (completionTokens: number | null, promptTokens: number | null) => ({ completionTokens, promptTokens }) as RequestEntity;
         expect(requestRadius(r(null, null))).toBeCloseTo(0.16);

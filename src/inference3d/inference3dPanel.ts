@@ -97,6 +97,33 @@ function richText(text: string): (Node | string)[] {
     return text.split(/(`[^`]+`)/).map((part) => (part.startsWith("`") && part.endsWith("`") ? h("code", { text: part.slice(1, -1) }) : part));
 }
 
+/**
+ * Skips re-deriving when `update` is called again with the same input. The
+ * events array identity is part of the key: the store replaces the array on
+ * every change and on every load, so another version of the same recording
+ * (for example a redacted copy with the same ids, times and count) re-derives.
+ */
+export class UpdateMemo {
+    private key = "";
+    private source: readonly ObservatoryEvent[] | null = null;
+
+    /** True when `input` differs from the last input seen (and records it). */
+    changed(input: Pick<Inference3DInput, "all" | "visible" | "nowNs" | "healthStamp">): boolean {
+        const key = `${input.all.length}|${input.visible.length}|${input.nowNs}|${input.healthStamp}|${input.all[0]?.event_id ?? ""}`;
+        if (key === this.key && input.all === this.source) {
+            return false;
+        }
+        this.key = key;
+        this.source = input.all;
+        return true;
+    }
+
+    invalidate(): void {
+        this.key = "";
+        this.source = null;
+    }
+}
+
 export class Inference3DPanel {
     readonly element: HTMLElement;
     private readonly cb: Inference3DCallbacks;
@@ -116,7 +143,7 @@ export class Inference3DPanel {
     private scene: InferenceScene | null = null;
     private readonly webgl: boolean;
     private model: PipelineModel | null = null;
-    private memo = "";
+    private readonly memo = new UpdateMemo();
     private selected: string | null = null;
     private rows = new Map<string, EntityRow>();
     private byId = new Map<string, ObservatoryEvent>();
@@ -278,16 +305,14 @@ export class Inference3DPanel {
     invalidatePalette(): void {
         if (this.scene) {
             this.scene.setPalette(readPalette(this.element));
-            this.memo = "";
+            this.memo.invalidate();
         }
     }
 
     update(input: Inference3DInput): void {
-        const key = `${input.all.length}|${input.visible.length}|${input.nowNs}|${input.healthStamp}|${input.all[0]?.event_id ?? ""}`;
-        if (key === this.memo) {
+        if (!this.memo.changed(input)) {
             return;
         }
-        this.memo = key;
         if (this.byIdSource !== input.all || this.byId.size !== input.all.length) {
             this.byIdSource = input.all;
             this.byId = new Map(input.all.map((e) => [e.event_id, e]));

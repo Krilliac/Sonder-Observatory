@@ -33,6 +33,7 @@ import {
     type Object3D,
 } from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { streamLabel } from "./derive";
 import type { PipelineModel, RequestEntity, StageId } from "./model";
 
 // ------------------------------------------------------------------ layout
@@ -54,6 +55,8 @@ export interface PlaneSlot {
     x: number;
     label: string;
     layer: number | null;
+    /** Producer stream of a layer plane; null for stage planes. */
+    stream: string | null;
 }
 
 export interface LaneSlot {
@@ -86,16 +89,28 @@ export function layoutScene(model: PipelineModel): SceneLayout {
     let x = 0;
     for (const s of model.stages) {
         if (s.id === "layers") {
-            const layers = [...new Map(model.layers.map((l) => [l.layer, l])).values()].sort((a, b) => a.layer - b.layer);
+            // One plane per layer entity: each producer stream keeps its own run of
+            // layer planes (in layer order, one gap between streams), so layers that
+            // two streams both report are not merged into one plane.
+            const streams = [...new Set(model.layers.map((l) => l.stream))].sort();
             stageX.layers = x;
-            layers.forEach((l, i) => {
-                planes.push({ id: l.id, stage: "layers", x: x + i * LAYER_GAP, label: `L${l.layer}`, layer: l.layer });
+            let slot = 0;
+            streams.forEach((stream, si) => {
+                if (si > 0) {
+                    slot += 1;
+                }
+                const own = model.layers.filter((l) => l.stream === stream).sort((a, b) => a.layer - b.layer);
+                for (const l of own) {
+                    const label = streams.length > 1 ? `L${l.layer} · ${streamLabel(stream)}` : `L${l.layer}`;
+                    planes.push({ id: l.id, stage: "layers", x: x + slot * LAYER_GAP, label, layer: l.layer, stream });
+                    slot += 1;
+                }
             });
-            x += Math.max(0, layers.length - 1) * LAYER_GAP + STAGE_GAP;
+            x += Math.max(0, slot - 1) * LAYER_GAP + STAGE_GAP;
             continue;
         }
         stageX[s.id] = x;
-        planes.push({ id: `stage:${s.id}`, stage: s.id, x, label: s.label, layer: null });
+        planes.push({ id: `stage:${s.id}`, stage: s.id, x, label: s.label, layer: null, stream: null });
         x += STAGE_GAP;
     }
     const lanes: LaneSlot[] = [];
@@ -429,15 +444,16 @@ export class InferenceScene {
         }
 
         // Operators: small boxes above their layer plane (only when reported).
-        const planeX = new Map(layout.planes.map((pl) => [pl.layer ?? -1, pl.x]));
-        const opsByLayer = new Map<number, number>();
+        const planeX = new Map(layout.planes.map((pl) => [`${pl.stream ?? ""}|${pl.layer ?? -1}`, pl.x]));
+        const opsByLayer = new Map<string, number>();
         for (const op of model.operators) {
-            const x = op.layer !== null ? planeX.get(op.layer) : layout.stageX.layers;
+            const x = op.layer !== null ? planeX.get(`${op.stream}|${op.layer}`) : layout.stageX.layers;
             if (x === undefined) {
                 continue;
             }
-            const k = opsByLayer.get(op.layer ?? -1) ?? 0;
-            opsByLayer.set(op.layer ?? -1, k + 1);
+            const opKey = `${op.stream}|${op.layer ?? -1}`;
+            const k = opsByLayer.get(opKey) ?? 0;
+            opsByLayer.set(opKey, k + 1);
             const color = /attention/i.test(op.operator) ? p.purple : /mlp|ffn|feed/i.test(op.operator) ? p.cyan : p.muted;
             const box = new Mesh(new BoxGeometry(0.35, 0.35, 0.35), new MeshStandardMaterial({ color, emissive: new Color(color), emissiveIntensity: 0.35 }));
             box.position.set(x, halfH - 0.4, -PLANE_DEPTH / 2 + 0.6 + k * 0.55);

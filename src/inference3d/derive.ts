@@ -166,7 +166,8 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
     const requests = new Map<string, RequestWork>();
     const sessionModel = new Map<string, string>();
     const instanceModel = new Map<string, string>();
-    const sessionPolicy = new Map<string, string>();
+    /** Text capture policy per producer stream and session (a policy never crosses streams). */
+    const streamPolicy = new Map<string, string>();
     const stageEvents = new Map<StageId, { count: number; recent: number; evidence: string[] }>();
     const kv = new Map<string, KvPool>();
     const layers = new Map<string, LayerEntity>();
@@ -242,7 +243,7 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
 
         const policy = str(e.attributes.text_capture);
         if (policy && (t === "session.created" || t === "session.started" || t === "engine.started")) {
-            sessionPolicy.set(e.session_id, policy);
+            streamPolicy.set(`${stream}|${e.session_id}`, policy);
             f.textCapture = f.textCapture && f.textCapture !== policy ? `${f.textCapture},${policy}` : policy;
         }
         if (t === "session.created") {
@@ -469,7 +470,7 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
                 req.entity.outputEvents += 1;
             }
             const rawText = typeof e.attributes.text === "string" ? e.attributes.text : null;
-            const policy = sessionPolicy.get(e.session_id) ?? f.textCapture;
+            const policy = streamPolicy.get(`${stream}|${e.session_id}`) ?? f.textCapture;
             const allowed = rawText !== null && captureAllowsText(policy);
             if (allowed) {
                 f.textEvents += 1;
@@ -505,7 +506,7 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
             }
         } else if (t === "inference.sampling.candidates") {
             // Reserved in the Observatory taxonomy; attribute shape proposed in docs/TELEMETRY_PROTOCOL.md.
-            const policy = sessionPolicy.get(e.session_id) ?? f.textCapture;
+            const policy = streamPolicy.get(`${stream}|${e.session_id}`) ?? f.textCapture;
             const alternatives = readAlternatives(e.attributes.candidates, captureAllowsText(policy));
             if (alternatives !== null) {
                 f.alternativeEvents += 1;

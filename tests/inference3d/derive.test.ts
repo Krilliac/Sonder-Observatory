@@ -3,7 +3,7 @@ import { derivePipeline, stageOfEvent } from "../../src/inference3d/derive";
 import { deepSyntheticFixture, ollamaPoolFixture } from "../../src/inference3d/fixtures";
 import type { PanelId, PipelineModel } from "../../src/inference3d/model";
 import { validateEvent } from "../../src/protocol/validate";
-import type { ObservatoryEvent } from "../../src/protocol/events";
+import { SCHEMA_ID, type ObservatoryEvent } from "../../src/protocol/events";
 
 const panel = (m: PipelineModel, producerNode: string, producer: string, id: PanelId) =>
     m.capabilities.find((c) => c.nodeId === producerNode && c.producer === producer)!.panels.find((p) => p.panel === id)!;
@@ -207,5 +207,64 @@ describe("stageOfEvent", () => {
         };
         const m = derivePipeline([...pool.filter((x) => x.mono_ns <= preempt.mono_ns - 1), preempt]);
         expect(m.requests.find((r) => r.requestId === "req-ws-1")!.stage).toBe("queue");
+    });
+});
+
+describe("text capture policy is scoped to the producer stream", () => {
+    // Two producer instances on one node that share a session_id: each stream's
+    // declared policy governs only that stream's output text.
+    const producer = (instance: string) => ({ name: "sonder-inference", version: "0.1.0", node_id: "node1", instance_id: instance, role: "inference" });
+    const ev = (instance: string, seq: number, type: string, attributes: Record<string, unknown>, request: string | null = null): ObservatoryEvent => ({
+        schema: SCHEMA_ID,
+        event_id: `${instance}-${seq}`,
+        sequence: seq,
+        event_type: type,
+        wall_time: new Date(Date.UTC(2026, 8, 27) + seq).toISOString(),
+        mono_ns: 1_000_000 + seq * 1000 + (instance === "inf-b" ? 500 : 0),
+        session_id: "shared-session",
+        run_id: null,
+        request_id: request,
+        agent_id: null,
+        task_id: null,
+        model_instance_id: null,
+        device_id: null,
+        producer: producer(instance),
+        sampling: { level: "metrics", sampled: true },
+        attributes,
+    });
+    const streamEvents = (instance: string, policy: string | null) => [
+        ev(instance, 0, "session.created", policy === null ? { model: "m" } : { model: "m", text_capture: policy }),
+        ev(instance, 1, "inference.decode.started", {}, `req-${instance}`),
+        ev(instance, 2, "inference.token.generated", { index: 0, text: `secret-${instance}`, probability: 0.9 }, `req-${instance}`),
+        ev(instance, 3, "inference.sampling.candidates", { index: 0, candidates: [{ token_id: 1, probability: 0.9, text: `alt-${instance}` }] }, `req-${instance}`),
+    ];
+    const outputOf = (m: PipelineModel, instance: string) => {
+        const req = m.requests.find((r) => r.requestId === `req-${instance}`)!;
+        return {
+            chunk: m.chunks.find((c) => c.requestEntityId === req.id)!,
+            token: m.tokens.find((t) => t.requestEntityId === req.id)!,
+        };
+    };
+
+    it("one stream's `full` policy does not expose another stream's text", () => {
+        const events = [...streamEvents("inf-a", "full"), ...streamEvents("inf-b", null)].sort((x, y) => x.mono_ns - y.mono_ns);
+        const m = derivePipeline(events);
+        expect(outputOf(m, "inf-a").chunk.text).toBe("secret-inf-a");
+        const b = outputOf(m, "inf-b");
+        expect(b.chunk.text).toBeNull();
+        expect(b.chunk.textWithheld).toBe(true);
+        expect(b.token.text).toBeNull();
+        expect(b.token.alternatives!.map((a) => a.text)).toEqual([null]);
+    });
+
+    it("one stream's restrictive policy does not hide text another stream enabled", () => {
+        // inf-b declares `off` after inf-a declared `on` for the same session_id.
+        const events = [...streamEvents("inf-a", "on"), ...streamEvents("inf-b", "off")].sort((x, y) => x.mono_ns - y.mono_ns);
+        const m = derivePipeline(events);
+        const a = outputOf(m, "inf-a");
+        expect(a.chunk.text).toBe("secret-inf-a");
+        expect(a.token.text).toBe("secret-inf-a");
+        expect(a.token.alternatives!.map((x) => x.text)).toEqual(["alt-inf-a"]);
+        expect(outputOf(m, "inf-b").chunk.text).toBeNull();
     });
 });
