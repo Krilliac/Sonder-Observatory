@@ -33,6 +33,12 @@ New attribute conventions (readers in `src/compare/readers.ts`, candidates for
 
 ## Hooks for the lead (files I did not touch)
 
+**Status (2026-09-27): hook 1 is wired.** `app.ts` has the Compare tab
+(`VIEWS`, `#view-compare`, `?view=compare`), renders the panel only while the
+tab is visible with the same PanelContext as the extra panels, and labels the
+current session `live: <urls>` or the file/fixture name. The "app" e2e test
+now runs. Hooks 2-4 are still open.
+
 1. **Compare tab** (`src/renderer/app.ts`): add `{ id: "compare", title: "Compare" }` to
    `VIEWS`, create `private readonly compare = new ComparePanel({ describeCurrent: () => <source label, e.g. "live: " + url or the file name> })`
    (`import { ComparePanel } from "../compare/panel"`), and in `renderViews()` call
@@ -62,4 +68,5 @@ guard, kv lookups and `cost_usd`, and `synthetic.search` → `synthetic.search_v
   with Vite's build API, inject it into the built app and mount it like an extra panel. They
   cover the full flow (load, swap, deltas, align run/turn/request, findings, graph, a live
   session growing, an unreadable file) and an axe WCAG A/AA scan. The **app** test drives the
-  real Compare tab and skips with a reason until hook 1 is wired.
+  real Compare tab (wired, so it runs). `e2e/a11y.spec.ts` scans the tab in
+  both themes.

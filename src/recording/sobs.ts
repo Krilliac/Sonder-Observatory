@@ -58,6 +58,8 @@ function unique<T>(values: Iterable<T>): T[] {
     return [...new Set(values)];
 }
 
+const SESSION_END_EVENTS = new Set(["session.ended", "session.closed", "engine.stopped"]);
+
 export function buildManifest(
     events: readonly ObservatoryEvent[],
     createdAt: Date = new Date(),
@@ -81,12 +83,16 @@ export function buildManifest(
         }
     }
     const sessions = unique(events.map((e) => e.session_id));
-    const ended = new Set(
-        events.filter((e) => e.event_type === "session.ended").map((e) => e.session_id),
-    );
+    // Terminal events: session.ended (protocol / Runtime), session.closed
+    // (Sonder-Inference sessions) and engine.stopped (Inference's engine scope).
+    const ended = new Set(events.filter((e) => SESSION_END_EVENTS.has(e.event_type)).map((e) => e.session_id));
+    // A "session" holding only producer housekeeping (Inference reports
+    // telemetry.dropped under its telemetry instance id) has no end to wait for.
+    const substantive = new Set(events.filter((e) => !e.event_type.startsWith("telemetry.")).map((e) => e.session_id));
+    const judged = sessions.filter((s) => substantive.has(s));
     const policies = unique(
         events
-            .filter((e) => e.event_type === "session.started")
+            .filter((e) => e.event_type === "session.started" || e.event_type === "session.created")
             .map((e) => e.attributes.text_capture)
             .filter((p): p is string => typeof p === "string"),
     );
@@ -95,7 +101,7 @@ export function buildManifest(
         format: RECORDING_FORMAT,
         created_at: createdAt.toISOString(),
         recorder: { name: "sonder-observatory", version: "0.1.0" },
-        complete: sessions.length > 0 && sessions.every((s) => ended.has(s)),
+        complete: judged.length > 0 && judged.every((s) => ended.has(s)),
         event_count: events.length,
         schema_versions: unique(events.map((e) => e.schema)),
         producers: [...producers.values()],

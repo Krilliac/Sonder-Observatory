@@ -11,6 +11,7 @@
  */
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { ProducerEndpointInput } from "../ingest/live/manager";
+import { MAX_RECORDING_BYTES, recordingTooLarge } from "../recording/limits";
 
 export interface RecordingGrant {
     id: string;
@@ -61,9 +62,15 @@ export interface RecentRecording {
     available: boolean;
 }
 
-/** Recording text ready for loadRecording(), plus a label for the UI. */
+/**
+ * An opened recording plus a label for the UI: `text` when it fits in one
+ * native read (16 MiB), else a byte `stream` that reads the rest on demand
+ * (for loadRecordingStream), so a large recording is never decoded into one
+ * string. Exactly one of the two is set.
+ */
 export interface OpenedRecording {
-    text: string;
+    text?: string;
+    stream?: ReadableStream<Uint8Array>;
     label: string;
 }
 
@@ -102,11 +109,24 @@ export async function listRecordingEntries(grant: string): Promise<RecordingEntr
     return invoke<RecordingEntry[]>("list_recording_entries", { grant });
 }
 
-/** Reads a whole entry in 16 MiB chunks. `entry` is omitted for file grants. */
-export async function readRecordingEntry(grant: string, entry?: string): Promise<Uint8Array> {
+async function readChunk(grant: string, entry: string | undefined, offset: number): Promise<Uint8Array> {
+    return new Uint8Array(await invoke<ArrayBuffer>("read_recording_entry", { grant, entry, offset, maxBytes: CHUNK_BYTES }));
+}
+
+/**
+ * Reads a whole entry in 16 MiB chunks, up to `maxBytes` in total (default
+ * MAX_RECORDING_BYTES; past it the read stops with an error). `entry` is
+ * omitted for file grants.
+ */
+export async function readRecordingEntry(grant: string, entry?: string, maxBytes = MAX_RECORDING_BYTES): Promise<Uint8Array> {
     const parts: Uint8Array[] = [];
+    let total = 0;
     for (let offset = 0; ; offset += CHUNK_BYTES) {
-        const buf = new Uint8Array(await invoke<ArrayBuffer>("read_recording_entry", { grant, entry, offset, maxBytes: CHUNK_BYTES }));
+        const buf = await readChunk(grant, entry, offset);
+        total += buf.byteLength;
+        if (total > maxBytes) {
+            throw recordingTooLarge(maxBytes);
+        }
         parts.push(buf);
         if (buf.byteLength < CHUNK_BYTES) {
             break;
@@ -140,16 +160,49 @@ export async function clearRecentRecordings(): Promise<void> {
  * session folder the first entry in FOLDER_EVENT_ENTRIES that exists is used.
  */
 export async function readGrantText(grant: RecordingGrant): Promise<OpenedRecording> {
-    const decoder = new TextDecoder("utf-8");
     if (grant.kind === "file") {
-        return { text: decoder.decode(await readRecordingEntry(grant.id)), label: grant.name };
+        return openEntry(grant.id, undefined, grant.name);
     }
     const entries = new Set((await listRecordingEntries(grant.id)).map((e) => e.path));
     const entry = FOLDER_EVENT_ENTRIES.find((name) => entries.has(name));
     if (!entry) {
         throw new Error(`${grant.name}: no ${FOLDER_EVENT_ENTRIES.join(" / ")} in this folder`);
     }
-    return { text: decoder.decode(await readRecordingEntry(grant.id, entry)), label: `${grant.name} (${entry})` };
+    return openEntry(grant.id, entry, `${grant.name} (${entry})`);
+}
+
+/**
+ * Reads the first chunk of an entry: an entry that fits in it is returned as
+ * text, a larger one as a stream that pulls the remaining chunks lazily and
+ * stops past MAX_RECORDING_BYTES.
+ */
+async function openEntry(grant: string, entry: string | undefined, label: string): Promise<OpenedRecording> {
+    const first = await readChunk(grant, entry, 0);
+    if (first.byteLength < CHUNK_BYTES) {
+        return { text: new TextDecoder("utf-8").decode(first), label };
+    }
+    let offset = 0;
+    let pending: Uint8Array | null = first;
+    let finished = false;
+    const stream = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+            const buf = pending ?? (finished ? new Uint8Array(0) : await readChunk(grant, entry, offset));
+            pending = null;
+            offset += buf.byteLength;
+            if (offset > MAX_RECORDING_BYTES) {
+                controller.error(recordingTooLarge(MAX_RECORDING_BYTES));
+                return;
+            }
+            if (buf.byteLength > 0) {
+                controller.enqueue(buf);
+            }
+            if (buf.byteLength < CHUNK_BYTES) {
+                finished = true;
+                controller.close();
+            }
+        },
+    });
+    return { stream, label };
 }
 
 /**

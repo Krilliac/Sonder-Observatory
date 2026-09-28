@@ -6,10 +6,36 @@
  */
 import type { ObservatoryEvent } from "../protocol/events";
 import { streamKey } from "../replay/order";
-import { backendTokenCount, memoryUsage, totalDroppedEvents } from "./attributes";
+import { backendEvalMs, backendTokenCount, memoryUsage, outputTokenCount, totalDroppedEvents } from "./attributes";
 import { isErrorEvent } from "./classify";
 
 export type Provenance = "measured" | "backend-reported" | "derived" | "estimated" | "unavailable";
+
+/** Where a token total comes from; "mixed" when backend counts and token events both contribute. */
+export type TokenProvenance = "backend-reported" | "derived" | "mixed" | "unavailable";
+
+/**
+ * How a request's decode (generation) window was measured, best first:
+ * - `backend-eval`: `inference.decode.completed.backend_eval_ms` (covers hidden thinking tokens too);
+ * - `reported-total-minus-ttft`: outcome `total_ms - ttft_ms` (first visible output to end);
+ * - `first-output-to-end`: first output event to the outcome event;
+ * - `first-to-last-token`: first to last per-token event of a request still open.
+ */
+export type DecodeSource = "backend-eval" | "reported-total-minus-ttft" | "first-output-to-end" | "first-to-last-token";
+
+export interface DecodeWindow {
+    startNs: number;
+    endNs: number;
+    /** Window length (ns); for reported sources this is the reported duration. */
+    ns: number;
+    /**
+     * Tokens generated inside the window: the whole count for `backend-eval`
+     * (eval_count / eval_duration), otherwise the tokens after the first one
+     * (the first token opens the window), as Sonder-Inference's bench does.
+     */
+    tokens: number;
+    source: DecodeSource;
+}
 
 export interface LatencyStats {
     count: number;
@@ -31,11 +57,18 @@ export interface RequestSpan {
     startNs: number;
     endNs: number | null;
     outcome: "completed" | "failed" | "cancelled" | "open";
+    /** First output event (token or chunk): the time to first token. */
     firstTokenNs: number | null;
-    /** Tokens counted from inference.token.generated events. */
+    /** Tokens counted from per-token inference.token.generated events (never chunks). */
     tokens: number;
+    /** Output events that carry no token count (`unit: "chunk"` or another non-token unit). */
+    chunks: number;
     /** Completion tokens reported by the backend on the outcome event, if any. */
     backendTokens: number | null;
+    /** Best token count: backendTokens, else counted token events; null when only chunks were seen. */
+    tokenCount: number | null;
+    /** Decode window used for the token rate; null when it cannot be measured. */
+    decode: DecodeWindow | null;
 }
 
 export interface ResourceSample {
@@ -55,11 +88,33 @@ export interface Metrics {
     requestLatencyByProducer: Record<string, LatencyStats>;
     timeToFirstToken: LatencyStats;
     tokens: {
+        /** fromBackend + fromEvents. Chunk events are never counted. */
         total: number;
-        /** Tokens per second over the whole observed decode window. */
+        provenance: TokenProvenance;
+        /** Backend-reported completion tokens of requests that report them. */
+        fromBackend: number;
+        /** Tokens from per-token events of requests without a backend count (and of no request). */
+        fromEvents: number;
+        /** Output events that carry no token count (chunks). */
+        chunks: number;
+        /** Requests with output chunks but no token count yet (open, or the backend did not report). */
+        uncountedRequests: number;
+        /**
+         * Tokens per second of active generation: decode-window tokens over the
+         * summed decode windows of the requests (idle time is excluded).
+         */
         overallRate: number | null;
-        /** Tokens per second over the trailing window ending at the last event. */
+        /** Summed decode windows (ms) behind overallRate. */
+        activeDecodeMs: number | null;
+        /**
+         * Tokens per second over the trailing window ending at the last event:
+         * per-token events in it, plus backend counts spread evenly over their decode window.
+         */
         recentRate: number | null;
+        /**
+         * Length (ms) of that trailing window: RECENT_WINDOW_MS, or less when
+         * the session has not yet lasted that long.
+         */
         windowMs: number;
         /**
          * Sum of backend-reported completion tokens over requests that report
@@ -108,19 +163,19 @@ export function percentile(values: readonly number[], p: number): number | null 
 
 function latencyStats(durationsNs: readonly number[]): LatencyStats {
     const ms = durationsNs.map((d) => d / 1e6);
+    // A loop, not Math.max(...ms): spreading throws RangeError past ~125k values.
+    let maxMs: number | null = null;
+    for (const v of ms) {
+        if (maxMs === null || v > maxMs) {
+            maxMs = v;
+        }
+    }
     return {
         count: ms.length,
         p50Ms: percentile(ms, 50),
         p95Ms: percentile(ms, 95),
-        maxMs: ms.length > 0 ? Math.max(...ms) : null,
+        maxMs,
     };
-}
-
-function tokenCount(event: ObservatoryEvent): number {
-    // One inference.token.generated event is one token unless the producer
-    // explicitly batches with an integer `count` attribute.
-    const n = event.attributes.count;
-    return typeof n === "number" && Number.isInteger(n) && n > 0 ? n : 1;
 }
 
 function numberAttr(event: ObservatoryEvent, key: string): number | null {
@@ -128,12 +183,165 @@ function numberAttr(event: ObservatoryEvent, key: string): number | null {
     return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
+interface TokenTime {
+    ns: number;
+    n: number;
+}
+
+/** Per-span facts only the token metrics need. */
+interface SpanWork {
+    /** Per-token events (never chunks) of the span. */
+    tokenTimes: TokenTime[];
+    evalMs: number | null;
+    evalEndNs: number | null;
+    totalMs: number | null;
+    ttftMs: number | null;
+}
+
+/** Best decode window of a span whose token count is known (see DecodeSource). */
+function decodeWindow(span: RequestSpan, w: SpanWork): DecodeWindow | null {
+    const count = span.tokenCount;
+    if (count === null || count <= 0) {
+        return null;
+    }
+    if (w.evalMs !== null) {
+        const endNs = w.evalEndNs ?? span.endNs!;
+        const ns = w.evalMs * 1e6;
+        return { startNs: endNs - ns, endNs, ns, tokens: count, source: "backend-eval" };
+    }
+    if (count < 2) {
+        return null;
+    }
+    if (span.endNs !== null && w.totalMs !== null && w.ttftMs !== null && w.ttftMs >= 0 && w.totalMs > w.ttftMs) {
+        const ns = (w.totalMs - w.ttftMs) * 1e6;
+        return { startNs: span.endNs - ns, endNs: span.endNs, ns, tokens: count - 1, source: "reported-total-minus-ttft" };
+    }
+    if (span.firstTokenNs === null) {
+        return null;
+    }
+    const open = span.endNs === null;
+    const endNs = open ? (w.tokenTimes.at(-1)?.ns ?? null) : span.endNs;
+    if (endNs === null || endNs <= span.firstTokenNs) {
+        return null;
+    }
+    return {
+        startNs: span.firstTokenNs,
+        endNs,
+        ns: endNs - span.firstTokenNs,
+        tokens: count - 1,
+        source: open ? "first-to-last-token" : "first-output-to-end",
+    };
+}
+
+function overlapNs(a0: number, a1: number, b0: number, b1: number): number {
+    return Math.max(0, Math.min(a1, b1) - Math.max(a0, b0));
+}
+
+/**
+ * Token totals and rates. Backend counts win over token events for a request;
+ * chunk events are never tokens; rates use decode windows, never session wall time.
+ */
+function tokenMetrics(
+    requests: RequestSpan[],
+    work: ReadonlyMap<RequestSpan, SpanWork>,
+    looseTokens: readonly TokenTime[],
+    chunks: number,
+    firstNs: number | null,
+    lastNs: number | null,
+): Metrics["tokens"] {
+    let fromBackend = 0;
+    let backendSpans = 0;
+    let fromEvents = 0;
+    let eventCounted = 0;
+    let uncountedRequests = 0;
+    let decodeTokens = 0;
+    let decodeNs = 0;
+    /** Measured per-token events that count toward the totals (for the trailing window). */
+    const counted: TokenTime[] = [...looseTokens];
+    const spread: DecodeWindow[] = [];
+    for (const span of requests) {
+        const w = work.get(span)!;
+        if (span.backendTokens !== null) {
+            span.tokenCount = span.backendTokens;
+            fromBackend += span.backendTokens;
+            backendSpans += 1;
+        } else if (span.chunks > 0 && span.tokens === 0) {
+            span.tokenCount = null;
+            uncountedRequests += 1;
+        } else {
+            span.tokenCount = span.tokens;
+            fromEvents += span.tokens;
+            eventCounted += w.tokenTimes.length;
+            for (const x of w.tokenTimes) {
+                counted.push(x);
+            }
+        }
+        span.decode = decodeWindow(span, w);
+        if (span.decode) {
+            decodeTokens += span.decode.tokens;
+            decodeNs += span.decode.ns;
+            if (span.backendTokens !== null) {
+                spread.push(span.decode);
+            }
+        }
+    }
+    for (const x of looseTokens) {
+        fromEvents += x.n;
+    }
+    eventCounted += looseTokens.length;
+    if (looseTokens.length >= 2) {
+        // Token events with no request: their first-to-last span, as one stream.
+        // The first event opens the span, so its tokens are not in it (N events
+        // bound N-1 intervals), as decodeWindow does for a request.
+        const ns = looseTokens[looseTokens.length - 1]!.ns - looseTokens[0]!.ns;
+        if (ns > 0) {
+            decodeTokens += looseTokens.reduce((sum, x) => sum + x.n, 0) - looseTokens[0]!.n;
+            decodeNs += ns;
+        }
+    }
+    const provenance: TokenProvenance =
+        backendSpans > 0 && eventCounted > 0 ? "mixed" : backendSpans > 0 ? "backend-reported" : eventCounted > 0 ? "derived" : "unavailable";
+    let recentRate: number | null = null;
+    // The trailing window never reaches back before the first event: a session
+    // shorter than RECENT_WINDOW_MS is rated over the time actually observed.
+    let windowMs = RECENT_WINDOW_MS;
+    if (firstNs !== null && lastNs !== null) {
+        windowMs = Math.min(RECENT_WINDOW_MS, (lastNs - firstNs) / 1e6);
+    }
+    if (provenance !== "unavailable" && lastNs !== null && windowMs > 0) {
+        const windowStart = lastNs - windowMs * 1e6;
+        let recent = counted.filter((x) => x.ns > windowStart).reduce((sum, x) => sum + x.n, 0);
+        for (const d of spread) {
+            if (d.ns > 0) {
+                recent += (d.tokens * overlapNs(d.startNs, d.endNs, windowStart, lastNs)) / d.ns;
+            }
+        }
+        recentRate = recent / (windowMs / 1000);
+    }
+    return {
+        total: fromBackend + fromEvents,
+        provenance,
+        fromBackend,
+        fromEvents,
+        chunks,
+        uncountedRequests,
+        overallRate: decodeNs > 0 ? decodeTokens / (decodeNs / 1e9) : null,
+        activeDecodeMs: decodeNs > 0 ? decodeNs / 1e6 : null,
+        recentRate,
+        windowMs,
+        backendReported: backendSpans > 0 ? fromBackend : null,
+    };
+}
+
 /** Derives metrics from events that are already in replay order. */
 export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
     const spans = new Map<string, RequestSpan>();
-    const tokenTimes: { ns: number; n: number }[] = [];
     const errorsByType: Record<string, number> = {};
     const errorIds: string[] = [];
+    const work = new Map<RequestSpan, SpanWork>();
+    /** Per-token events that belong to no request span. */
+    const looseTokens: TokenTime[] = [];
+    let chunkEvents = 0;
     const activeAgents = new Set<string>();
     const activeTools = new Set<string>();
     let spawned = 0;
@@ -154,7 +362,7 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
         const spanKey = rid ? `${stream}\u0001${rid}` : "";
 
         if (t === "request.started" && rid) {
-            spans.set(spanKey, {
+            const span: RequestSpan = {
                 requestId: rid,
                 streamKey: stream,
                 producer: e.producer.name,
@@ -163,8 +371,13 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
                 outcome: "open",
                 firstTokenNs: null,
                 tokens: 0,
+                chunks: 0,
                 backendTokens: null,
-            });
+                tokenCount: null,
+                decode: null,
+            };
+            spans.set(spanKey, span);
+            work.set(span, { tokenTimes: [], evalMs: null, evalEndNs: null, totalMs: null, ttftMs: null });
         } else if (
             (t === "request.completed" || t === "request.failed" || t === "request.cancelled") &&
             rid
@@ -179,16 +392,36 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
                           ? "failed"
                           : "cancelled";
                 span.backendTokens = backendTokenCount(e);
+                const w = work.get(span)!;
+                w.totalMs = numberAttr(e, "total_ms");
+                w.ttftMs = numberAttr(e, "ttft_ms");
+            }
+        } else if (t === "inference.decode.completed" && rid) {
+            const span = spans.get(spanKey);
+            const w = span ? work.get(span) : undefined;
+            const evalMs = backendEvalMs(e);
+            if (w && evalMs !== null) {
+                w.evalMs = evalMs;
+                w.evalEndNs = e.mono_ns;
             }
         } else if (t === "inference.token.generated") {
-            const n = tokenCount(e);
-            tokenTimes.push({ ns: e.mono_ns, n });
+            const n = outputTokenCount(e);
             const span = rid ? spans.get(spanKey) : undefined;
+            if (n === null) {
+                chunkEvents += 1;
+            }
             if (span) {
-                span.tokens += n;
+                if (n === null) {
+                    span.chunks += 1;
+                } else {
+                    span.tokens += n;
+                    work.get(span)!.tokenTimes.push({ ns: e.mono_ns, n });
+                }
                 if (span.firstTokenNs === null) {
                     span.firstTokenNs = e.mono_ns;
                 }
+            } else if (n !== null) {
+                looseTokens.push({ ns: e.mono_ns, n });
             }
         }
 
@@ -278,31 +511,14 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
     }
     const withFirstToken = requests.filter((s) => s.firstTokenNs !== null);
 
-    const totalTokens = tokenTimes.reduce((sum, x) => sum + x.n, 0);
-    const reporting = requests.filter((s) => s.backendTokens !== null);
-    const backendReported = reporting.length > 0 ? reporting.reduce((sum, s) => sum + s.backendTokens!, 0) : null;
-    let overallRate: number | null = null;
-    let recentRate: number | null = null;
-    if (tokenTimes.length >= 2) {
-        const spanNs = tokenTimes[tokenTimes.length - 1]!.ns - tokenTimes[0]!.ns;
-        if (spanNs > 0) {
-            overallRate = totalTokens / (spanNs / 1e9);
-        }
-    }
-    const lastEvent = events[events.length - 1];
-    if (lastEvent && tokenTimes.length > 0) {
-        const windowStart = lastEvent.mono_ns - RECENT_WINDOW_MS * 1e6;
-        const recent = tokenTimes.filter((x) => x.ns > windowStart);
-        recentRate = recent.reduce((s, x) => s + x.n, 0) / (RECENT_WINDOW_MS / 1000);
-    }
-
+    const tokens = tokenMetrics(requests, work, looseTokens, chunkEvents, events[0]?.mono_ns ?? null, events[events.length - 1]?.mono_ns ?? null);
     return {
         eventCount: events.length,
         requests,
         requestLatency: latencyStats(finished.map((s) => s.endNs! - s.startNs)),
         requestLatencyByProducer,
         timeToFirstToken: latencyStats(withFirstToken.map((s) => s.firstTokenNs! - s.startNs)),
-        tokens: { total: totalTokens, overallRate, recentRate, windowMs: RECENT_WINDOW_MS, backendReported },
+        tokens,
         errors: {
             total: errorIds.length,
             byType: errorsByType,

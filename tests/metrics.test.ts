@@ -56,9 +56,11 @@ describe("deriveMetrics", () => {
         events.push(at(1000.5 * 1, "inference.token.generated", { event_id: "batch", attributes: { count: 9 } }));
         const m = deriveMetrics(events);
         expect(m.tokens.total).toBe(20);
-        expect(m.tokens.overallRate).toBeCloseTo(20 / 1.0005, 3);
-        // All 20 tokens fall inside the trailing 5 s window.
-        expect(m.tokens.recentRate).toBe(4);
+        // The first event opens the span: 19 tokens over 1.0005 s.
+        expect(m.tokens.overallRate).toBeCloseTo(19 / 1.0005, 3);
+        // The session is shorter than 5 s, so the trailing window is the 1.0005 s observed.
+        expect(m.tokens.windowMs).toBeCloseTo(1000.5, 6);
+        expect(m.tokens.recentRate).toBeCloseTo(19 / 1.0005, 3);
     });
 
     it("counts errors including retries and guards", () => {
