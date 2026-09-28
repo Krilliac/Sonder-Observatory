@@ -248,6 +248,32 @@ questions that were open below.
   bearer token. Tokens are printable ASCII without spaces, checked the same
   way in the shell and in the manager.
 
+## 2026-09-27 — Token counts: chunks are not tokens
+
+Supersedes the token sentences of "Metrics provenance" and the "Token metrics
+still count" bullet of "Sonder-Inference event shapes". Found against a live
+Sonder Inference (qwen3:14b over Ollama): 15 chunk events for a request whose
+backend reported 463 completion tokens showed as "33 tokens", and the overall
+rate divided by the whole session span showed "0.0 tok/s".
+
+- `inference.token.generated` counts only when `unit` is `"token"` (or absent,
+  for older producers); `unit: "chunk"` and any other unit are output events,
+  never tokens (`outputTokenCount`, src/query/attributes.ts).
+- A request's token count is its backend count (`completion_tokens` with
+  `token_counts_from_backend`) when reported, else its token events. The
+  total is backend counts plus event counts of the other requests, labelled
+  `backend-reported`, `derived`, `mixed` or `unavailable` (chunks only).
+- The overall rate is decode tokens over the summed request decode windows:
+  `backend_eval_ms`, else `total_ms - ttft_ms`, else first output to the end
+  (tokens after the first one for the last two, as Sonder-Inference's bench
+  computes it). With hidden thinking, `ttft_ms` includes the thinking time, so
+  the fallbacks can overstate the rate; `backend_eval_ms` does not.
+- The trailing-window rate counts token events in the window plus backend
+  counts spread evenly over their decode window.
+- `sampling.sampled` is not used: every producer sets it on every event
+  (including the synthetic fixture's per-token events), so excluding sampled
+  events would zero every count.
+
 ## Open questions
 
 - Producer attribute names for memory/compute samples and tool call ids

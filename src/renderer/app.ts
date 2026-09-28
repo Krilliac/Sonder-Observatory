@@ -1,12 +1,15 @@
 import fixtureText from "../../fixtures/synthetic-session.ndjson?raw";
+import type { ComparePanel } from "../compare/panel";
 import { FindingsController, renderFindingsPanel, runDiagnostics } from "../diagnostics";
 import { renderInspector } from "../inspector/inspector";
 import { LiveConnectionManager, type ProducerConnection, type ProducerEndpointInput } from "../ingest/live/manager";
 import type { TransportPreference } from "../ingest/live/endpoint";
 import type { ObservatoryEvent } from "../protocol/events";
+import { describeRange, isFullRange, type ExportRange } from "../export/filter";
+import { EXPORT_FORMATS } from "../export/save";
 import { EVENT_CLASSES, isErrorEvent, type EventClass } from "../query/classify";
 import { deriveMetrics, type Metrics } from "../query/metrics";
-import { loadRecording, RECORDING_EXTENSION, serializeRecording } from "../recording/sobs";
+import { loadRecording, RECORDING_EXTENSION } from "../recording/sobs";
 import { ReplayCursor } from "../replay/controller";
 import { SessionStore } from "../replay/session";
 import { TopologyPanel } from "../topology";
@@ -16,10 +19,11 @@ import { ConnectionPanel } from "./connectionPanel";
 import { byId, h } from "./dom";
 import { mountDropZone, RECORDING_FILE_EXTENSIONS } from "./dropZone";
 import { EventTable } from "./eventTable";
-import { fmtBytes, fmtMs, fmtPct, fmtRate, fmtRelNs } from "./format";
+import { ExportDialog, type ExportChoice } from "./exportDialog";
+import { fmtBytes, fmtMs, fmtPct, fmtRelNs } from "./format";
 import { errorSearchStart, findMatching, producersInSession, syntheticBannerText, timelineSummaryText } from "./navigation";
 import { Onboarding } from "./onboarding";
-import type { ObservatoryPanel } from "./panels";
+import type { ObservatoryPanel, PanelContext } from "./panels";
 import { parseLaunchParams, redactUrlSecrets, secretParamWarning, urlWithoutSecrets } from "./params";
 import { producerCardModel, ProducersPanel } from "./producersPanel";
 import { readShortcutsEnabled, ShortcutsDialog, shortcutAction, writeShortcutsEnabled, type ShortcutAction } from "./shortcuts";
@@ -27,6 +31,7 @@ import { mountSplitter } from "./splitter";
 import { safeStorage, type ThemeController } from "./theme";
 import { getEventIndex, TRACKS } from "./timelineModel";
 import { TimelineView } from "./timelineView";
+import { tokenCardModel } from "./tokenCard";
 
 const SPEEDS = [0.25, 0.5, 1, 2, 4, 8];
 /** Main views, shown as tabs; the inspector is docked beside every view. */
@@ -35,6 +40,7 @@ const VIEWS = [
     { id: "events", title: "Events" },
     { id: "diagnostics", title: "Diagnostics" },
     { id: "agents", title: "Agents" },
+    { id: "compare", title: "Compare" },
 ] as const;
 type ViewId = (typeof VIEWS)[number]["id"];
 
@@ -123,6 +129,16 @@ export class ObservatoryApp {
     private producersPanel: ProducersPanel | null = null;
     private onboarding: Onboarding | null = null;
     private shortcuts: ShortcutsDialog | null = null;
+    private exportDialog: ExportDialog | null = null;
+    /**
+     * Session comparison tab (src/compare); the current session feeds it,
+     * throttled while live. Loaded on first use (it and src/export are split
+     * out of the main bundle).
+     */
+    private compare: ComparePanel | null = null;
+    private compareLoading = false;
+    /** Last export result or failure, shown in #warnings until the next load. */
+    private exportNotice: string | null = null;
     /** Bumped per load so a superseded chunked load is discarded. */
     private loadToken = 0;
     /** Aborts the running chunked/streamed parse when a newer load or connect wins. */
@@ -191,6 +207,7 @@ export class ObservatoryApp {
             enabled: readShortcutsEnabled(this.storage),
             onToggle: (enabled) => writeShortcutsEnabled(this.storage, enabled),
         });
+        this.exportDialog = new ExportDialog(document, { onExport: (choice) => void this.exportAs(choice) });
         byId("view-agents").append(this.topology.element);
         this.timelineView = new TimelineView(byId("timeline"), ({ rel, event }) => {
             this.setFollow(false);
@@ -233,6 +250,11 @@ export class ObservatoryApp {
     /** Loads recording text as a file source (desktop native open and recent menu). */
     openRecordingText(text: string, label: string): void {
         this.afterLiveStopped(() => this.loadText(text, "file", label));
+    }
+
+    /** Streams a large recording (desktop native open): no whole-file string. */
+    openRecordingStream(stream: ReadableStream<Uint8Array>, label: string): void {
+        this.afterLiveStopped(() => this.loadChunked((opts) => loadRecordingStream(stream, opts), "file", label));
     }
 
     /** Connects to one live endpoint (older desktop shells: `--connect` without tokens). */
@@ -299,6 +321,7 @@ export class ObservatoryApp {
                     h("label", { id: "file-open", class: "button-like", for: "file-input", text: "Open recording…" }),
                     h("button", { id: "fixture-btn", type: "button", text: "Synthetic demo" }),
                     h("button", { id: "save-btn", type: "button", text: `Save (${RECORDING_EXTENSION})` }),
+                    h("button", { id: "export-btn", type: "button", "aria-haspopup": "dialog", text: "Export…", title: "Export a report, summary, JSON or recording range" }),
                     h("button", { id: "theme-toggle", type: "button", class: "toggle", text: "Theme" }),
                     h("button", { id: "shortcuts-btn", type: "button", class: "toggle", "aria-haspopup": "dialog", text: "Shortcuts", title: "Keyboard shortcuts (?)" }),
                 ),
@@ -401,6 +424,7 @@ export class ObservatoryApp {
                                 ),
                                 h("div", { id: "view-diagnostics", class: "view", role: "tabpanel", "aria-labelledby": "tab-diagnostics" }),
                                 h("div", { id: "view-agents", class: "view", role: "tabpanel", "aria-labelledby": "tab-agents" }),
+                                h("div", { id: "view-compare", class: "view view-compare", role: "tabpanel", "aria-labelledby": "tab-compare" }),
                                 h(
                                     "div",
                                     { id: "extra-panels", class: "extra-panels" },
@@ -458,6 +482,7 @@ export class ObservatoryApp {
         });
         byId<HTMLButtonElement>("fixture-btn").addEventListener("click", () => this.loadFixture());
         byId<HTMLButtonElement>("save-btn").addEventListener("click", () => this.saveRecording());
+        byId<HTMLButtonElement>("export-btn").addEventListener("click", () => this.exportDialog?.open(this.viewRangeText()));
         byId<HTMLButtonElement>("shortcuts-btn").addEventListener("click", () => this.shortcuts?.open());
         byId<HTMLButtonElement>("load-cancel").addEventListener("click", () => this.cancelLoad());
         byId<HTMLButtonElement>("play-btn").addEventListener("click", () => this.togglePlay());
@@ -506,7 +531,7 @@ export class ObservatoryApp {
             });
         });
         document.addEventListener("keydown", (ev) => {
-            if (!this.shortcuts?.enabled || this.shortcuts.isOpen || ev.defaultPrevented) {
+            if (!this.shortcuts?.enabled || document.querySelector("dialog[open]") || ev.defaultPrevented) {
                 return;
             }
             const action = shortcutAction(ev);
@@ -756,6 +781,7 @@ export class ObservatoryApp {
 
     private applyLoaded(loaded: LoadedRecording, source: "fixture" | "file", label: string): void {
         this.notices = [];
+        this.exportNotice = null;
         this.store.reset(source, label, loaded.manifest);
         // One append = one ordering pass; SessionStore no longer spreads into push().
         this.store.append(loaded.events);
@@ -766,19 +792,56 @@ export class ObservatoryApp {
         this.render();
     }
 
+    /**
+     * Save writes the whole session as a recording through the same path as
+     * Export (.sobs): sensitive sessions are confirmed first, and the desktop
+     * shell shows its native save dialog.
+     */
     private saveRecording(): void {
-        if (this.store.events.length === 0) {
+        void this.exportAs({ format: "sobs", scope: "session" });
+    }
+
+    /** The range "Current view" exports: the event-table filters up to the replay cursor. */
+    private viewRange(): ExportRange {
+        const last = this.cursor.visibleEvents().at(-1);
+        return { cls: this.filterClass, text: this.filterText, toNs: last ? last.mono_ns : null };
+    }
+
+    private viewRangeText(): string {
+        const shown = this.cursor.visibleCount();
+        const all = this.cursor.events.length;
+        const cursor = shown < all ? `events up to the replay cursor (${shown} of ${all})` : "all events (the cursor is at the end)";
+        const filtered = this.filterClass !== "all" || this.filterText !== "";
+        const filters = filtered ? `, filtered by ${describeRange({ cls: this.filterClass, text: this.filterText }, this.cursor.originNs)}` : "";
+        return `As in the Events table: ${cursor}${filters}.`;
+    }
+
+    /** Runs an export through exportWithConfirmation (never exportSession directly). */
+    private async exportAs(choice: ExportChoice): Promise<void> {
+        const events = this.store.events;
+        if (events.length === 0) {
             return;
         }
-        const text = serializeRecording(this.store.events);
-        const blob = new Blob([text], { type: "application/x-ndjson" });
-        const url = URL.createObjectURL(blob);
-        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-        const a = h("a", { href: url, download: `observatory-${stamp}${RECORDING_EXTENSION}` });
-        document.body.append(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        const range: ExportRange = choice.scope === "view" ? this.viewRange() : {};
+        const label = EXPORT_FORMATS[choice.format].label;
+        try {
+            const { confirmSensitiveExport, exportWithConfirmation } = await import("../export");
+            const saved = await exportWithConfirmation(choice.format, { events, range: isFullRange(range) ? {} : range }, confirmSensitiveExport);
+            this.exportNotice = saved ? `Exported ${label}: ${saved.name}` : `${label} export cancelled; nothing was written.`;
+        } catch (error) {
+            this.exportNotice = `${label} export failed: ${(error as Error)?.message ?? String(error)}`;
+        }
+        this.render();
+    }
+
+    /** Label of the current source for the Compare tab ("live: …", a file name or the fixture). */
+    private describeSource(): string {
+        const s = this.store;
+        if (s.source === "live") {
+            const urls = this.connections.map((c) => redactUrlSecrets(c.url));
+            return `live: ${urls.join(", ") || "producers"}`;
+        }
+        return s.source === "none" ? "current session" : s.sourceLabel;
     }
 
     private rebuildCursor(): void {
@@ -959,6 +1022,47 @@ export class ObservatoryApp {
         byId("extra-panels").hidden = this.view !== "overview";
         this.renderDiagnostics();
         this.renderTopology();
+        this.renderCompare();
+    }
+
+    /** Hidden tabs are not rendered; the panel throttles re-analysis of a growing live session. */
+    private renderCompare(): void {
+        const container = byId("view-compare");
+        if (container.hidden) {
+            return;
+        }
+        if (!this.compare) {
+            if (!this.compareLoading) {
+                this.compareLoading = true;
+                container.replaceChildren(h("p", { class: "muted", text: "Loading Compare…" }));
+                import("../compare/panel").then(
+                    ({ ComparePanel }) => {
+                        this.compare = new ComparePanel({ describeCurrent: () => this.describeSource() });
+                        this.render();
+                    },
+                    (error: unknown) => {
+                        this.compareLoading = false;
+                        container.replaceChildren(h("p", { class: "warning", text: `Compare failed to load: ${(error as Error)?.message ?? String(error)}` }));
+                    },
+                );
+            }
+            return;
+        }
+        try {
+            this.compare.render(container, this.panelContext(this.cursor.visibleEvents()));
+        } catch (error) {
+            container.replaceChildren(h("p", { class: "warning", text: `Compare failed: ${(error as Error).message}` }));
+        }
+    }
+
+    private panelContext(visible: readonly ObservatoryEvent[]): PanelContext {
+        return {
+            visible,
+            all: this.store.events,
+            selectedId: this.selectedId,
+            select: (e) => this.seekTo(e),
+            synthetic: this.store.synthetic,
+        };
     }
 
     /** Topology layout uses the whole session; the graph itself is derived at the replay cursor. */
@@ -1013,13 +1117,7 @@ export class ObservatoryApp {
                 continue;
             }
             try {
-                panel.render(container, {
-                    visible,
-                    all: this.store.events,
-                    selectedId: this.selectedId,
-                    select: (e) => this.seekTo(e),
-                    synthetic: this.store.synthetic,
-                });
+                panel.render(container, this.panelContext(visible));
             } catch (error) {
                 // A failing panel must not take down the rest of the viewer.
                 container.replaceChildren(h("p", { class: "warning", text: `Panel "${panel.title}" failed: ${(error as Error).message}` }));
@@ -1070,17 +1168,25 @@ export class ObservatoryApp {
         status.dataset.tone = live.tone;
         const save = byId<HTMLButtonElement>("save-btn");
         save.disabled = s.events.length === 0;
-        save.textContent = s.source === "live" ? `Save live session (${s.events.length} events)` : `Save (${RECORDING_EXTENSION})`;
+        byId<HTMLButtonElement>("export-btn").disabled = s.events.length === 0;
+        save.textContent =
+            s.source === "live"
+                ? `Save live session (${s.events.length} events${s.droppedByRetention > 0 ? `, ${s.droppedByRetention} older dropped` : ""})`
+                : `Save (${RECORDING_EXTENSION})`;
         byId<HTMLButtonElement>("play-btn").textContent = this.playing ? "Pause" : "Play";
     }
 
     /** #warnings is a polite live region: it is rewritten only when its text changes. */
     private renderWarnings(): void {
         const s = this.store;
-        const items: string[] = [...this.launchNotices, ...this.notices, ...(this.navNotice ? [this.navNotice] : [])];
-        if (s.rejected.length > 0) {
+        const items: string[] = [...this.launchNotices, ...this.notices, ...(this.navNotice ? [this.navNotice] : []), ...(this.exportNotice ? [this.exportNotice] : [])];
+        const retention = s.retentionNotice;
+        if (retention !== null) {
+            items.push(retention);
+        }
+        if (s.rejectedCount > 0) {
             const first = s.rejected[0]!;
-            items.push(`${s.rejected.length} line(s) rejected by the schema validator (first: line ${first.line}: ${first.reason})`);
+            items.push(`${s.rejectedCount} line(s) rejected by the schema validator (first: line ${first.line}: ${first.reason})`);
         }
         if (s.gaps.length > 0) {
             const missing = s.gaps.reduce((n, g) => n + (g.to - g.from + 1), 0);
@@ -1117,6 +1223,7 @@ export class ObservatoryApp {
                 extra,
                 h("div", { class: "evidence", text: evidence }),
             );
+        const tokenCard = tokenCardModel(m);
         const derived = (n: number, what: string) => (n > 0 ? `derived · ${n} ${what}` : "unavailable · no events yet");
         const errorTypes = Object.entries(m.errors.byType)
             .map(([t, n]) => `${t} ×${n}`)
@@ -1147,12 +1254,7 @@ export class ObservatoryApp {
                 `p95 ${fmtMs(m.timeToFirstToken.p95Ms)}`,
                 derived(m.timeToFirstToken.count, "requests with a first token"),
             ),
-            card(
-                "Token rate",
-                `${fmtRate(m.tokens.recentRate)} tok/s`,
-                `last ${m.tokens.windowMs / 1000}s · overall ${fmtRate(m.tokens.overallRate)} tok/s · ${m.tokens.total} tokens`,
-                derived(m.tokens.total, "inference.token.generated"),
-            ),
+            card("Token rate", tokenCard.value, tokenCard.sub, tokenCard.evidence),
             card(
                 "Errors",
                 `${m.errors.total}`,
@@ -1178,7 +1280,7 @@ export class ObservatoryApp {
             card(
                 "Telemetry",
                 `${m.eventCount} events`,
-                `dropped (producer-reported) ${m.droppedEvents} · rejected ${this.store.rejected.length}`,
+                `dropped (producer-reported) ${m.droppedEvents} · rejected ${this.store.rejectedCount}${this.store.droppedByRetention > 0 ? ` · ${this.store.droppedByRetention} older not retained` : ""}`,
                 "measured · events received at the cursor",
                 m.droppedEvents > 0 ? "tone-warning" : "",
             ),

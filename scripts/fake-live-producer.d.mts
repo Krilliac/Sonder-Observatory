@@ -43,6 +43,8 @@ export interface FakeLiveProducerOptions {
     tokenFile?: string;
     /** SSE `: keepalive` / NDJSON blank-line heartbeat interval. Default 15000. */
     heartbeatMs?: number;
+    /** Concurrent stream connections served; more get 503. Default DEFAULT_MAX_CONNECTIONS (32). */
+    maxConnections?: number;
     log?: (message: string) => void;
 }
 
@@ -67,6 +69,8 @@ export interface FakeLiveProducerStats {
     discovery: number;
     /** Requests refused for a missing or wrong bearer token. */
     unauthorized: number;
+    /** Stream connections refused because maxConnections were open. */
+    refused: number;
 }
 
 export interface FakeLiveProducer {
@@ -84,6 +88,8 @@ export interface FakeLiveProducer {
 export const DEFAULT_FIXTURE: string;
 export const DISCOVERY_PATH: string;
 export const DEFAULT_CORS_ORIGINS: readonly string[];
+export const DEFAULT_MAX_CONNECTIONS: number;
+export function isLoopbackHost(host: string): boolean;
 export const ROLE_MODES: Record<FakeProducerRole, { name: string | null; prefix: string; hexBytes: number }>;
 export function loadEvents(file?: string): Record<string, unknown>[];
 export function readTokenFile(path: string): string;

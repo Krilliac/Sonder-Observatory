@@ -11,7 +11,7 @@
 | Requests | 10 (10 finished, 0 open) |
 | Request latency p50 / p95 / max | 1.24 s / 1.67 s / 1.67 s |
 | Time to first token p50 / p95 | 140 ms / 262 ms |
-| Tokens (overall rate) | 334 (21.6 tok/s) |
+| Tokens (decode rate) | 334 derived (28.9 tok/s over 11.21 s of decode) |
 | Errors | 4 (guard.budget_pressure ×1, request.failed ×1, retry.scheduled ×1, tool.failed ×1) |
 | Agents spawned / completed | 3 / 3 |
 | Tools called / completed / failed | 3 / 2 / 1 |

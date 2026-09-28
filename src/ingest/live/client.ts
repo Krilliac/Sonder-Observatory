@@ -133,6 +133,17 @@ const WS_TOKEN_REFUSED = "a bearer token cannot be sent over WebSocket; use the 
 
 const MAX_REJECTED_KEPT = 1000;
 
+/**
+ * Upper bound for a producer's SSE `retry:` hint. setTimeout treats delays
+ * above 2^31-1 ms as 0, so an unclamped hint could force a reconnect loop.
+ */
+export const MAX_SERVER_RETRY_MS = 60_000;
+
+/** A server retry hint in [0, MAX_SERVER_RETRY_MS], or null when unusable. */
+export function clampRetryHint(ms: number): number | null {
+    return Number.isFinite(ms) && ms >= 0 ? Math.min(ms, MAX_SERVER_RETRY_MS) : null;
+}
+
 /** The bearer token in an Authorization header, if any. */
 function bearerToken(headers: Readonly<Record<string, string>> | undefined): string | undefined {
     const entry = Object.entries(headers ?? {}).find(([k]) => k.toLowerCase() === "authorization");
@@ -385,7 +396,7 @@ export class LiveIngestClient {
             },
             onRetryHint: (ms) => {
                 if (current()) {
-                    this.serverRetryMs = ms;
+                    this.serverRetryMs = clampRetryHint(ms);
                 }
             },
             onClose: (reason, failed) => {

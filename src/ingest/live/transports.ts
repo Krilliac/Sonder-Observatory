@@ -5,7 +5,7 @@
  */
 import type { WebSocketFactory, WebSocketLike } from "../../transport/live";
 import { withQueryParam, type TransportKind } from "./endpoint";
-import { LineSplitter, SseParser } from "./sse";
+import { LineSplitter, MAX_LINE_CHARS, SseParser } from "./sse";
 
 export interface TransportCallbacks {
     onOpen(kind: TransportKind): void;
@@ -83,6 +83,8 @@ export function openWebSocket(
     request: TransportRequest,
     callbacks: TransportCallbacks,
     factory: WebSocketFactory,
+    /** Largest text frame accepted, in UTF-16 code units. */
+    maxFrameChars: number = MAX_LINE_CHARS,
 ): TransportHandle {
     // Browsers cannot set headers on a WebSocket handshake, so resume is
     // requested with a query parameter the producer may honour or ignore.
@@ -108,7 +110,9 @@ export function openWebSocket(
         if (closed) {
             return;
         }
-        if (typeof ev.data === "string") {
+        if (typeof ev.data === "string" && ev.data.length > maxFrameChars) {
+            callbacks.onInvalidFrame(`a WebSocket frame of ${ev.data.length} characters exceeds the ${maxFrameChars}-character limit`);
+        } else if (typeof ev.data === "string") {
             callbacks.onPayload(ev.data, null);
         } else {
             callbacks.onInvalidFrame("binary frames are not supported");
@@ -194,11 +198,12 @@ export function openHttpStream(
                     }
                 },
                 onRetry: (ms) => callbacks.onRetryHint(ms),
+                onOversize: (reason) => callbacks.onInvalidFrame(reason),
             });
             feed = (text) => parser.feed(text);
             end = () => parser.reset();
         } else {
-            const splitter = new LineSplitter();
+            const splitter = new LineSplitter({ onOversize: (reason) => callbacks.onInvalidFrame(reason) });
             feed = (text) => {
                 const lines = splitter.feed(text);
                 if (lines.length > 0) {

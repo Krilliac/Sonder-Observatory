@@ -39,13 +39,20 @@ export function alignUnits(a: UnitGroup, b: UnitGroup): Alignment {
     const bKeys = new Map(b.units.map((u) => [u.key, u]));
     const shared = a.units.some((u) => bKeys.has(u.key));
     if (!inferred && shared) {
-        const aKeys = new Set(a.units.map((u) => u.key));
+        // Key -> first index in A (what findIndex would return), built once.
+        const aIndex = new Map<string, number>();
+        a.units.forEach((u, i) => {
+            if (!aIndex.has(u.key)) {
+                aIndex.set(u.key, i);
+            }
+        });
         const pairs: { order: number; pair: AlignedPair }[] = a.units.map((u, i) => ({ order: i, pair: pairOf(u, bKeys.get(u.key) ?? null) }));
         // B-only units go right after the last A unit that precedes them in B's order.
         let anchor = -1;
         b.units.forEach((u, j) => {
-            if (aKeys.has(u.key)) {
-                anchor = a.units.findIndex((x) => x.key === u.key);
+            const at = aIndex.get(u.key);
+            if (at !== undefined) {
+                anchor = at;
             } else {
                 pairs.push({ order: anchor + 0.5 + j / (b.units.length + 1) / 2, pair: pairOf(null, u) });
             }

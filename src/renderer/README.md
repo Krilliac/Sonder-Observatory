@@ -7,7 +7,7 @@ the modules below; everything shown is derived from received events.
 
 | Module | What it does |
 | --- | --- |
-| `app.ts` | Shell: header, sidebar, view tabs (Overview, Events, Diagnostics, Agents), replay bar, docked inspector; owns the SessionStore and the LiveConnectionManager |
+| `app.ts` | Shell: header, sidebar, view tabs (Overview, Events, Diagnostics, Agents, Compare), the Export dialog, replay bar, docked inspector; owns the SessionStore and the LiveConnectionManager |
 | `main.ts` | Injects the design-token stylesheet, sets the theme, starts the app and the desktop integration |
 | `connectionPanel.ts` | Sources panel (#connection-panel): URL, transport, in-memory token, Test, presets, recent endpoints |
 | `producersPanel.ts` | Producer cards (#producers) with the contract 8.6 hooks; built once per connection and patched in place, so buttons survive live counter updates |

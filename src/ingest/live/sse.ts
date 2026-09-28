@@ -11,14 +11,30 @@ export interface SseMessage {
     lastEventId: string;
 }
 
+/**
+ * Largest line (and, for SSE, event: all its data lines together) the live
+ * parsers buffer, in UTF-16 code units. A producer controls line length, so
+ * an unterminated line must not grow the viewer's memory without bound.
+ */
+export const MAX_LINE_CHARS = 16 * 1024 * 1024;
+
 export interface SseHandlers {
     onMessage(message: SseMessage): void;
     /** Reconnection time requested by the server via a `retry:` field. */
     onRetry?(ms: number): void;
+    /** A line or event exceeded the size limit and was discarded. */
+    onOversize?(reason: string): void;
 }
 
 export class SseParser {
-    private buffer = "";
+    /** Pieces of the unterminated line (kept apart so no chunk is rescanned). */
+    private parts: string[] = [];
+    private partChars = 0;
+    /** Discarding an oversized line up to its terminator. */
+    private skippingLine = false;
+    /** Discarding the current event up to its blank line. */
+    private skippingEvent = false;
+    private dataChars = 0;
     private data: string[] = [];
     private eventType = "";
     private lastEventId = "";
@@ -26,11 +42,19 @@ export class SseParser {
     private first = true;
     private pendingCr = false;
 
-    constructor(private readonly handlers: SseHandlers) {}
+    constructor(
+        private readonly handlers: SseHandlers,
+        private readonly maxLineChars: number = MAX_LINE_CHARS,
+    ) {}
 
     /** Id carried over across reconnects, per spec. */
     get currentLastEventId(): string {
         return this.lastEventId;
+    }
+
+    /** Characters held for an unterminated line. */
+    get bufferedChars(): number {
+        return this.partChars;
     }
 
     feed(chunk: string): void {
@@ -48,17 +72,24 @@ export class SseParser {
                 text = text.slice(1);
             }
         }
-        this.buffer += text;
         let start = 0;
-        for (let i = 0; i < this.buffer.length; i += 1) {
-            const c = this.buffer.charCodeAt(i);
+        for (let i = 0; i < text.length; i += 1) {
+            const c = text.charCodeAt(i);
             if (c !== 10 && c !== 13) {
                 continue;
             }
-            this.processLine(this.buffer.slice(start, i));
+            this.hold(text.slice(start, i));
+            if (this.skippingLine) {
+                this.skippingLine = false;
+            } else {
+                const line = this.parts.length === 1 ? this.parts[0]! : this.parts.join("");
+                this.parts = [];
+                this.partChars = 0;
+                this.processLine(line);
+            }
             if (c === 13) {
-                if (i + 1 < this.buffer.length) {
-                    if (this.buffer.charCodeAt(i + 1) === 10) {
+                if (i + 1 < text.length) {
+                    if (text.charCodeAt(i + 1) === 10) {
                         i += 1;
                     }
                 } else {
@@ -67,21 +98,58 @@ export class SseParser {
             }
             start = i + 1;
         }
-        this.buffer = this.buffer.slice(start);
+        this.hold(text.slice(start));
     }
 
     /** Discards a partially received event (stream ended mid-event). */
     reset(): void {
-        this.buffer = "";
+        this.parts = [];
+        this.partChars = 0;
+        this.skippingLine = false;
+        this.skippingEvent = false;
+        this.dataChars = 0;
         this.data = [];
         this.eventType = "";
         this.sawData = false;
         this.pendingCr = false;
     }
 
+    /** Buffers part of the current line, or drops the line once it is too long. */
+    private hold(text: string): void {
+        if (this.skippingLine || text.length === 0) {
+            return;
+        }
+        if (this.partChars + text.length > this.maxLineChars) {
+            this.parts = [];
+            this.partChars = 0;
+            this.skippingLine = true;
+            this.oversize(`an SSE line exceeds the ${this.maxLineChars}-character limit`);
+            return;
+        }
+        this.parts.push(text);
+        this.partChars += text.length;
+    }
+
+    /** Drops the event in progress; the stream resynchronises at its blank line. */
+    private oversize(reason: string): void {
+        this.data = [];
+        this.dataChars = 0;
+        this.sawData = false;
+        this.skippingEvent = true;
+        this.handlers.onOversize?.(reason);
+    }
+
     private processLine(line: string): void {
         if (line === "") {
+            if (this.skippingEvent) {
+                this.skippingEvent = false;
+                this.eventType = "";
+                return;
+            }
             this.dispatch();
+            return;
+        }
+        if (this.skippingEvent) {
             return;
         }
         if (line.startsWith(":")) {
@@ -102,6 +170,11 @@ export class SseParser {
         }
         switch (field) {
             case "data":
+                this.dataChars += value.length + 1;
+                if (this.dataChars > this.maxLineChars) {
+                    this.oversize(`SSE event data exceeds the ${this.maxLineChars}-character limit`);
+                    break;
+                }
                 this.data.push(value);
                 this.sawData = true;
                 break;
@@ -134,27 +207,87 @@ export class SseParser {
             lastEventId: this.lastEventId,
         };
         this.data = [];
+        this.dataChars = 0;
         this.eventType = "";
         this.sawData = false;
         this.handlers.onMessage(message);
     }
 }
 
-/** Splits a text stream into lines across chunk boundaries (LF or CRLF). */
+export interface LineSplitterOptions {
+    /** Longest line kept, in UTF-16 code units. Default MAX_LINE_CHARS. */
+    maxLineChars?: number;
+    /** A line exceeded the limit and was discarded. */
+    onOversize?(reason: string): void;
+}
+
+/**
+ * Splits a text stream into lines across chunk boundaries (LF or CRLF).
+ * Each chunk is scanned once, and a line longer than the limit is dropped
+ * (and reported) rather than buffered.
+ */
 export class LineSplitter {
-    private buffer = "";
+    private parts: string[] = [];
+    private partChars = 0;
+    /** Discarding an oversized line up to its terminator. */
+    private skipping = false;
+    private readonly maxLineChars: number;
+    private readonly onOversize: ((reason: string) => void) | undefined;
+
+    constructor(options: LineSplitterOptions = {}) {
+        this.maxLineChars = options.maxLineChars ?? MAX_LINE_CHARS;
+        this.onOversize = options.onOversize;
+    }
+
+    /** Characters held for an unterminated line. */
+    get bufferedChars(): number {
+        return this.partChars;
+    }
 
     feed(chunk: string): string[] {
-        this.buffer += chunk;
-        const parts = this.buffer.split("\n");
-        this.buffer = parts.pop() ?? "";
-        return parts.map((p) => (p.endsWith("\r") ? p.slice(0, -1) : p));
+        const lines: string[] = [];
+        let start = 0;
+        for (;;) {
+            const nl = chunk.indexOf("\n", start);
+            if (nl === -1) {
+                this.hold(chunk.slice(start));
+                return lines;
+            }
+            this.hold(chunk.slice(start, nl));
+            start = nl + 1;
+            if (this.skipping) {
+                this.skipping = false;
+                continue;
+            }
+            const line = this.parts.length === 1 ? this.parts[0]! : this.parts.join("");
+            this.parts = [];
+            this.partChars = 0;
+            lines.push(line.endsWith("\r") ? line.slice(0, -1) : line);
+        }
     }
 
     /** Returns the trailing unterminated line, if any. */
     flush(): string[] {
-        const rest = this.buffer;
-        this.buffer = "";
-        return rest.trim() === "" ? [] : [rest];
+        const rest = this.parts.join("");
+        const skipped = this.skipping;
+        this.parts = [];
+        this.partChars = 0;
+        this.skipping = false;
+        return skipped || rest.trim() === "" ? [] : [rest];
+    }
+
+    private hold(text: string): void {
+        if (this.skipping || text.length === 0) {
+            return;
+        }
+        if (this.partChars + text.length > this.maxLineChars) {
+            this.parts = [];
+            this.partChars = 0;
+            this.skipping = true;
+            this.onOversize?.(`an NDJSON line exceeds the ${this.maxLineChars}-character limit`);
+            return;
+        }
+        this.parts.push(text);
+        this.partChars += text.length;
     }
 }

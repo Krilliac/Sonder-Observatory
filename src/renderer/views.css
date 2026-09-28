@@ -38,7 +38,8 @@ table.events tr.evidence td:first-child {
 
 /* Diagnostics findings list (src/diagnostics/panel.ts) */
 #view-diagnostics,
-#view-agents {
+#view-agents,
+#view-compare {
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-lg);
@@ -109,4 +110,42 @@ table.events tr.selected .muted {
 
 .extra-panels:empty {
     display: none;
+}
+
+/* Export dialog (src/renderer/exportDialog.ts) */
+.export-form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+}
+
+.export-fieldset {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: var(--space-3) var(--space-5) var(--space-4);
+    margin: 0;
+    min-width: 0;
+}
+
+.export-fieldset legend {
+    padding: 0 var(--space-2);
+    color: var(--color-muted);
+    font-size: var(--font-size-sm);
+}
+
+.export-option {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-2) 0;
+}
+
+.export-option .hint {
+    margin-left: 24px;
+}
+
+.dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-3);
 }

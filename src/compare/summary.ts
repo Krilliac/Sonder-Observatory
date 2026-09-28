@@ -11,8 +11,9 @@
  */
 import { runDiagnostics, type Finding } from "../diagnostics";
 import type { ObservatoryEvent } from "../protocol/events";
+import { outputTokenCount } from "../query/attributes";
 import { isErrorEvent } from "../query/classify";
-import { deriveMetrics, percentile } from "../query/metrics";
+import { deriveMetrics, percentile, type DecodeWindow } from "../query/metrics";
 import { isSyntheticProducer } from "../recording/sobs";
 import { orderEvents } from "../replay/order";
 import { deriveTopology, type TopologyGraph } from "../topology";
@@ -44,7 +45,7 @@ export interface RequestFacts {
     /** Time to first token (first `inference.token.generated`), or the reported `ttft_ms`. */
     ttftMs: number | null;
     ttftSource: "derived" | "reported" | null;
-    /** Streamed tokens counted from token events. */
+    /** Tokens counted from per-token events (`unit: "chunk"` output is never counted). */
     streamedTokens: number;
     firstTokenNs: number | null;
     lastTokenNs: number | null;
@@ -112,8 +113,14 @@ function sumOrNull(values: readonly (number | null)[]): number | null {
 }
 
 function maxOrNull(values: readonly (number | null)[]): number | null {
-    const present = values.filter((v): v is number => v !== null);
-    return present.length === 0 ? null : Math.max(...present);
+    // A loop, not Math.max(...values): spreading throws RangeError past ~125k values.
+    let max: number | null = null;
+    for (const v of values) {
+        if (v !== null && (max === null || v > max)) {
+            max = v;
+        }
+    }
+    return max;
 }
 
 /** Token-weighted decode rate over requests: sum(tokens) / sum(decode seconds). */
@@ -186,7 +193,11 @@ function statsFor(key: string, label: string, requests: readonly RequestFacts[],
 export function requestFacts(events: readonly ObservatoryEvent[]): RequestFacts[] {
     const spans = deriveMetrics(events).requests;
     const byId = new Map<string, RequestFacts>();
+    const spanDecode = new Map<string, DecodeWindow>();
     for (const s of spans) {
+        if (s.decode) {
+            spanDecode.set(s.requestId, s.decode);
+        }
         byId.set(s.requestId, {
             requestId: s.requestId,
             runId: null,
@@ -219,7 +230,7 @@ export function requestFacts(events: readonly ObservatoryEvent[]): RequestFacts[
         if (p !== null) {
             r.promptTokens = Math.max(r.promptTokens ?? 0, p);
         }
-        if (e.event_type === "inference.token.generated") {
+        if (e.event_type === "inference.token.generated" && outputTokenCount(e) !== null) {
             r.lastTokenNs = e.mono_ns;
         }
         const rate = reportedDecodeRate(e);
@@ -251,6 +262,14 @@ export function requestFacts(events: readonly ObservatoryEvent[]): RequestFacts[
         } else if (r.firstTokenNs !== null && r.lastTokenNs !== null && r.streamedTokens >= 2 && r.lastTokenNs > r.firstTokenNs) {
             r.decodeTokPerSec = (r.streamedTokens - 1) / ((r.lastTokenNs - r.firstTokenNs) / 1e9);
             r.decodeSource = "derived";
+        } else {
+            // Chunk-streamed output (no per-token events): the backend count over
+            // the request's decode window (query/metrics.ts), never the chunk count.
+            const d = spanDecode.get(r.requestId);
+            if (d && d.tokens > 0 && d.ns > 0) {
+                r.decodeTokPerSec = d.tokens / (d.ns / 1e9);
+                r.decodeSource = "derived";
+            }
         }
     }
     return [...byId.values()].sort((a, b) => a.startNs - b.startNs || (a.requestId < b.requestId ? -1 : 1));

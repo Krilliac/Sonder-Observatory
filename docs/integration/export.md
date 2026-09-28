@@ -61,8 +61,20 @@ on purpose.
 
 ### "Export" menu hook (`src/renderer/app.ts`, lead-owned)
 
-Not wired on this branch. Suggested hook, next to the existing "Save
-recording" control:
+**Status (2026-09-27): wired.** The header has **Export…**
+(`#export-btn`), which opens `#export-dialog`
+(`src/renderer/exportDialog.ts`): a format radio group and a range group
+(Whole session / Current view = Events filters up to the replay cursor).
+`ObservatoryApp.exportAs` runs the choice through
+`exportWithConfirmation(..., confirmSensitiveExport)` and reports the saved
+name, a cancel or a failure in `#warnings`. **Save** now calls the same path
+with `sobs` (so it is confirmed too and uses `save_export` on desktop). No
+keyboard shortcut was added. `e2e/export.spec.ts` covers the formats, the
+view range, keyboard/focus and the warning; `e2e/a11y.spec.ts` scans the
+dialog and the warning in both themes (the warning title now uses the
+`textWarning` token: `warning` failed AA contrast in the light theme).
+
+Original suggestion, kept for reference:
 
 ```ts
 import { confirmSensitiveExport, EXPORT_FORMATS, EXPORT_FORMAT_IDS, exportWithConfirmation, type ExportFormat } from "../export";
