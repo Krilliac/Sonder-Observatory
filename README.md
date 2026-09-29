@@ -50,8 +50,8 @@ verified; see [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Requirements
 
-- Node.js 20.19 or later (`engines` in `package.json`; CI tests Node 20 and 22)
-  and npm.
+- Node.js 20.19+ or 22.12+ (the range Vite 8 requires; CI tests Node 20 and
+  22) and npm.
 - For the desktop shell: Rust 1.88 or later and the Tauri platform
   prerequisites listed in [src-tauri/README.md](src-tauri/README.md).
 
