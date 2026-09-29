@@ -1,197 +1,170 @@
 # Sonder Observatory
 
-**Sonder Observatory** is the visualization, replay, and diagnostics companion for the Sonder ecosystem.
+[![CI](https://github.com/Krilliac/Sonder-Observatory/actions/workflows/ci.yml/badge.svg)](https://github.com/Krilliac/Sonder-Observatory/actions/workflows/ci.yml)
+[![E2E](https://github.com/Krilliac/Sonder-Observatory/actions/workflows/e2e.yml/badge.svg)](https://github.com/Krilliac/Sonder-Observatory/actions/workflows/e2e.yml)
 
-It turns structured runtime telemetry into an explorable view of inference, context/KV-cache behavior, model routing, agent orchestration, tool calls, retries, compaction, memory retrieval, and resource pressure.
+Sonder Observatory is a viewer for telemetry events emitted by
+[Sonder Runtime](https://github.com/Krilliac/Sonder-runtime) and
+[Sonder-Inference](https://github.com/Krilliac/Sonder-Inference). It ingests
+live event streams or recorded sessions and shows them as a timeline, an event
+table, diagnostics, an agent topology, a comparison of two runs and a 3D view
+of the inference request pipeline. It runs in a browser (Vite web app) or in a
+Tauri desktop shell.
 
-> Observatory is an observability product, not a claim to expose a model's private chain-of-thought. Visualizations must be grounded in events, metrics, model outputs, or instrumentation the runtime actually exposes.
+Website: <https://sondercore.si>
 
-## Project role
+Observatory only displays what producers report. It does not access model
+internals and does not show a model's chain of thought; views that need data a
+producer does not send (for example per-layer telemetry) say so instead of
+drawing placeholders.
 
-```text
-Sonder Runtime / Sonder Inference
-             |
-      versioned telemetry
-             |
-             v
-    Sonder Observatory
-       |           |
-   live view     replay
-       |           |
-   3D inference  agent topology
-   diagnostics   event timeline
-```
+## Capabilities
 
-Observatory is intended to remain a separate repository and process so renderer failures or GPU-heavy visualization cannot destabilize inference. Sonder's Flutter application can launch it standalone or host its web renderer in an embedded view.
+- **Live ingest** from several producers at once over WebSocket, SSE or NDJSON,
+  with producer discovery (`/.well-known/sonder-telemetry`), bearer tokens,
+  reconnect with resume, and per-producer status cards
+  ([docs/integration/live-ingest.md](docs/integration/live-ingest.md)).
+- **Recording and replay**: `.sobs` recordings (also `.ndjson`, `.jsonl`,
+  `.json`), replay with a scrubber, large recordings loaded in chunks
+  ([docs/RECORDING_FORMAT.md](docs/RECORDING_FORMAT.md)).
+- **Views**: Overview (metric cards and timeline), Events (table and evidence
+  inspector), 3D Inference, Diagnostics, Agents (topology) and Compare
+  (baseline against candidate).
+- **3D Inference** (`src/inference3d`, three.js, loaded on demand): request
+  pipeline stages by model and node, KV-cache pools, and layer, operator and
+  sampling data only when a producer sends them
+  ([docs/integration/inference3d.md](docs/integration/inference3d.md)).
+- **Scrub and live indexes** for metrics, topology, timeline and inspector
+  lookups, so scrubbing and live appends do not recompute the whole session.
+  Measurements and budgets are in
+  [docs/integration/perf.md](docs/integration/perf.md).
+- **Export**: HTML report, Markdown summary, findings and metrics JSON, or a
+  `.sobs` range, with a confirmation step when a session contains captured text
+  or tool payloads ([docs/integration/export.md](docs/integration/export.md)).
+- **Desktop shell** (`src-tauri/`, Tauri v2): native open and save dialogs,
+  recent recordings and a `--connect` / `--token-file` / `--open` launch
+  contract ([src-tauri/README.md](src-tauri/README.md)).
 
-## Core experiences
+Not implemented: Flutter embedding. Tauri bundling (`tauri build`) is not
+verified; see [docs/ROADMAP.md](docs/ROADMAP.md).
 
-- **Live inference space** — token/prefill/decode flow, layers when instrumented, KV-cache state, probabilities, latency, throughput, memory pressure, and device placement.
-- **Sonder space** — agent topology, model routing, context transfer, memory retrieval, tool calls, retries, critic/synthesis lanes, and distributed workers.
-- **Replay** — deterministic inspection of recorded telemetry with a scrubber, event filters, state snapshots, and comparative runs.
-- **Diagnostics** — token-budget pressure, compaction, no-progress loops, duplicate workers, cache thrash, model load/unload churn, and latency/resource hotspots.
-- **Embedded + standalone UX** — launch from Sonder Flutter, pop out into a dedicated window, or attach to a remote/local telemetry endpoint.
+## Requirements
 
-## Repository map
+- Node.js 20.19 or later (`engines` in `package.json`; CI tests Node 20 and 22)
+  and npm.
+- For the desktop shell: Rust 1.88 or later and the Tauri platform
+  prerequisites listed in [src-tauri/README.md](src-tauri/README.md).
 
-- `docs/ARCHITECTURE.md` — process boundaries and component design
-- `docs/UX.md` — product/interaction design
-- `docs/TELEMETRY_PROTOCOL.md` — event envelope and semantics
-- `docs/INTEGRATION.md` — Flutter, Runtime, and Sonder-Inference integration
-- `docs/SECURITY_PRIVACY.md` — redaction, storage, and safe observability
-- `docs/ROADMAP.md` — phased build plan
-- `docs/RESEARCH.md` — research and upstream references
-- `design/` — visual-system notes/tokens
-- `docs/assets/concepts/` — generated concept art used as design references
-- `docs/DECISIONS.md` — toolchain, protocol-mirror, ordering, and metric decisions
-- `docs/RECORDING_FORMAT.md` — `.sobs` recording container
-- `protocol/` — event envelope JSON Schema (source of truth)
-- `src/` — Milestone 1 web app (protocol mirror, transport, recording, replay, query, inspector, renderer)
-- `fixtures/` — synthetic telemetry fixture (clearly labeled synthetic)
-- `scripts/` — fixture generator and dev fake producer
-- `tests/` — Vitest unit tests
-
-## Design principles
-
-1. **Grounded visuals over pretty fiction.** Never label synthetic geometry as literal internal reasoning.
-2. **Zero-observability mode remains cheap.** Instrumentation must be bounded and sampling-aware.
-3. **Renderer isolation.** Observatory is never in the critical inference path.
-4. **Replayability.** Events use stable IDs, clocks, schema versions, and session/run boundaries.
-5. **Cross-runtime compatibility.** The protocol can describe Sonder-Inference, llama.cpp-backed execution, Ollama compatibility mode, remote nodes, and future backends.
-6. **Useful at multiple scales.** From one token to an entire multi-agent/distributed session.
-7. **Privacy by default.** Payload capture is opt-in or redacted; metrics/events should work without retaining raw prompts.
-
-## Relationship to Sonder-Inference
-
-Sonder-Inference is the preferred telemetry producer and owns inference scheduling, cache/model lifecycle, and device execution policy. Observatory consumes versioned events and must not reach into engine internals directly.
-
-See **Krilliac/Sonder-Inference** for the execution-engine research and architecture.
-
-## Status
-
-Milestone 1 in progress (2026-09-26): a small, trustworthy live viewer + replay
-recorder, web renderer first, before heavier 3D interpretation layers. What
-exists: Overview (metric cards and event timeline), Events (table and evidence
-inspector), Diagnostics, Agents and Compare views; export to an HTML report,
-Markdown summary, JSON or a `.sobs` range; live ingest from several producers at
-once (WebSocket, SSE, NDJSON, with producer discovery and bearer tokens), a
-Sources panel and producer cards, an onboarding empty state, light and dark
-themes, keyboard shortcuts, the `.sobs` recorder, replay with a scrubber, a
-synthetic fixture and a Tauri desktop shell in `src-tauri/`. Not yet: Tauri
-bundle, Flutter embedding, 3D views. The live producer protocol that Sonder Runtime
-and Sonder-Inference implement on their side is
-[docs/TELEMETRY_PROTOCOL.md](docs/TELEMETRY_PROTOCOL.md); this repository tests
-against its synthetic fake producer, not against those producers; what the UI does is in
-[docs/UX.md](docs/UX.md). See [roadmap](docs/ROADMAP.md) and
-[decisions](docs/DECISIONS.md).
-
-## Quickstart
-
-Requires Node.js 20.19+ (or 22.12+) and npm.
+## Install
 
 ```bash
-npm ci              # install from package-lock.json
-npm run dev         # http://127.0.0.1:5173 — opens with the synthetic fixture
-npm test            # Vitest unit tests
-npm run lint        # ESLint + TypeScript type check
-npm run build       # type check + production bundle in dist/
-npm run test:e2e    # Playwright end-to-end suite (docs/integration/e2e.md)
-npm run tauri dev   # desktop shell (needs a Rust toolchain; see src-tauri/README.md)
+git clone https://github.com/Krilliac/Sonder-Observatory.git
+cd Sonder-Observatory
+npm ci
 ```
 
-Live mode with the dev fake producer (replays the fixture; the data stays
-labelled synthetic):
+## Run
 
 ```bash
-npm run fake-live-producer -- --pace timeline   # http://127.0.0.1:8766 (discovery),
-# /sse, /ndjson and /ws on the same port; --role runtime|inference relabels the
-# stream as that producer, --token-file PATH requires a bearer token,
-# --disconnect-after 100 shows reconnect + resume on the producer card
+npm run dev          # web app at http://127.0.0.1:5173, loads the synthetic fixture
+npm run build        # type check and production bundle in dist/
+npm run preview      # serve dist/ at http://127.0.0.1:4173
+npm run tauri dev    # desktop shell around the dev server
+```
+
+`npm run dev`, `npm run build` and `npm test` first regenerate the synthetic
+fixture `fixtures/synthetic-session.ndjson` (`npm run fixture` does it on
+demand). Fixture data is labelled synthetic in the UI
+([fixtures/README.md](fixtures/README.md)). `npm run fixture:large` writes
+seeded 10k, 100k and 1M event recordings to `artifacts/fixtures/`.
+
+Live mode without Sonder, using the synthetic fake producer:
+
+```bash
+npm run fake-live-producer    # discovery and /sse, /ndjson, /ws on http://127.0.0.1:8766
 # then open http://127.0.0.1:5173/?connect=http://127.0.0.1:8766
 ```
 
-## Using the viewer
+Options include `--role runtime|inference`, `--token-file PATH`,
+`--pace timeline|burst` and `--disconnect-after N`; see the header of
+`scripts/fake-live-producer.mjs`.
 
-- **Sources** (sidebar, toggled by the **Sources** button): enter a producer
-  URL, pick a transport (Auto uses the producer's discovery document), add a
-  bearer token if the producer needs one, press **Test** to check it without
-  ingesting, then **Connect**. Presets list the local defaults (Runtime 11435,
-  Inference 11437, fake producer 8766); the last eight URLs are remembered
-  (URL and transport only, in this browser's localStorage).
-- **Producers**: one card per connection with its state (connecting, live,
-  reconnecting, failed, disconnected), counters (received, appended, dropped,
-  rejected, buffered, reconnects), last error and what to change, and
-  Disconnect. Events already received stay after a disconnect. Several
-  producers merge into one session in replay order.
-- **Views**: Overview (cards and timeline with a legend and a text summary),
-  Events (table with a producer column; the filter matches event type, ids,
-  request, run, agent and producer), Diagnostics, Agents and Compare (A =
-  baseline, B = candidate: a recording or the current session, aligned by
-  run, request or turn). The inspector is
-  docked beside every view and lists related events across producers (same
-  request, parent and child requests, same run, agent, tool call).
-- **No source**: the empty state can look for local producers (1 s per
-  preset), open a recording, or load the synthetic demo. Recordings
-  (`.sobs`, `.ndjson`, `.jsonl`, `.json`) can also be dropped on the window.
-- **Keyboard**: `?` lists shortcuts: Space play/pause, J/K next/previous
-  event, `]`/`[` next/previous error, `/` filter, F follow latest, T theme.
-  They are off while typing in a field, and the dialog has a **Single-key
-  shortcuts** switch to turn them off (remembered in this browser; the
-  Shortcuts button still opens the list).
-- **Export…** (header): HTML report, Markdown summary, findings and
-  metrics JSON, or a `.sobs` recording, of the whole session or the current
-  view (Events filters up to the replay cursor). A session with full text
-  capture or tool payloads asks for confirmation first; **Save** goes through
-  the same check. The desktop shell shows its native save dialog.
-- **Token rate** (Overview): chunk events (`unit: "chunk"`) are never
-  counted as tokens; totals prefer backend-reported counts and say which
-  (backend-reported, derived, mixed), and the rate is over decode time, not
-  the session span.
-- **Theme**: follows the system; the theme button (or T) switches and is
-  remembered in this browser.
+URL parameters: `?connect=<url>` (repeatable), `?fixture=0`,
+`?view=overview|events|3d|diagnostics|agents|compare`, `?theme=light|dark`.
+Tokens are never accepted in URLs; `token` and `access_token` parameters are
+removed with a warning. The UI reference is [docs/UX.md](docs/UX.md).
 
-URL parameters:
+## Connecting to Sonder Runtime and Sonder-Inference
 
-| Parameter | Effect |
+Observatory runs as a separate process and only consumes versioned events. The
+producers implement the live producer protocol in
+[docs/TELEMETRY_PROTOCOL.md](docs/TELEMETRY_PROTOCOL.md) (JSON Schemas in
+[protocol/](protocol/)). Both publish a discovery document, so base URLs are
+enough. The Sources panel presets are Sonder Runtime at
+`http://127.0.0.1:11435` and Sonder-Inference at `http://127.0.0.1:11437`:
+
+```text
+http://127.0.0.1:5173/?connect=http://127.0.0.1:11435&connect=http://127.0.0.1:11437
+```
+
+Each producer must allow the viewer's origin (CORS):
+
+- Sonder-Inference: `sonder-infer serve --cors-origin <origin>`.
+- Sonder Runtime: `SONDER_OBSERVATORY_ORIGINS` (telemetry routes only);
+  runtimes without that setting use `SONDER_CORS_ORIGINS`, which also opens
+  admin routes to that origin.
+
+Plain `http://` and `ws://` are accepted only for loopback hosts. Details:
+[docs/INTEGRATION.md](docs/INTEGRATION.md).
+
+The unit tests run against the fake producer, not the real producers.
+`npm run test:ecosystem` builds and runs Sonder-Inference and Sonder Runtime
+locally and checks them against Observatory in Playwright (Linux or macOS;
+[docs/integration/ecosystem-e2e.md](docs/integration/ecosystem-e2e.md)).
+`tests/conformance/` checks a running producer when `SONDER_CONFORMANCE_URLS`
+is set ([tests/README.md](tests/README.md)).
+
+## Project layout
+
+| Path | Contents |
 | --- | --- |
-| `?connect=<url>` | Connect a producer; repeat for several. Base URL (discovery), discovery URL or stream URL. |
-| `?ws=<url>` | Legacy alias of `connect`. |
-| `?fixture=0` | Start without the synthetic fixture (onboarding). |
-| `?view=overview\|events\|diagnostics\|agents\|compare` | Open that view. |
-| `?theme=light\|dark` | Theme for this load (not saved). |
+| `src/protocol/`, `protocol/` | Event and discovery types, validators, JSON Schemas |
+| `src/ingest/`, `src/transport/` | Live producer clients and connection manager |
+| `src/recording/`, `src/replay/` | `.sobs` and NDJSON recordings, session store, replay cursor |
+| `src/query/` | Metric derivation and metrics index |
+| `src/renderer/` | App shell, timeline, event table, panels |
+| `src/inference3d/` | 3D Inference view |
+| `src/diagnostics/`, `src/topology/`, `src/compare/`, `src/inspector/`, `src/export/` | Diagnostics, agent topology, run comparison, evidence inspector, export |
+| `src/integrations/` | Tauri desktop bridge |
+| `src-tauri/` | Tauri v2 desktop shell (Rust) |
+| `scripts/` | Fixture generators, fake producers, ecosystem test orchestrator |
+| `tests/`, `e2e/` | Vitest unit tests, Playwright end-to-end tests |
+| `docs/`, `design/` | Architecture, protocol, UX, decisions, design tokens |
 
-`token` and `access_token` parameters are ignored with a visible warning and
-removed from the address bar: tokens are typed into the Sources panel (or given
-to the desktop shell with `--token-file`), kept in memory only, and never put
-in URLs, storage or logs. The same holds inside a `connect`/`ws` value:
-credentials (`user:pass@`) and token parameters of the producer URL are
-removed (with the same warning) before it is connected or shown.
+## Development and testing
 
-### Connecting to Sonder Runtime and Sonder-Inference
+```bash
+npm run lint         # ESLint, then npm run typecheck
+npm run typecheck    # tsc --noEmit with TypeScript 7 (typescript-native)
+npm test             # Vitest unit tests (vitest run)
+npm run build        # type check and production bundle
+npm run test:e2e     # Playwright; install a browser first: npx playwright install chromium
+```
 
-Both producers publish `/.well-known/sonder-telemetry`, so their base URLs are
-enough: `?connect=http://127.0.0.1:11435&connect=http://127.0.0.1:11437`.
-The browser needs each producer to allow the viewer's origin (for example
-`http://127.0.0.1:5173` for `npm run dev`, `http://127.0.0.1:4173` for
-`vite preview`):
+CI ([ci.yml](.github/workflows/ci.yml)) runs lint, unit tests and build on
+Node 20 and 22, plus `cargo check` and `cargo test` for `src-tauri/` on
+Windows. [e2e.yml](.github/workflows/e2e.yml) runs the Playwright suite in
+Chromium. See [CONTRIBUTING.md](CONTRIBUTING.md) and
+[docs/integration/e2e.md](docs/integration/e2e.md).
 
-- **Sonder-Inference** allows the Observatory dev, preview and desktop origins
-  by default; add others with `sonder-infer serve --cors-origin <origin>`.
-- **Sonder Runtime** has no default: add the origin to the setting its docs
-  name for telemetry routes (`SONDER_OBSERVATORY_ORIGINS` where available;
-  `SONDER_CORS_ORIGINS` otherwise, which also opens its admin routes to that
-  origin).
+## Links
 
-When a connection or **Test** fails for one of these reasons, the message names
-the setting to change or says a token is needed. Plain `http://` and `ws://`
-are accepted only for loopback hosts.
-
-## Repository scaffold
-
-See [scaffold status](docs/SCAFFOLD.md), [source workspace](src/README.md),
-and [ecosystem boundaries](docs/BOUNDARIES.md).
+- Website: <https://sondercore.si>
+- Sonder Runtime: <https://github.com/Krilliac/Sonder-runtime>
+- Sonder-Inference: <https://github.com/Krilliac/Sonder-Inference>
+- Documentation index: [docs/README.md](docs/README.md)
 
 ## License
 
-Licensed under the [Apache License, Version 2.0](LICENSE). See
-[NOTICE](NOTICE). Third-party dependencies keep their own licenses.
+Apache License 2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Third-party dependencies keep their own licenses.
