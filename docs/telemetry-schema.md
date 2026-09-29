@@ -100,7 +100,7 @@ derives exactly the metrics it did before (tests/perf/metrics-parity.test.ts).
 
 | Source | Attributes | Observatory reading |
 | --- | --- | --- |
-| Ollama timing (main a2aa72d): `backend.timing.prefill` and the timing attributes | `prompt_eval_count`, `prompt_eval_cached_count` (always emitted; the producer writes 0 when Ollama omits it, as Ollama before 0.33.3 does) | prompt tokens = `prompt_eval_count`, of which `prompt_eval_cached_count` came from the cache; evaluated = the difference. Only a positive cached count is read: a 0 cannot be told apart from an Ollama that predates the field, so it is treated as unreported (no prompt-cache report for that request), never as a measured 0% hit |
+| Ollama timing (main a2aa72d): `backend.timing.prefill` and the timing attributes | `prompt_eval_count`, `prompt_eval_cached_count` (Ollama 0.33.3+ always reports it) | prompt tokens = `prompt_eval_count`, of which `prompt_eval_cached_count` came from the cache; evaluated = the difference. A present cached count, 0 included, is a report: 0 is a measured miss. An event without the field reports nothing |
 | llamaserver backend (PR #32, `feat/llama-server-backend`): `request.completed`, `inference.prefill.completed`, `inference.decode.completed` | `backend_cached_tokens` with `prompt_tokens` (which already includes the cached tokens); `backend_draft_tokens`, `backend_draft_accepted_tokens` (`backend_draft_acceptance_ratio` is the same ratio and is not read) | cache as above; draft acceptance = accepted / drafted |
 | raw llama-server timings, if forwarded | `prompt_n` + `cache_n` (`prompt_n` excludes the cache); `draft_n`, `draft_n_accepted` | same readings |
 | `session.created`, `request.started` | `sampling{…}` with `explicit_only`; a null explicit-only field (`temperature`, `top_p`, `top_k`, `min_p`, `repeat_penalty`, `repeat_last_n`, `presence_penalty`, `frequency_penalty`) is the model's own default, `num_ctx: 0` means model default; `seed: null` means unset (the backend chooses, e.g. an entropy seed), independent of `explicit_only`; `typical_p` and `max_tokens` are always values | inspector "sampler settings" shows "model default" for those fields, "unset (backend chooses)" for a null seed, "unset" for any other null |
@@ -111,11 +111,13 @@ are token-weighted and grouped per model (first `model` attribute on the
 request, else the `session.created` model of its stream and session, else
 `model_instance_id`) and per `session_id`. These are backend observations,
 distinct from the scheduler's logical `reused_prompt_tokens`, which is not
-read. Consequence of reading only a positive `prompt_eval_cached_count`: a
-genuine 0% hit on a current Ollama is under-reported (no report) rather than
-a missing field being over-reported as 0%; a producer that distinguished the
-two (e.g. omitting the field when Ollama omits it) would lift this. Open
-question: the "mean accepted length" shown is
+read. A request with no prompt-cache report at all (the fields are absent)
+is unknown, not a miss: it is excluded from the ratio and counted in
+`promptCache.unreportedRequests` (and per model / session group where that
+group exists), and the Overview card says "N requests without cache data".
+A producer that writes 0 for a cached count Ollama omitted (Ollama before
+0.33.3) makes those requests read as misses; omitting the field instead
+makes them unknown. Open question: the "mean accepted length" shown is
 accepted draft tokens per request, because no producer reports the number of
 draft rounds that a per-round accepted length needs.
 

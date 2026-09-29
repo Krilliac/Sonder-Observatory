@@ -203,10 +203,9 @@ export interface PromptCacheReport {
  * - `prompt_eval_count` + `prompt_eval_cached_count` (Sonder-Inference Ollama
  *   timing: `backend.timing.prefill` and the timing attributes; the cached
  *   count is the part of the prompt Ollama 0.33.3+ served from its cache).
- *   Only a positive cached count is a report: the producer always emits the
- *   field and writes 0 when Ollama omits it, so a 0 cannot be told apart from
- *   an Ollama that predates the field and is treated as unreported (missing
- *   evidence), never as a measured 0% hit;
+ *   A present cached count, 0 included, is a report: Ollama 0.33.3+ always
+ *   reports it, so 0 is a measured miss (nothing served from the cache). An
+ *   event without the field reports nothing (unknown, not a miss);
  * - `prompt_tokens` + `backend_cached_tokens` (Sonder-Inference llamaserver
  *   backend on `request.completed` and `inference.prefill.completed`, where
  *   `prompt_tokens` already includes the cached tokens);
@@ -219,7 +218,7 @@ export interface PromptCacheReport {
 export function promptCacheReport(event: ObservatoryEvent): PromptCacheReport | null {
     const a = event.attributes;
     const evalCached = count(a.prompt_eval_cached_count);
-    if (evalCached !== null && evalCached > 0) {
+    if (evalCached !== null) {
         const total = count(a.prompt_eval_count);
         if (total !== null && evalCached <= total) {
             return { promptTokens: total, cachedTokens: evalCached, evaluatedTokens: total - evalCached, source: "prompt_eval_cached_count" };

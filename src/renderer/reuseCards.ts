@@ -6,6 +6,8 @@
  * exists only when at least one request reported them, so streams without
  * these fields render exactly as before. Each card breaks the totals down per
  * model and per session (the first SESSION_ROWS sessions, then a count).
+ * Requests without any prompt-cache report are unknown, not misses: the
+ * prompt-cache card leaves them out of the ratio and says how many there are.
  */
 import type { Metrics, PromptCacheTotals, RequestSpan, SpeculationTotals } from "../query/metrics";
 import { fmtPct } from "./format";
@@ -42,8 +44,13 @@ function fmtMean(n: number | null): string {
     return n === null ? "—" : Number(n.toFixed(2)).toString();
 }
 
+/** " · N requests without cache data", or "" when every request reported. */
+function unreportedText(n: number, one = "request"): string {
+    return n > 0 ? ` · ${plural(n, one)} without cache data` : "";
+}
+
 function cacheText(t: PromptCacheTotals): string {
-    return `${fmtPct(t.hitRatio)} cached · ${t.cachedTokens} / ${t.promptTokens} prompt tokens · ${plural(t.requests, "req")}`;
+    return `${fmtPct(t.hitRatio)} cached · ${t.cachedTokens} / ${t.promptTokens} prompt tokens · ${plural(t.requests, "req")}${unreportedText(t.unreportedRequests, "req")}`;
 }
 
 function specText(t: SpeculationTotals): string {
@@ -60,7 +67,7 @@ export function promptCacheCardModel(m: Metrics): ReuseCardModel | null {
     return {
         title: "Prompt cache",
         value: `${fmtPct(c.hitRatio)} cached`,
-        sub: `${c.cachedTokens} of ${plural(c.promptTokens, "prompt token")} served from cache · ${c.evaluatedTokens} evaluated · ${plural(c.requests, "request")}${sessions > 1 ? ` in ${sessions} sessions` : ""}`,
+        sub: `${c.cachedTokens} of ${plural(c.promptTokens, "prompt token")} served from cache · ${c.evaluatedTokens} evaluated · ${plural(c.requests, "request")}${sessions > 1 ? ` in ${sessions} sessions` : ""}${unreportedText(c.unreportedRequests)}`,
         evidence: `backend-reported · prompt_eval_cached_count / backend_cached_tokens of ${plural(c.requests, "request")}`,
         rows: Object.entries(c.byModel).map(([model, t]) => [model, cacheText(t)]),
         ...sessionBreakdown(c.bySession, cacheText),

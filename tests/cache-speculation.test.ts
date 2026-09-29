@@ -33,14 +33,15 @@ describe("attribute readers", () => {
             evaluatedTokens: 1,
             source: "prompt_eval_cached_count",
         });
-        // The producer writes 0 when Ollama omits the field (older Ollama), so a
-        // 0 is missing evidence, not a measured 0% hit.
-        expect(promptCacheReport(attrs({ prompt_eval_count: 12, prompt_eval_cached_count: 0 }))).toBeNull();
-        // ...and does not hide another convention on the same event.
-        expect(promptCacheReport(attrs({ prompt_eval_count: 12, prompt_eval_cached_count: 0, prompt_tokens: 12, backend_cached_tokens: 0 }))).toMatchObject({
+        // Ollama 0.33.3+ always reports the field: 0 is a measured miss, not missing evidence.
+        expect(promptCacheReport(attrs({ prompt_eval_count: 12, prompt_eval_cached_count: 0 }))).toEqual({
+            promptTokens: 12,
             cachedTokens: 0,
-            source: "backend_cached_tokens",
+            evaluatedTokens: 12,
+            source: "prompt_eval_cached_count",
         });
+        // An event without the field reports nothing (unknown), even with prompt_eval_count.
+        expect(promptCacheReport(attrs({ prompt_eval_count: 12 }))).toBeNull();
     });
 
     it("reads llamaserver backend_cached_tokens against prompt_tokens, and raw cache_n / prompt_n", () => {
@@ -107,8 +108,8 @@ describe("prompt cache and speculation metrics", () => {
         expect(m.requests.map((r) => [r.requestId, r.model, r.promptCache?.cachedTokens, r.promptCache?.promptTokens, r.speculation?.acceptedTokens ?? null])).toEqual([
             ["req-0a11a00000000001", "qwen3:8b", 34, 35, null],
             ["req-0b22b00000000003", "llama-3.2-3b-instruct-q4_k_m", 5, 12, 2],
-            // prompt_eval_cached_count 0 is indistinguishable from an Ollama that predates it: no report.
-            ["req-0a11a00000000002", "qwen3:8b", undefined, undefined, null],
+            // prompt_eval_cached_count 0 is a measured miss (Ollama 0.33.3+ always reports the field).
+            ["req-0a11a00000000002", "qwen3:8b", 0, 120, null],
             ["req-0b22b00000000004", "llama-3.2-3b-instruct-q4_k_m", 0, 40, 9],
         ]);
         const r1 = m.requests[0]!;
@@ -120,13 +121,13 @@ describe("prompt cache and speculation metrics", () => {
     });
 
     it("aggregates token-weighted per session and per model", () => {
-        expect(m.promptCache).toMatchObject({ requests: 3, promptTokens: 87, cachedTokens: 39, evaluatedTokens: 48, hitRatio: 39 / 87 });
+        expect(m.promptCache).toMatchObject({ requests: 4, promptTokens: 207, cachedTokens: 39, evaluatedTokens: 168, hitRatio: 39 / 207, unreportedRequests: 0 });
         expect(m.promptCache.byModel).toEqual({
-            "qwen3:8b": { requests: 1, promptTokens: 35, cachedTokens: 34, evaluatedTokens: 1, hitRatio: 34 / 35 },
-            "llama-3.2-3b-instruct-q4_k_m": { requests: 2, promptTokens: 52, cachedTokens: 5, evaluatedTokens: 47, hitRatio: 5 / 52 },
+            "qwen3:8b": { requests: 2, promptTokens: 155, cachedTokens: 34, evaluatedTokens: 121, hitRatio: 34 / 155, unreportedRequests: 0 },
+            "llama-3.2-3b-instruct-q4_k_m": { requests: 2, promptTokens: 52, cachedTokens: 5, evaluatedTokens: 47, hitRatio: 5 / 52, unreportedRequests: 0 },
         });
         expect(Object.keys(m.promptCache.bySession)).toEqual(["sess-0a11a0000000cafe", "sess-0b22b0000000beef"]);
-        expect(m.promptCache.eventIds).toHaveLength(3);
+        expect(m.promptCache.eventIds).toHaveLength(4);
         expect(m.speculation).toMatchObject({ requests: 2, draftTokens: 14, acceptedTokens: 11, acceptanceRate: 11 / 14, acceptedPerRequest: 5.5 });
         expect(Object.keys(m.speculation.byModel)).toEqual(["llama-3.2-3b-instruct-q4_k_m"]);
         expect(m.speculation.bySession["sess-0b22b0000000beef"]).toMatchObject({ requests: 2, acceptanceRate: 11 / 14 });
@@ -140,14 +141,14 @@ describe("prompt cache and speculation metrics", () => {
 
     it("renders cards and inspector rows only with reports", () => {
         const cache = promptCacheCardModel(m)!;
-        expect(cache.value).toBe("45% cached");
-        expect(cache.sub).toBe("39 of 87 prompt tokens served from cache · 48 evaluated · 3 requests in 2 sessions");
+        expect(cache.value).toBe("19% cached");
+        expect(cache.sub).toBe("39 of 207 prompt tokens served from cache · 168 evaluated · 4 requests in 2 sessions");
         expect(cache.rows).toEqual([
-            ["qwen3:8b", "97% cached · 34 / 35 prompt tokens · 1 req"],
+            ["qwen3:8b", "22% cached · 34 / 155 prompt tokens · 2 reqs"],
             ["llama-3.2-3b-instruct-q4_k_m", "10% cached · 5 / 52 prompt tokens · 2 reqs"],
         ]);
         expect(cache.sessionRows).toEqual([
-            ["sess-0a11a0000000cafe", "97% cached · 34 / 35 prompt tokens · 1 req"],
+            ["sess-0a11a0000000cafe", "22% cached · 34 / 155 prompt tokens · 2 reqs"],
             ["sess-0b22b0000000beef", "10% cached · 5 / 52 prompt tokens · 2 reqs"],
         ]);
         expect(cache.moreSessions).toBe(0);
@@ -160,8 +161,11 @@ describe("prompt cache and speculation metrics", () => {
             ["prompt cache", "5 / 12 prompt tokens cached (42%) · 7 evaluated · backend_cached_tokens"],
             ["speculation", "2 / 4 draft tokens accepted (50%) · backend_draft_tokens"],
         ]);
-        // The request whose only report was prompt_eval_cached_count 0 gets no prompt-cache row.
-        expect(requestReuseRows(m.requests[2]!)).toEqual([]);
+        // A prompt_eval_cached_count of 0 is shown as a measured miss.
+        expect(requestReuseRows(m.requests[2]!)).toEqual([
+            ["model", "qwen3:8b"],
+            ["prompt cache", "0 / 120 prompt tokens cached (0%) · 120 evaluated · prompt_eval_cached_count"],
+        ]);
         const bare = deriveMetrics([at(1, "request.started", { request_id: "r" }), at(2, "request.completed", { request_id: "r" })]);
         expect(promptCacheCardModel(bare)).toBeNull();
         expect(speculationCardModel(bare)).toBeNull();
@@ -193,6 +197,38 @@ describe("prompt cache and speculation metrics", () => {
         const counts = [...Array(events.length + 1).keys()];
         for (const c of [...counts].reverse()) {
             expect(index.at(c)).toEqual(deriveMetrics(events.slice(0, c)));
+        }
+    });
+
+    it("excludes requests without cache data from the ratio and counts them on the card", () => {
+        const prefill = (ms: number, rid: string, sid: string, attributes: Record<string, unknown>) =>
+            at(ms, "backend.timing.prefill", { request_id: rid, session_id: sid, attributes: { model: "m", ...attributes } });
+        const ev = [
+            at(1, "request.started", { request_id: "a", session_id: "s1" }),
+            prefill(2, "a", "s1", { prompt_eval_count: 100, prompt_eval_cached_count: 80 }),
+            at(3, "request.started", { request_id: "b", session_id: "s1" }),
+            // A measured miss: counted, 0 cached.
+            prefill(4, "b", "s1", { prompt_eval_count: 100, prompt_eval_cached_count: 0 }),
+            at(5, "request.started", { request_id: "c", session_id: "s1" }),
+            // No cached-count field (an older producer / Ollama): unknown, excluded.
+            prefill(6, "c", "s1", { prompt_eval_count: 100 }),
+            at(7, "request.started", { request_id: "d", session_id: "s2" }),
+            at(8, "request.completed", { request_id: "d", session_id: "s2" }),
+        ];
+        const u = deriveMetrics(ev);
+        expect(u.promptCache).toMatchObject({ requests: 2, promptTokens: 200, cachedTokens: 80, evaluatedTokens: 120, hitRatio: 0.4, unreportedRequests: 2 });
+        // A group exists only where a request reported; s2 has none.
+        expect(u.promptCache.byModel).toEqual({ m: { requests: 2, promptTokens: 200, cachedTokens: 80, evaluatedTokens: 120, hitRatio: 0.4, unreportedRequests: 1 } });
+        expect(Object.keys(u.promptCache.bySession)).toEqual(["s1"]);
+        expect(u.promptCache.bySession.s1!.unreportedRequests).toBe(1);
+        const card = promptCacheCardModel(u)!;
+        expect(card.value).toBe("40% cached");
+        expect(card.sub).toBe("80 of 200 prompt tokens served from cache · 120 evaluated · 2 requests · 2 requests without cache data");
+        expect(card.rows).toEqual([["m", "40% cached · 80 / 200 prompt tokens · 2 reqs · 1 req without cache data"]]);
+        expect(requestReuseRows(u.requests[2]!)).toEqual([]);
+        const index = new MetricsIndex(ev);
+        for (let c = ev.length; c >= 0; c--) {
+            expect(index.at(c)).toEqual(deriveMetrics(ev.slice(0, c)));
         }
     });
 
