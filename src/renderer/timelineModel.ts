@@ -14,6 +14,7 @@
  */
 import type { ObservatoryEvent } from "../protocol/events";
 import { classifyEvent, EVENT_CLASSES, type EventClass } from "../query/classify";
+import { onPrefixExtended } from "../replay/lookup";
 
 export const TRACKS: readonly EventClass[] = EVENT_CLASSES;
 const TRACK_INDEX = new Map<EventClass, number>(TRACKS.map((c, i) => [c, i]));
@@ -30,8 +31,28 @@ export interface EventIndex {
     readonly cls: Uint8Array;
 }
 
+/**
+ * event_id -> first position, built lazily. Shared by the indexes of a
+ * session's in-order extensions (their prefixes are identical); positions at
+ * or past an index's length do not belong to it.
+ */
+interface IdPositions {
+    map: Map<string, number>;
+    built: number;
+}
+
 const indexCache = new WeakMap<readonly ObservatoryEvent[], EventIndex>();
-const idCache = new WeakMap<EventIndex, Map<string, number>>();
+const idCache = new WeakMap<EventIndex, IdPositions>();
+/** Nearest indexed ancestor of a store array that extends it (possibly several appends back). */
+const parents = new WeakMap<readonly ObservatoryEvent[], EventIndex>();
+
+// Live appends after the last event: the next index copies this one and classifies only the tail.
+onPrefixExtended((previous, next) => {
+    const parent = indexCache.get(previous) ?? parents.get(previous);
+    if (parent && !indexCache.has(next)) {
+        parents.set(next, parent);
+    }
+});
 
 /** Builds (or returns the cached) class/time index for events in replay order. */
 export function getEventIndex(events: readonly ObservatoryEvent[]): EventIndex {
@@ -43,31 +64,51 @@ export function getEventIndex(events: readonly ObservatoryEvent[]): EventIndex {
     const originNs = n > 0 ? events[0]!.mono_ns : 0;
     const rel = new Float64Array(n);
     const cls = new Uint8Array(n);
-    for (let i = 0; i < n; i += 1) {
+    let start = 0;
+    const parent = parents.get(events);
+    if (parent && parent.originNs === originNs && parent.rel.length <= n) {
+        rel.set(parent.rel);
+        cls.set(parent.cls);
+        start = parent.rel.length;
+    }
+    for (let i = start; i < n; i += 1) {
         const e = events[i]!;
         rel[i] = e.mono_ns - originNs;
         cls[i] = TRACK_INDEX.get(classifyEvent(e)) ?? TRACKS.length - 1;
     }
     const index: EventIndex = { events, originNs, durationNs: n > 0 ? rel[n - 1]! : 0, rel, cls };
     indexCache.set(events, index);
+    parents.delete(events);
+    if (parent && start > 0) {
+        let ids = idCache.get(parent);
+        if (!ids) {
+            ids = { map: new Map(), built: 0 };
+            idCache.set(parent, ids);
+        }
+        idCache.set(index, ids);
+    }
     return index;
 }
 
 /** event_id -> position, built lazily (only when selection/evidence needs it). */
 export function eventPosition(index: EventIndex, eventId: string): number {
-    let map = idCache.get(index);
-    if (!map) {
-        map = new Map();
-        const { events } = index;
-        for (let i = 0; i < events.length; i += 1) {
+    let ids = idCache.get(index);
+    if (!ids) {
+        ids = { map: new Map(), built: 0 };
+        idCache.set(index, ids);
+    }
+    const { events } = index;
+    if (ids.built < events.length) {
+        for (let i = ids.built; i < events.length; i += 1) {
             const id = events[i]!.event_id;
-            if (!map.has(id)) {
-                map.set(id, i);
+            if (!ids.map.has(id)) {
+                ids.map.set(id, i);
             }
         }
-        idCache.set(index, map);
+        ids.built = events.length;
     }
-    return map.get(eventId) ?? -1;
+    const pos = ids.map.get(eventId);
+    return pos !== undefined && pos < events.length ? pos : -1;
 }
 
 /** First position whose rel >= t. */

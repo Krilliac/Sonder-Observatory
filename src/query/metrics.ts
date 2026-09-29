@@ -6,7 +6,7 @@
  */
 import type { ObservatoryEvent } from "../protocol/events";
 import { streamKey } from "../replay/order";
-import { backendEvalMs, backendTokenCount, memoryUsage, outputTokenCount, totalDroppedEvents } from "./attributes";
+import { backendEvalMs, backendTokenCount, memoryUsage, noteDroppedReport, outputTokenCount, sumDroppedReports } from "./attributes";
 import { isErrorEvent } from "./classify";
 
 export type Provenance = "measured" | "backend-reported" | "derived" | "estimated" | "unavailable";
@@ -188,10 +188,50 @@ interface TokenTime {
     n: number;
 }
 
+/**
+ * Per-token events (never chunks) in replay order, as the token metrics read
+ * them. deriveMetrics keeps plain lists; the incremental index
+ * (metricsIndex.ts) answers the same questions from prefix sums.
+ */
+export interface TokenSeries {
+    /** Number of per-token events. */
+    readonly count: number;
+    /** Sum of their token counts. */
+    readonly sum: number;
+    /** Time and token count of the first event, and time of the last (null / 0 when empty). */
+    readonly firstNs: number | null;
+    readonly firstN: number;
+    readonly lastNs: number | null;
+    /** Sum of the token counts of the events with ns > `ns`. */
+    sumAfter(ns: number): number;
+}
+
+class ListTokenSeries implements TokenSeries {
+    constructor(private readonly list: readonly TokenTime[]) {}
+    get count(): number {
+        return this.list.length;
+    }
+    get sum(): number {
+        return this.list.reduce((sum, x) => sum + x.n, 0);
+    }
+    get firstNs(): number | null {
+        return this.list[0]?.ns ?? null;
+    }
+    get firstN(): number {
+        return this.list[0]?.n ?? 0;
+    }
+    get lastNs(): number | null {
+        return this.list.at(-1)?.ns ?? null;
+    }
+    sumAfter(ns: number): number {
+        return this.list.filter((x) => x.ns > ns).reduce((sum, x) => sum + x.n, 0);
+    }
+}
+
 /** Per-span facts only the token metrics need. */
-interface SpanWork {
+export interface SpanWork {
     /** Per-token events (never chunks) of the span. */
-    tokenTimes: TokenTime[];
+    tokens: TokenSeries;
     evalMs: number | null;
     evalEndNs: number | null;
     totalMs: number | null;
@@ -220,7 +260,7 @@ function decodeWindow(span: RequestSpan, w: SpanWork): DecodeWindow | null {
         return null;
     }
     const open = span.endNs === null;
-    const endNs = open ? (w.tokenTimes.at(-1)?.ns ?? null) : span.endNs;
+    const endNs = open ? w.tokens.lastNs : span.endNs;
     if (endNs === null || endNs <= span.firstTokenNs) {
         return null;
     }
@@ -243,8 +283,8 @@ function overlapNs(a0: number, a1: number, b0: number, b1: number): number {
  */
 function tokenMetrics(
     requests: RequestSpan[],
-    work: ReadonlyMap<RequestSpan, SpanWork>,
-    looseTokens: readonly TokenTime[],
+    workOf: (span: RequestSpan) => SpanWork,
+    looseTokens: TokenSeries,
     chunks: number,
     firstNs: number | null,
     lastNs: number | null,
@@ -257,10 +297,10 @@ function tokenMetrics(
     let decodeTokens = 0;
     let decodeNs = 0;
     /** Measured per-token events that count toward the totals (for the trailing window). */
-    const counted: TokenTime[] = [...looseTokens];
+    const counted: TokenSeries[] = [looseTokens];
     const spread: DecodeWindow[] = [];
     for (const span of requests) {
-        const w = work.get(span)!;
+        const w = workOf(span);
         if (span.backendTokens !== null) {
             span.tokenCount = span.backendTokens;
             fromBackend += span.backendTokens;
@@ -271,10 +311,8 @@ function tokenMetrics(
         } else {
             span.tokenCount = span.tokens;
             fromEvents += span.tokens;
-            eventCounted += w.tokenTimes.length;
-            for (const x of w.tokenTimes) {
-                counted.push(x);
-            }
+            eventCounted += w.tokens.count;
+            counted.push(w.tokens);
         }
         span.decode = decodeWindow(span, w);
         if (span.decode) {
@@ -285,17 +323,16 @@ function tokenMetrics(
             }
         }
     }
-    for (const x of looseTokens) {
-        fromEvents += x.n;
-    }
-    eventCounted += looseTokens.length;
-    if (looseTokens.length >= 2) {
+    // Token counts are integers, so these sums do not depend on summation order.
+    fromEvents += looseTokens.sum;
+    eventCounted += looseTokens.count;
+    if (looseTokens.count >= 2) {
         // Token events with no request: their first-to-last span, as one stream.
         // The first event opens the span, so its tokens are not in it (N events
         // bound N-1 intervals), as decodeWindow does for a request.
-        const ns = looseTokens[looseTokens.length - 1]!.ns - looseTokens[0]!.ns;
+        const ns = looseTokens.lastNs! - looseTokens.firstNs!;
         if (ns > 0) {
-            decodeTokens += looseTokens.reduce((sum, x) => sum + x.n, 0) - looseTokens[0]!.n;
+            decodeTokens += looseTokens.sum - looseTokens.firstN;
             decodeNs += ns;
         }
     }
@@ -310,7 +347,10 @@ function tokenMetrics(
     }
     if (provenance !== "unavailable" && lastNs !== null && windowMs > 0) {
         const windowStart = lastNs - windowMs * 1e6;
-        let recent = counted.filter((x) => x.ns > windowStart).reduce((sum, x) => sum + x.n, 0);
+        let recent = 0;
+        for (const series of counted) {
+            recent += series.sumAfter(windowStart);
+        }
         for (const d of spread) {
             if (d.ns > 0) {
                 recent += (d.tokens * overlapNs(d.startNs, d.endNs, windowStart, lastNs)) / d.ns;
@@ -333,27 +373,204 @@ function tokenMetrics(
     };
 }
 
-/** Derives metrics from events that are already in replay order. */
+/**
+ * Everything deriveMetrics accumulates per event outside request spans,
+ * tokens and errors. Small (sets of active ids, counters, latest samples), so
+ * the incremental index (metricsIndex.ts) checkpoints it.
+ */
+export interface SessionCounters {
+    activeAgents: Set<string>;
+    activeTools: Set<string>;
+    spawned: number;
+    agentsCompleted: number;
+    agentTransitions: number;
+    toolsCalled: number;
+    toolsCompleted: number;
+    toolsFailed: number;
+    latest: ResourceSample | null;
+    peak: ResourceSample | null;
+    pressureEvents: number;
+    latestCompute: number | null;
+    /** Latest cumulative drop report per producer instance (see totalDroppedEvents). */
+    dropped: Map<string, number>;
+}
+
+export function newCounters(): SessionCounters {
+    return {
+        activeAgents: new Set(),
+        activeTools: new Set(),
+        spawned: 0,
+        agentsCompleted: 0,
+        agentTransitions: 0,
+        toolsCalled: 0,
+        toolsCompleted: 0,
+        toolsFailed: 0,
+        latest: null,
+        peak: null,
+        pressureEvents: 0,
+        latestCompute: null,
+        dropped: new Map(),
+    };
+}
+
+/** Independent copy (sets and maps keep their iteration order). */
+export function cloneCounters(c: SessionCounters): SessionCounters {
+    return { ...c, activeAgents: new Set(c.activeAgents), activeTools: new Set(c.activeTools), dropped: new Map(c.dropped) };
+}
+
+/** Applies one event (in replay order) to the counters. */
+export function stepCounters(c: SessionCounters, e: ObservatoryEvent): void {
+    const t = e.event_type;
+    const agent = e.agent_id ?? null;
+    if (t.startsWith("agent.") || t.startsWith("route.")) {
+        c.agentTransitions += 1;
+    }
+    if (agent) {
+        if (t === "agent.spawned") {
+            c.spawned += 1;
+            c.activeAgents.add(agent);
+        } else if (t === "agent.started") {
+            c.activeAgents.add(agent);
+        } else if (t === "agent.completed" || t === "agent.cancelled") {
+            if (t === "agent.completed") {
+                c.agentsCompleted += 1;
+            }
+            c.activeAgents.delete(agent);
+        }
+    }
+
+    const callId =
+        typeof e.attributes.tool_call_id === "string"
+            ? e.attributes.tool_call_id
+            : typeof e.tool_call_id === "string"
+              ? e.tool_call_id
+              : null;
+    if (t === "tool.called") {
+        c.toolsCalled += 1;
+        if (callId) {
+            c.activeTools.add(callId);
+        }
+    } else if (t === "tool.completed" || t === "tool.failed") {
+        if (t === "tool.completed") {
+            c.toolsCompleted += 1;
+        } else {
+            c.toolsFailed += 1;
+        }
+        if (callId) {
+            c.activeTools.delete(callId);
+        }
+    }
+
+    if (t === "device.memory.sample") {
+        const usage = memoryUsage(e);
+        if (usage && usage.usedBytes !== null && usage.totalBytes !== null) {
+            const sample: ResourceSample = {
+                monoNs: e.mono_ns,
+                deviceId: e.device_id ?? null,
+                usedBytes: usage.usedBytes,
+                totalBytes: usage.totalBytes,
+                fraction: usage.fraction,
+                eventId: e.event_id,
+            };
+            c.latest = sample;
+            if (!c.peak || sample.fraction > c.peak.fraction) {
+                c.peak = sample;
+            }
+        }
+    } else if (t === "device.compute.sample") {
+        const u = numberAttr(e, "utilization");
+        if (u !== null) {
+            c.latestCompute = u;
+        }
+    }
+    if (t === "kv.pressure" || t === "guard.budget_pressure") {
+        c.pressureEvents += 1;
+    }
+    noteDroppedReport(c.dropped, e);
+}
+
+/** What deriveMetrics (or the incremental index) collected over a prefix, before the summary statistics. */
+export interface MetricsParts {
+    eventCount: number;
+    /** Request spans in first-start order; tokenCount and decode are filled in here. */
+    requests: RequestSpan[];
+    workOf: (span: RequestSpan) => SpanWork;
+    /** Per-token events that belong to no request span. */
+    looseTokens: TokenSeries;
+    chunkEvents: number;
+    firstNs: number | null;
+    lastNs: number | null;
+    errorsByType: Record<string, number>;
+    errorIds: string[];
+    counters: SessionCounters;
+}
+
+/** The summary statistics shared by deriveMetrics and the incremental index. */
+export function assembleMetrics(p: MetricsParts): Metrics {
+    const { requests, counters: c } = p;
+    const finished = requests.filter((s) => s.endNs !== null);
+    const durationsByProducer = new Map<string, number[]>();
+    for (const s of finished) {
+        const list = durationsByProducer.get(s.producer) ?? [];
+        list.push(s.endNs! - s.startNs);
+        durationsByProducer.set(s.producer, list);
+    }
+    const requestLatencyByProducer: Record<string, LatencyStats> = {};
+    for (const [producer, durations] of durationsByProducer) {
+        requestLatencyByProducer[producer] = latencyStats(durations);
+    }
+    const withFirstToken = requests.filter((s) => s.firstTokenNs !== null);
+
+    const tokens = tokenMetrics(requests, p.workOf, p.looseTokens, p.chunkEvents, p.firstNs, p.lastNs);
+    return {
+        eventCount: p.eventCount,
+        requests,
+        requestLatency: latencyStats(finished.map((s) => s.endNs! - s.startNs)),
+        requestLatencyByProducer,
+        timeToFirstToken: latencyStats(withFirstToken.map((s) => s.firstTokenNs! - s.startNs)),
+        tokens,
+        errors: {
+            total: p.errorIds.length,
+            byType: p.errorsByType,
+            eventIds: p.errorIds,
+        },
+        agents: {
+            active: [...c.activeAgents],
+            spawned: c.spawned,
+            completed: c.agentsCompleted,
+            transitions: c.agentTransitions,
+        },
+        tools: {
+            active: [...c.activeTools],
+            called: c.toolsCalled,
+            completed: c.toolsCompleted,
+            failed: c.toolsFailed,
+        },
+        resources: {
+            latest: c.latest,
+            peak: c.peak,
+            pressureEvents: c.pressureEvents,
+            latestComputeUtilization: c.latestCompute,
+        },
+        droppedEvents: sumDroppedReports(c.dropped),
+    };
+}
+
+/**
+ * Derives metrics from events that are already in replay order. For a replay
+ * cursor over a large session use metricsAt (metricsIndex.ts), which returns
+ * the same result for a prefix without rescanning it.
+ */
 export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
     const spans = new Map<string, RequestSpan>();
     const errorsByType: Record<string, number> = {};
     const errorIds: string[] = [];
     const work = new Map<RequestSpan, SpanWork>();
+    const tokenTimes = new Map<RequestSpan, TokenTime[]>();
     /** Per-token events that belong to no request span. */
     const looseTokens: TokenTime[] = [];
     let chunkEvents = 0;
-    const activeAgents = new Set<string>();
-    const activeTools = new Set<string>();
-    let spawned = 0;
-    let agentsCompleted = 0;
-    let agentTransitions = 0;
-    let toolsCalled = 0;
-    let toolsCompleted = 0;
-    let toolsFailed = 0;
-    let latest: ResourceSample | null = null;
-    let peak: ResourceSample | null = null;
-    let pressureEvents = 0;
-    let latestCompute: number | null = null;
+    const counters = newCounters();
 
     for (const e of events) {
         const t = e.event_type;
@@ -377,7 +594,9 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
                 decode: null,
             };
             spans.set(spanKey, span);
-            work.set(span, { tokenTimes: [], evalMs: null, evalEndNs: null, totalMs: null, ttftMs: null });
+            const times: TokenTime[] = [];
+            tokenTimes.set(span, times);
+            work.set(span, { tokens: new ListTokenSeries(times), evalMs: null, evalEndNs: null, totalMs: null, ttftMs: null });
         } else if (
             (t === "request.completed" || t === "request.failed" || t === "request.cancelled") &&
             rid
@@ -415,7 +634,7 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
                     span.chunks += 1;
                 } else {
                     span.tokens += n;
-                    work.get(span)!.tokenTimes.push({ ns: e.mono_ns, n });
+                    tokenTimes.get(span)!.push({ ns: e.mono_ns, n });
                 }
                 if (span.firstTokenNs === null) {
                     span.firstTokenNs = e.mono_ns;
@@ -430,118 +649,19 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
             errorIds.push(e.event_id);
         }
 
-        const agent = e.agent_id ?? null;
-        if (t.startsWith("agent.") || t.startsWith("route.")) {
-            agentTransitions += 1;
-        }
-        if (agent) {
-            if (t === "agent.spawned") {
-                spawned += 1;
-                activeAgents.add(agent);
-            } else if (t === "agent.started") {
-                activeAgents.add(agent);
-            } else if (t === "agent.completed" || t === "agent.cancelled") {
-                if (t === "agent.completed") {
-                    agentsCompleted += 1;
-                }
-                activeAgents.delete(agent);
-            }
-        }
-
-        const callId =
-            typeof e.attributes.tool_call_id === "string"
-                ? e.attributes.tool_call_id
-                : typeof e.tool_call_id === "string"
-                  ? e.tool_call_id
-                  : null;
-        if (t === "tool.called") {
-            toolsCalled += 1;
-            if (callId) {
-                activeTools.add(callId);
-            }
-        } else if (t === "tool.completed" || t === "tool.failed") {
-            if (t === "tool.completed") {
-                toolsCompleted += 1;
-            } else {
-                toolsFailed += 1;
-            }
-            if (callId) {
-                activeTools.delete(callId);
-            }
-        }
-
-        if (t === "device.memory.sample") {
-            const usage = memoryUsage(e);
-            if (usage && usage.usedBytes !== null && usage.totalBytes !== null) {
-                const sample: ResourceSample = {
-                    monoNs: e.mono_ns,
-                    deviceId: e.device_id ?? null,
-                    usedBytes: usage.usedBytes,
-                    totalBytes: usage.totalBytes,
-                    fraction: usage.fraction,
-                    eventId: e.event_id,
-                };
-                latest = sample;
-                if (!peak || sample.fraction > peak.fraction) {
-                    peak = sample;
-                }
-            }
-        } else if (t === "device.compute.sample") {
-            const u = numberAttr(e, "utilization");
-            if (u !== null) {
-                latestCompute = u;
-            }
-        }
-        if (t === "kv.pressure" || t === "guard.budget_pressure") {
-            pressureEvents += 1;
-        }
+        stepCounters(counters, e);
     }
 
-    const requests = [...spans.values()];
-    const finished = requests.filter((s) => s.endNs !== null);
-    const durationsByProducer = new Map<string, number[]>();
-    for (const s of finished) {
-        const list = durationsByProducer.get(s.producer) ?? [];
-        list.push(s.endNs! - s.startNs);
-        durationsByProducer.set(s.producer, list);
-    }
-    const requestLatencyByProducer: Record<string, LatencyStats> = {};
-    for (const [producer, durations] of durationsByProducer) {
-        requestLatencyByProducer[producer] = latencyStats(durations);
-    }
-    const withFirstToken = requests.filter((s) => s.firstTokenNs !== null);
-
-    const tokens = tokenMetrics(requests, work, looseTokens, chunkEvents, events[0]?.mono_ns ?? null, events[events.length - 1]?.mono_ns ?? null);
-    return {
+    return assembleMetrics({
         eventCount: events.length,
-        requests,
-        requestLatency: latencyStats(finished.map((s) => s.endNs! - s.startNs)),
-        requestLatencyByProducer,
-        timeToFirstToken: latencyStats(withFirstToken.map((s) => s.firstTokenNs! - s.startNs)),
-        tokens,
-        errors: {
-            total: errorIds.length,
-            byType: errorsByType,
-            eventIds: errorIds,
-        },
-        agents: {
-            active: [...activeAgents],
-            spawned,
-            completed: agentsCompleted,
-            transitions: agentTransitions,
-        },
-        tools: {
-            active: [...activeTools],
-            called: toolsCalled,
-            completed: toolsCompleted,
-            failed: toolsFailed,
-        },
-        resources: {
-            latest,
-            peak,
-            pressureEvents,
-            latestComputeUtilization: latestCompute,
-        },
-        droppedEvents: totalDroppedEvents(events),
-    };
+        requests: [...spans.values()],
+        workOf: (span) => work.get(span)!,
+        looseTokens: new ListTokenSeries(looseTokens),
+        chunkEvents,
+        firstNs: events[0]?.mono_ns ?? null,
+        lastNs: events[events.length - 1]?.mono_ns ?? null,
+        errorsByType,
+        errorIds,
+        counters,
+    });
 }

@@ -148,20 +148,33 @@ export function producerInstance(event: ObservatoryEvent): string | null {
 export function totalDroppedEvents(events: Iterable<ObservatoryEvent>): number {
     const latest = new Map<string, number>();
     for (const e of events) {
-        if (e.event_type !== "telemetry.dropped") {
-            continue;
-        }
-        const n = droppedCount(e);
-        if (n === null) {
-            continue;
-        }
-        const instance = producerInstance(e);
-        const key =
-            instance !== null
-                ? `${e.producer.name}\u0000${e.producer.node_id}\u0000#${instance}`
-                : `${e.session_id}\u0000${e.producer.name}\u0000${e.producer.node_id}`;
-        latest.set(key, n);
+        noteDroppedReport(latest, e);
     }
+    return sumDroppedReports(latest);
+}
+
+/**
+ * One step of totalDroppedEvents: records the cumulative count of a
+ * `telemetry.dropped` report in `latest`, keyed per producer instance.
+ */
+export function noteDroppedReport(latest: Map<string, number>, e: ObservatoryEvent): void {
+    if (e.event_type !== "telemetry.dropped") {
+        return;
+    }
+    const n = droppedCount(e);
+    if (n === null) {
+        return;
+    }
+    const instance = producerInstance(e);
+    const key =
+        instance !== null
+            ? `${e.producer.name}\u0000${e.producer.node_id}\u0000#${instance}`
+            : `${e.session_id}\u0000${e.producer.name}\u0000${e.producer.node_id}`;
+    latest.set(key, n);
+}
+
+/** The total of the latest reports noted by noteDroppedReport. */
+export function sumDroppedReports(latest: ReadonlyMap<string, number>): number {
     let total = 0;
     for (const n of latest.values()) {
         total += n;

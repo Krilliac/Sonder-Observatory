@@ -1,4 +1,6 @@
 import type { ObservatoryEvent } from "../protocol/events";
+import type { Metrics } from "../query/metrics";
+import { metricsAt } from "../query/metricsIndex";
 
 /**
  * Pure replay cursor over events that are already in replay order
@@ -45,6 +47,15 @@ export class ReplayCursor {
 
     visibleEvents(): readonly ObservatoryEvent[] {
         return this.events.slice(0, this.visibleCount());
+    }
+
+    /**
+     * Metrics at the cursor: equal to deriveMetrics(visibleEvents()) but
+     * incremental (query/metricsIndex.ts), so a scrub frame over a large
+     * session does not rescan the prefix.
+     */
+    metrics(): Metrics {
+        return metricsAt(this.events, this.visibleCount());
     }
 
     relativeTime(event: ObservatoryEvent): number {

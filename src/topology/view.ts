@@ -1,6 +1,6 @@
 import type { ObservatoryEvent } from "../protocol/events";
 import { h, svg } from "../renderer/dom";
-import { allDiagnostics, deriveTopology, evidenceFor, selectionValid } from "./derive";
+import { allDiagnostics, evidenceFor, getTopologyTimeline, selectionValid, TopologyTimeline } from "./derive";
 import { layoutTopology, type TopologyLayout } from "./layout";
 import type { TopologyGraph, TopologySelection } from "./model";
 import { buildScene, shapePath, type LegendEntry, type TopologyScene } from "./scene";
@@ -27,8 +27,7 @@ export interface TopologyPanelCallbacks {
 export class TopologyPanel {
     readonly element: HTMLElement;
     private readonly cb: TopologyPanelCallbacks;
-    private events: readonly ObservatoryEvent[] = [];
-    private byId = new Map<string, ObservatoryEvent>();
+    private timeline = new TopologyTimeline([]);
     private layout: TopologyLayout = { positions: new Map(), width: 0, height: 0, columns: [] };
     private graph: TopologyGraph | null = null;
     private at: number | null = null;
@@ -63,11 +62,15 @@ export class TopologyPanel {
         });
     }
 
-    /** Replace the session events. Layout is computed from the full session so nodes stay put while scrubbing. */
+    /**
+     * Replace the session events. Layout is computed from the full session so
+     * nodes stay put while scrubbing. The session's TopologyTimeline is cached
+     * (and continued across in-order live appends), so a scrub replays a
+     * bounded number of topology events instead of the whole session.
+     */
     setEvents(events: readonly ObservatoryEvent[]): void {
-        this.events = events;
-        this.byId = new Map(events.map((e) => [e.event_id, e]));
-        this.layout = layoutTopology(deriveTopology(events));
+        this.timeline = getTopologyTimeline(events);
+        this.layout = layoutTopology(this.timeline.graphAt(null));
         this.render();
     }
 
@@ -92,7 +95,7 @@ export class TopologyPanel {
     }
 
     render(): void {
-        const graph = deriveTopology(this.events, { atMonoNs: this.at });
+        const graph = this.timeline.graphAt(this.at);
         this.graph = graph;
         // Preserve selection while its identity remains valid (UX.md replay).
         const activeSelection = selectionValid(graph, this.selection) ? this.selection : null;
@@ -242,12 +245,12 @@ export class TopologyPanel {
         if (this.cb.relativeTime) {
             return this.cb.relativeTime(e);
         }
-        const t0 = this.events.reduce((m, x) => Math.min(m, x.mono_ns), Number.POSITIVE_INFINITY);
+        const t0 = this.timeline.minMonoNs;
         return `+${((e.mono_ns - t0) / 1e6).toFixed(0)} ms`;
     }
 
     private eventButton(id: string): HTMLElement {
-        const e = this.byId.get(id);
+        const e = this.timeline.byId.get(id);
         if (!e) {
             return h("li", { class: "mono muted", text: `${id} (not in loaded events)` });
         }
@@ -299,7 +302,7 @@ export class TopologyPanel {
                     "ul",
                     { class: "related" },
                     ...diags.map((d) => {
-                        const e = this.byId.get(d.eventId);
+                        const e = this.timeline.byId.get(d.eventId);
                         const btn = h("button", { type: "button", class: "link", text: `${e ? this.rel(e) : ""}  ${d.kind}  ${d.nodeId ?? "(no agent)"}` });
                         if (e) {
                             btn.addEventListener("click", () => this.cb.onSelectEvent(e));

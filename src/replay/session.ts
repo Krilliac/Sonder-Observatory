@@ -1,6 +1,7 @@
 import type { ObservatoryEvent } from "../protocol/events";
 import type { RejectedLine } from "../recording/ndjson";
 import { isSyntheticProducer, type RecordingManifest } from "../recording/sobs";
+import { markOrdered, notifyPrefixExtended } from "./lookup";
 import { compareEvents, streamKey, type SequenceGap } from "./order";
 
 export type SourceKind = "none" | "fixture" | "file" | "live";
@@ -26,6 +27,22 @@ interface StreamSequences {
     max: number;
     /** Missing ranges inside [min, max], ascending and disjoint. */
     gaps: { from: number; to: number }[];
+}
+
+const syntheticCache = new WeakMap<readonly ObservatoryEvent[], boolean>();
+const capturePolicyCache = new WeakMap<readonly ObservatoryEvent[], string>();
+
+function capturePolicyOf(events: readonly ObservatoryEvent[]): string {
+    const policies = new Set<string>();
+    for (const e of events) {
+        if (
+            (e.event_type === "session.started" || e.event_type === "session.created") &&
+            typeof e.attributes.text_capture === "string"
+        ) {
+            policies.add(e.attributes.text_capture);
+        }
+    }
+    return policies.size > 0 ? [...policies].join(",") : "unspecified";
 }
 
 /** First index in sorted `events` whose event sorts after `e`. */
@@ -75,6 +92,7 @@ export class SessionStore {
 
     constructor(options: SessionStoreOptions = {}) {
         this.maxLiveEvents = Math.max(1, Math.floor(options.maxLiveEvents ?? DEFAULT_MAX_LIVE_EVENTS));
+        markOrdered(this.events);
     }
 
     reset(source: SourceKind, label: string, manifest: RecordingManifest | null = null): void {
@@ -84,6 +102,7 @@ export class SessionStore {
         this.rejected = [];
         this.rejectedCount = 0;
         this.events = [];
+        markOrdered(this.events);
         this.duplicates = 0;
         this.droppedByRetention = 0;
         this.seen = new Set();
@@ -155,8 +174,13 @@ export class SessionStore {
         while (j < fresh.length) {
             next.push(fresh[j++]!);
         }
+        // The store's arrays are deduplicated, in replay order and never
+        // mutated: derived views may skip re-sorting and cache per array
+        // (replay/lookup.ts).
+        markOrdered(next);
         if (drop > 0) {
             this.events = this.evict(next, drop);
+            markOrdered(this.events);
             // Live sequence history must follow the retained window, including
             // streams whose last event was evicted.
             this.streams = new Map();
@@ -168,6 +192,11 @@ export class SessionStore {
             this.events = next;
             for (const e of fresh) {
                 this.trackSequence(e);
+            }
+            if (at === old.length && old.length > 0) {
+                // In-order batch: `next` starts with every event of `old`, so
+                // incremental indexes extend instead of rebuilding.
+                notifyPrefixExtended(old, next);
             }
         }
     }
@@ -191,7 +220,16 @@ export class SessionStore {
     }
 
     get synthetic(): boolean {
-        return this.manifest?.synthetic === true || this.events.some((e) => isSyntheticProducer(e.producer));
+        if (this.manifest?.synthetic === true) {
+            return true;
+        }
+        // The viewer asks on every render; the store's arrays are never mutated.
+        let cached = syntheticCache.get(this.events);
+        if (cached === undefined) {
+            cached = this.events.some((e) => isSyntheticProducer(e.producer));
+            syntheticCache.set(this.events, cached);
+        }
+        return cached;
     }
 
     /**
@@ -199,16 +237,13 @@ export class SessionStore {
      * (`session.started` or Sonder-Inference's `session.created`).
      */
     get capturePolicy(): string {
-        const policies = new Set<string>();
-        for (const e of this.events) {
-            if (
-                (e.event_type === "session.started" || e.event_type === "session.created") &&
-                typeof e.attributes.text_capture === "string"
-            ) {
-                policies.add(e.attributes.text_capture);
-            }
+        // The header shows it on every render; cached per (immutable) events array.
+        let cached = capturePolicyCache.get(this.events);
+        if (cached === undefined) {
+            cached = capturePolicyOf(this.events);
+            capturePolicyCache.set(this.events, cached);
         }
-        return policies.size > 0 ? [...policies].join(",") : "unspecified";
+        return cached;
     }
 
     /** Live sessions only: how many of `total` events to evict (down to 90% of the limit, amortised). */

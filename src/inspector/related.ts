@@ -1,4 +1,5 @@
 import type { ObservatoryEvent } from "../protocol/events";
+import { isOrdered, onPrefixExtended } from "../replay/lookup";
 import { streamKey } from "../replay/order";
 
 /**
@@ -75,6 +76,11 @@ function runsAgree(a: ObservatoryEvent, b: ObservatoryEvent): boolean {
  * - Same agent: agent_id.
  *
  * Empty groups are left out; the event itself is never listed.
+ *
+ * For the session store's arrays (immutable, replay order) a cached
+ * correlation index supplies, per check, only the events that share the
+ * checked value, in replay order; the checks themselves are unchanged, so the
+ * result equals a full scan (docs/integration/perf.md).
  */
 export function relatedGroups(event: ObservatoryEvent, events: readonly ObservatoryEvent[], limit = 25): RelatedGroup[] {
     const toolCall = typeof event.attributes.tool_call_id === "string" && event.attributes.tool_call_id !== "" ? event.attributes.tool_call_id : null;
@@ -84,44 +90,184 @@ export function relatedGroups(event: ObservatoryEvent, events: readonly Observat
     const runId = event.run_id ?? null;
     const agentId = event.agent_id ?? null;
 
+    const index = isOrdered(events) ? getCorrelationIndex(events) : null;
+    /** Every event of `events` that may have one of `values` in `map` (all events without an index), in order. */
+    const candidates = (map: keyof IndexMaps, values: Iterable<string | null>): Iterable<ObservatoryEvent> =>
+        index ? index.lookup(events, map, values) : events;
+
     const childRequests = new Set<string>();
     const childIds = new Set<string>();
     const parentRequests = new Set<string>();
-    for (const e of events) {
+    const childCheck = (e: ObservatoryEvent): void => {
         const key = requestKey(e);
-        if (!key || key === ownRequest) {
-            continue;
-        }
-        if (requestId && parentRequestId(e) === requestId && runsAgree(e, event)) {
+        if (key && key !== ownRequest && requestId && parentRequestId(e) === requestId && runsAgree(e, event)) {
             childRequests.add(key);
             childIds.add(e.request_id!);
         }
-        if (parent && e.request_id === parent && runsAgree(e, event)) {
+    };
+    const parentCheck = (e: ObservatoryEvent): void => {
+        const key = requestKey(e);
+        if (key && key !== ownRequest && parent && e.request_id === parent && runsAgree(e, event)) {
             parentRequests.add(key);
         }
+    };
+    // childIds keeps first-seen order, so each check visits its candidates in replay order.
+    for (const e of candidates("parentRequest", [requestId || null])) {
+        childCheck(e);
+    }
+    for (const e of candidates("requestId", [parent])) {
+        parentCheck(e);
     }
 
     const inRequests = (set: ReadonlySet<string>) => (e: ObservatoryEvent) => {
         const key = requestKey(e);
         return key !== null && set.has(key);
     };
-    const specs: { kind: RelatedGroupKind; title: string; value: string | null; match: (e: ObservatoryEvent) => boolean }[] = [
-        { kind: "tool_call", title: "Same tool call", value: toolCall, match: (e) => e.attributes.tool_call_id === toolCall },
-        { kind: "request", title: "Same request", value: requestId, match: (e) => ownRequest !== null && requestKey(e) === ownRequest },
-        { kind: "parent", title: "Parent request", value: parentRequests.size > 0 ? parent : null, match: inRequests(parentRequests) },
-        { kind: "children", title: "Child requests", value: childIds.size > 0 ? [...childIds].join(", ") : null, match: inRequests(childRequests) },
-        { kind: "run", title: "Same run", value: runId, match: (e) => e.run_id === runId },
-        { kind: "agent", title: "Same agent", value: agentId, match: (e) => e.agent_id === agentId },
+    const specs: {
+        kind: RelatedGroupKind;
+        title: string;
+        value: string | null;
+        match: (e: ObservatoryEvent) => boolean;
+        candidates: () => Iterable<ObservatoryEvent>;
+    }[] = [
+        {
+            kind: "tool_call",
+            title: "Same tool call",
+            value: toolCall,
+            match: (e) => e.attributes.tool_call_id === toolCall,
+            candidates: () => candidates("toolCall", [toolCall]),
+        },
+        {
+            kind: "request",
+            title: "Same request",
+            value: requestId,
+            match: (e) => ownRequest !== null && requestKey(e) === ownRequest,
+            candidates: () => candidates("requestKey", [ownRequest]),
+        },
+        {
+            kind: "parent",
+            title: "Parent request",
+            value: parentRequests.size > 0 ? parent : null,
+            match: inRequests(parentRequests),
+            candidates: () => candidates("requestKey", parentRequests),
+        },
+        {
+            kind: "children",
+            title: "Child requests",
+            value: childIds.size > 0 ? [...childIds].join(", ") : null,
+            match: inRequests(childRequests),
+            candidates: () => candidates("requestKey", childRequests),
+        },
+        { kind: "run", title: "Same run", value: runId, match: (e) => e.run_id === runId, candidates: () => candidates("run", [runId || null]) },
+        { kind: "agent", title: "Same agent", value: agentId, match: (e) => e.agent_id === agentId, candidates: () => candidates("agent", [agentId || null]) },
     ];
     const groups: RelatedGroup[] = [];
     for (const spec of specs) {
         if (!spec.value) {
             continue;
         }
-        const matches = events.filter((e) => e.event_id !== event.event_id && spec.match(e));
+        const matches: ObservatoryEvent[] = [];
+        for (const e of spec.candidates()) {
+            if (e.event_id !== event.event_id && spec.match(e)) {
+                matches.push(e);
+            }
+        }
         if (matches.length > 0) {
             groups.push({ kind: spec.kind, title: spec.title, value: spec.value, events: matches.slice(0, limit), total: matches.length });
         }
     }
     return groups;
 }
+
+interface IndexMaps {
+    toolCall: Map<string, number[]>;
+    requestKey: Map<string, number[]>;
+    requestId: Map<string, number[]>;
+    parentRequest: Map<string, number[]>;
+    run: Map<string, number[]>;
+    agent: Map<string, number[]>;
+}
+
+/**
+ * Positions of events by correlation value, for the session store's
+ * (immutable, replay-ordered) arrays. Shared across in-order appends, which
+ * keep every position: positions past an array's length are ignored for it.
+ */
+class CorrelationIndex {
+    private built = 0;
+    private readonly maps: IndexMaps = {
+        toolCall: new Map(),
+        requestKey: new Map(),
+        requestId: new Map(),
+        parentRequest: new Map(),
+        run: new Map(),
+        agent: new Map(),
+    };
+
+    private build(events: readonly ObservatoryEvent[]): void {
+        const m = this.maps;
+        for (let i = this.built; i < events.length; i += 1) {
+            const e = events[i]!;
+            const tool = e.attributes.tool_call_id;
+            add(m.toolCall, typeof tool === "string" && tool !== "" ? tool : null, i);
+            add(m.requestKey, requestKey(e), i);
+            add(m.requestId, typeof e.request_id === "string" && e.request_id !== "" ? e.request_id : null, i);
+            add(m.parentRequest, parentRequestId(e), i);
+            add(m.run, typeof e.run_id === "string" && e.run_id !== "" ? e.run_id : null, i);
+            add(m.agent, typeof e.agent_id === "string" && e.agent_id !== "" ? e.agent_id : null, i);
+        }
+        this.built = Math.max(this.built, events.length);
+    }
+
+    /** Events of `events` whose `map` value is one of `values`, in replay order. */
+    lookup(events: readonly ObservatoryEvent[], map: keyof IndexMaps, values: Iterable<string | null>): ObservatoryEvent[] {
+        this.build(events);
+        const lists: number[][] = [];
+        for (const v of values) {
+            const list = v === null ? undefined : this.maps[map].get(v);
+            if (list) {
+                lists.push(list);
+            }
+        }
+        const positions = lists.length === 1 ? lists[0]! : lists.flat().sort((a, b) => a - b);
+        const out: ObservatoryEvent[] = [];
+        for (const p of positions) {
+            if (p >= events.length) {
+                break;
+            }
+            out.push(events[p]!);
+        }
+        return out;
+    }
+}
+
+function add(map: Map<string, number[]>, key: string | null, i: number): void {
+    if (key === null) {
+        return;
+    }
+    const list = map.get(key);
+    if (list) {
+        list.push(i);
+    } else {
+        map.set(key, [i]);
+    }
+}
+
+const indexes = new WeakMap<readonly ObservatoryEvent[], CorrelationIndex>();
+
+function getCorrelationIndex(events: readonly ObservatoryEvent[]): CorrelationIndex {
+    let index = indexes.get(events);
+    if (!index) {
+        index = new CorrelationIndex();
+        indexes.set(events, index);
+    }
+    return index;
+}
+
+// A store append after its last event keeps every position, so the index is shared.
+onPrefixExtended((previous, next) => {
+    const index = indexes.get(previous);
+    if (index && !indexes.has(next)) {
+        indexes.set(next, index);
+    }
+});

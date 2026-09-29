@@ -1,5 +1,6 @@
 import type { ObservatoryEvent } from "../protocol/events";
 import { producerInstance } from "../query/attributes";
+import { markOrdered } from "./lookup";
 
 /**
  * Stream identity: sequence numbers are monotonic per producer stream. When
@@ -67,6 +68,7 @@ export function orderEvents(input: readonly ObservatoryEvent[]): OrderedEvents {
         events.push(event);
     }
     events.sort(compareEvents);
+    markOrdered(events);
     return { events, duplicates, gaps: findSequenceGaps(events) };
 }
 
