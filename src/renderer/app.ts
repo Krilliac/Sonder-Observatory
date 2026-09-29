@@ -10,7 +10,7 @@ import type { ObservatoryEvent } from "../protocol/events";
 import { describeRange, isFullRange, type ExportRange } from "../export/filter";
 import { EXPORT_FORMATS } from "../export/save";
 import { EVENT_CLASSES, isErrorEvent, type EventClass } from "../query/classify";
-import { deriveMetrics, type Metrics } from "../query/metrics";
+import type { Metrics } from "../query/metrics";
 import { stripSeries } from "../query/series";
 import { loadRecording, RECORDING_EXTENSION } from "../recording/sobs";
 import { ReplayCursor } from "../replay/controller";
@@ -994,7 +994,8 @@ export class ObservatoryApp {
     private render(): void {
         this.syncCursor();
         const visible = this.cursor.visibleEvents();
-        const metrics = deriveMetrics(visible);
+        // Equal to deriveMetrics(visible), from the incremental index.
+        const metrics = this.cursor.metrics();
         this.renderHeader();
         this.renderSources();
         this.renderWarnings();

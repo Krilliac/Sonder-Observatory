@@ -3,6 +3,7 @@
  * See INTEGRATION_NOTES.md (branch root) for wiring into the renderer.
  */
 import type { ObservatoryEvent } from "../protocol/events";
+import { isOrdered } from "../replay/lookup";
 import { detectBudgetPressure } from "./detectors/budget";
 import { detectCacheThrash } from "./detectors/cacheThrash";
 import { detectCompaction } from "./detectors/compaction";
@@ -54,16 +55,28 @@ export function compareFindings(a: Finding, b: Finding): number {
  */
 export function runDiagnostics(events: readonly ObservatoryEvent[], options: RunOptions = {}): Finding[] {
     const config = resolveConfig(options.config);
-    const sorted = sortEvents(events);
-    const known = new Set(sorted.map((e) => e.event_id));
+    // Session store / orderEvents arrays are already in replay order (and
+    // never mutated; detectors only read), so a 1M-event session is not
+    // copied and re-sorted.
+    const sorted = isOrdered(events) ? events : sortEvents(events);
     const kinds = options.kinds ?? (Object.keys(DETECTORS) as FindingKind[]);
-    const out: Finding[] = [];
+    const found: Finding[] = [];
     for (const kind of kinds) {
         for (const f of DETECTORS[kind](sorted, config)) {
-            if (f.evidenceEventIds.length > 0 && f.evidenceEventIds.every((id) => known.has(id))) {
-                out.push(f);
-            }
+            found.push(f);
         }
     }
+    // Defensive evidence check: every evidence id must be in the input. Only
+    // the (few) evidence ids are put in a set, not every event id.
+    const missing = new Set<string>();
+    for (const f of found) {
+        for (const id of f.evidenceEventIds) {
+            missing.add(id);
+        }
+    }
+    for (let i = 0; i < sorted.length && missing.size > 0; i += 1) {
+        missing.delete(sorted[i]!.event_id);
+    }
+    const out = found.filter((f) => f.evidenceEventIds.length > 0 && f.evidenceEventIds.every((id) => !missing.has(id)));
     return out.sort(compareFindings);
 }

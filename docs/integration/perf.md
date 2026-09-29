@@ -130,3 +130,60 @@ Loading in Node (event-loop delay measured with `monitorEventLoopDelay`):
 6. **Worker parsing (optional).** Parsing currently runs as main-thread time slices. A Worker (`new Worker(new URL("./parseWorker.ts", import.meta.url), { type: "module" })`) could take the whole parse off the main thread. However, structured-cloning 1M events back to the main thread is itself expensive (seconds). It only pays off if the store and index also live in the worker, so this was left out.
 7. **`fixtures/README.md` and root `README.md`** (owned by the lead): could mention `node scripts/gen-large-fixture.mjs`. An optional npm script could be `"fixture:large": "node scripts/gen-large-fixture.mjs"`, but `package.json` is not touched here.
 8. **`renderHeader` overwrites the loading progress** in `#source-badge` if something else triggers a render mid-load (for example a resize). This is cosmetic.
+
+## Scrub and live indexes (ported from `feat/perf-2`, 2026-09-28)
+
+The unmerged `feat/perf-2` branch was re-evaluated against current main (after
+#33, #34, #37). Its incremental `SessionStore` and gap tracking were superseded
+by #34. The indexes below were still missing and were ported, adapted to the
+current metrics, topology and inspector semantics. Each one returns exactly
+what the full computation returns; tests compare them directly.
+
+- `src/replay/lookup.ts`: `SessionStore` and `orderEvents` mark their arrays
+  as deduplicated, ordered and immutable (`isOrdered`), and the store reports
+  in-order appends (`onPrefixExtended`) so indexes extend instead of
+  rebuilding. Only marked arrays are cached.
+- `src/query/metricsIndex.ts`: `metricsAt(events, count)` (and
+  `ReplayCursor.metrics()`, used by `render()`) equals
+  `deriveMetrics(events.slice(0, count))`. Spans, token/chunk events, decode
+  reports and errors are position lists; the small counters are checkpointed
+  every 2048 events. `deriveMetrics` and the index share `assembleMetrics`.
+- `TopologyTimeline` (`src/topology/derive.ts`): `graphAt(t)` equals
+  `deriveTopology(events, { atMonoNs: t })`. It keeps only topology events and
+  snapshots the builder every 512 of them (or more when the state is large,
+  keeping snapshot memory linear); snapshots store array lengths, not copies.
+  `TopologyPanel` uses it; `deriveTopology` skips `orderEvents` for marked arrays.
+- `relatedGroups` (`src/inspector/related.ts`): a correlation index supplies
+  only the candidate events per group; the group checks are unchanged.
+- `getEventIndex` / `eventPosition` (`src/renderer/timelineModel.ts`): an
+  in-order append copies the previous index and classifies only the tail; the
+  id map is shared along the session.
+- `runDiagnostics` does not copy and re-sort a marked array, and checks
+  evidence ids against a set of the evidence ids only.
+- `SessionStore.synthetic` / `capturePolicy` are cached per events array.
+
+Node, deterministic fixture (`npm run fixture:large`, seed 20260926), mean of
+two runs, main at 9c6a7b3 vs this port:
+
+| Path | 100k main | 100k port | 300k main | 300k port |
+| --- | --- | --- | --- | --- |
+| Metrics per scrub frame | 16 ms | 1.0 ms | 48 ms | 2.7 ms |
+| Topology per scrub frame | 37 ms | 0.2 ms | 143 ms | 0.4 ms |
+| Live batch (500 events): metrics + topology | 65 ms | 2.8 ms | 197 ms | 7.0 ms |
+| Live batch: timeline index + selection lookup | 22 ms | 0.3 ms | 54 ms | 0.5 ms |
+| Inspector related groups, later selections | 47 ms | 7.4 ms | 168 ms | 21 ms |
+| `synthetic` + `capturePolicy` per render | 2.8 ms | 0.0 ms | 7.9 ms | 0.0 ms |
+| `runDiagnostics` on the store array | 86 ms | 79 ms | 250 ms | 219 ms |
+
+The diagnostics gain is small (about 12% at 300k, within run-to-run noise at 100k); it also avoids a full copy and a set of every event id.
+
+One-time costs of the port at 300k: metrics index ~100 ms, topology timeline
+~33 ms, correlation index ~140 ms (first selection; main pays ~170 ms on every
+selection).
+
+Not ported: time-sliced session preparation (`sessionPrep.ts`,
+`replay/slices.ts`, chunked store append) needs load-path wiring in `app.ts`
+and a browser to measure; the paged findings list and capped topology side
+lists change DOM only (not measurable in the Node suite); the
+`producerInstance` fast path saves ~8 ms per 300k-event pass; caching
+`visibleEvents()` saves under 1 ms per render.

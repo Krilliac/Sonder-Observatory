@@ -1,4 +1,5 @@
 import type { ObservatoryEvent } from "../protocol/events";
+import { isOrdered, onPrefixExtended } from "../replay/lookup";
 import { orderEvents } from "../replay/order";
 import {
     edgeId,
@@ -502,7 +503,8 @@ function applyEvent(b: GraphBuilder, e: ObservatoryEvent): void {
  */
 export function deriveTopology(events: readonly ObservatoryEvent[], options: DeriveOptions = {}): TopologyGraph {
     const at = options.atMonoNs ?? null;
-    const ordered = orderEvents(events).events;
+    // Store / orderEvents arrays are already deduplicated and in replay order.
+    const ordered = isOrdered(events) ? events : orderEvents(events).events;
     const b = new GraphBuilder();
     let considered = 0;
     for (const e of ordered) {
@@ -517,6 +519,10 @@ export function deriveTopology(events: readonly ObservatoryEvent[], options: Der
         applyEvent(b, e);
         b.end(e);
     }
+    return finishGraph(b, at, considered);
+}
+
+function finishGraph(b: GraphBuilder, at: number | null, considered: number): TopologyGraph {
     const byFirstSeen = <T extends { firstMonoNs: number; id: string }>(x: T, y: T): number =>
         x.firstMonoNs - y.firstMonoNs || (x.id < y.id ? -1 : x.id > y.id ? 1 : 0);
     return {
@@ -528,6 +534,233 @@ export function deriveTopology(events: readonly ObservatoryEvent[], options: Der
         mappedEvents: b.mapped,
         unmappedEventIds: b.unmapped,
     };
+}
+
+/** First index in `events` (replay order) whose mono_ns is greater than `monoNs`. */
+function upperBoundNs(events: readonly ObservatoryEvent[], monoNs: number): number {
+    let lo = 0;
+    let hi = events.length;
+    while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        if (events[mid]!.mono_ns <= monoNs) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+/**
+ * Builder state after a prefix of the topology events. Node/edge evidence and
+ * diagnostics, unattached diagnostics and unmapped ids only ever grow (push),
+ * so a snapshot keeps shallow copies of the (mutable) node and edge scalars
+ * plus array lengths and shares the arrays of the live builder: its size is
+ * O(nodes + edges + tool calls), not O(evidence).
+ */
+interface BuilderSnapshot {
+    /** Topology events applied. */
+    applied: number;
+    nodes: { node: TopologyNode; evidence: number; diagnostics: number }[];
+    edges: { edge: TopologyEdge; evidence: number }[];
+    unattached: number;
+    unmapped: number;
+    toolCalls: Map<string, ToolCallRecord>;
+    activeRoute: Map<string, string>;
+    mapped: number;
+}
+
+/** Minimum topology events between snapshots (bounds the replay per scrub). */
+export const TOPOLOGY_SNAPSHOT_EVERY = 512;
+
+/** Append-only work shared by the timelines of one session and its in-order extensions. */
+class TimelineCore {
+    /** Topology events in replay order, and their positions in the session array. */
+    readonly topo: ObservatoryEvent[] = [];
+    readonly topoPos: number[] = [];
+    /** Topology events by id (every evidence id in a graph is one of these). */
+    readonly byId = new Map<string, ObservatoryEvent>();
+    readonly builder = new GraphBuilder();
+    readonly snapshots: BuilderSnapshot[] = [];
+    /** Session events scanned. */
+    scanned = 0;
+    /** Topology events replayed by the last builderAt (bounded-cost tests). */
+    lastReplayed = 0;
+
+    /** Scans `events` (which extends every array scanned before) up to its end. */
+    extend(events: readonly ObservatoryEvent[]): void {
+        const b = this.builder;
+        for (let i = this.scanned; i < events.length; i += 1) {
+            const e = events[i]!;
+            if (!isTopologyEvent(e.event_type)) {
+                continue;
+            }
+            const last = this.snapshots[this.snapshots.length - 1];
+            const since = this.topo.length - (last?.applied ?? 0);
+            // A snapshot costs O(state); spacing snapshots at least state/4
+            // events apart keeps total snapshot work and memory linear.
+            if (since >= TOPOLOGY_SNAPSHOT_EVERY && since * 4 >= b.nodes.size + b.edges.size + b.toolCalls.size + b.activeRoute.size) {
+                this.snapshots.push(this.snapshot());
+            }
+            this.topo.push(e);
+            this.topoPos.push(i);
+            this.byId.set(e.event_id, e);
+            b.begin();
+            applyEvent(b, e);
+            b.end(e);
+        }
+        this.scanned = Math.max(this.scanned, events.length);
+    }
+
+    private snapshot(): BuilderSnapshot {
+        const b = this.builder;
+        return {
+            applied: this.topo.length,
+            nodes: [...b.nodes.values()].map((n) => ({ node: { ...n }, evidence: n.evidence.length, diagnostics: n.diagnostics.length })),
+            edges: [...b.edges.values()].map((ed) => ({ edge: { ...ed }, evidence: ed.evidence.length })),
+            unattached: b.unattached.length,
+            unmapped: b.unmapped.length,
+            toolCalls: new Map(b.toolCalls),
+            activeRoute: new Map(b.activeRoute),
+            mapped: b.mapped,
+        };
+    }
+
+    /** A fresh builder equal to the state after the first `k` topology events. */
+    builderAt(k: number): GraphBuilder {
+        let lo = 0;
+        let hi = this.snapshots.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >>> 1;
+            if (this.snapshots[mid]!.applied <= k) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        const snap = lo > 0 ? this.snapshots[lo - 1]! : null;
+        const b = new GraphBuilder();
+        let from = 0;
+        if (snap) {
+            // The copies share the live builder's arrays: cut them to the snapshot's lengths.
+            for (const s of snap.nodes) {
+                b.nodes.set(s.node.id, { ...s.node, evidence: s.node.evidence.slice(0, s.evidence), diagnostics: s.node.diagnostics.slice(0, s.diagnostics) });
+            }
+            for (const s of snap.edges) {
+                b.edges.set(s.edge.id, { ...s.edge, evidence: s.edge.evidence.slice(0, s.evidence) });
+            }
+            for (let i = 0; i < snap.unattached; i += 1) {
+                b.unattached.push(this.builder.unattached[i]!);
+            }
+            for (let i = 0; i < snap.unmapped; i += 1) {
+                b.unmapped.push(this.builder.unmapped[i]!);
+            }
+            for (const [key, value] of snap.toolCalls) {
+                b.toolCalls.set(key, value);
+            }
+            for (const [key, value] of snap.activeRoute) {
+                b.activeRoute.set(key, value);
+            }
+            b.mapped = snap.mapped;
+            from = snap.applied;
+        }
+        for (let i = from; i < k; i += 1) {
+            const e = this.topo[i]!;
+            b.begin();
+            applyEvent(b, e);
+            b.end(e);
+        }
+        this.lastReplayed = k - from;
+        return b;
+    }
+}
+
+/**
+ * Scrub-friendly topology for one session (docs/integration/perf.md).
+ * `graphAt(t)` equals `deriveTopology(events, { atMonoNs: t })`, but the
+ * session is ordered once, only its topology events (a few percent of a
+ * large session) are kept, and builder snapshots mean a scrub replays a
+ * bounded number of events instead of the whole prefix. When the store
+ * appends in order, the timeline of the new array continues the old one.
+ */
+export class TopologyTimeline {
+    /** The session in replay order. */
+    readonly events: readonly ObservatoryEvent[];
+    private readonly core: TimelineCore;
+
+    constructor(events: readonly ObservatoryEvent[], core?: TimelineCore) {
+        this.events = isOrdered(events) ? events : orderEvents(events).events;
+        this.core = core ?? new TimelineCore();
+    }
+
+    /**
+     * Topology events by id. Every evidence id of this timeline's graphs is
+     * in it (it may also hold ids appended to later arrays of the session).
+     */
+    get byId(): ReadonlyMap<string, ObservatoryEvent> {
+        this.core.extend(this.events);
+        return this.core.byId;
+    }
+
+    /** Topology events the last graphAt replayed after its snapshot. */
+    get lastReplayed(): number {
+        return this.core.lastReplayed;
+    }
+
+    /** Earliest mono_ns in the session (Infinity when empty). */
+    get minMonoNs(): number {
+        return this.events.length > 0 ? this.events[0]!.mono_ns : Number.POSITIVE_INFINITY;
+    }
+
+    /** Equal to deriveTopology(events, { atMonoNs }). */
+    graphAt(atMonoNs: number | null): TopologyGraph {
+        const core = this.core;
+        core.extend(this.events);
+        const considered = atMonoNs === null ? this.events.length : upperBoundNs(this.events, atMonoNs);
+        // Topology events among the first `considered` session events.
+        let lo = 0;
+        let hi = core.topo.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >>> 1;
+            if (core.topoPos[mid]! < considered) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        return finishGraph(core.builderAt(lo), atMonoNs, considered);
+    }
+
+    /** Timeline of `next`, an in-order extension of this timeline's array, sharing the work done so far. */
+    extendTo(next: readonly ObservatoryEvent[]): TopologyTimeline {
+        return new TopologyTimeline(next, this.core);
+    }
+}
+
+const timelines = new WeakMap<readonly ObservatoryEvent[], TopologyTimeline>();
+
+// Store appends after its last event: the new array extends the old one.
+onPrefixExtended((previous, next) => {
+    const t = timelines.get(previous);
+    if (t && !timelines.has(next)) {
+        timelines.set(next, t.extendTo(next));
+    }
+});
+
+/**
+ * The cached topology timeline for an events array. Only store /
+ * orderEvents arrays (never mutated) are cached; others get a fresh one.
+ */
+export function getTopologyTimeline(events: readonly ObservatoryEvent[]): TopologyTimeline {
+    if (!isOrdered(events)) {
+        return new TopologyTimeline(events);
+    }
+    let t = timelines.get(events);
+    if (!t) {
+        t = new TopologyTimeline(events);
+        timelines.set(events, t);
+    }
+    return t;
 }
 
 /** All diagnostics (node-attached and unattached), in time order. */
