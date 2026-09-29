@@ -10,6 +10,12 @@ Responsibility: Resolve displayed values to source events and measurement proven
   has a backend prompt-cache or speculative-decoding report (the
   `requestSpan` callback) it shows cached / evaluated prompt tokens and
   accepted / drafted tokens. The raw attributes stay exactly as received.
+  The sampler-settings section is not limited to new producers: any event
+  with an `attributes.sampling` object gets it, including existing
+  Sonder-Inference recordings (2 events of
+  `tests/fixtures/sonder-inference-912503a.jsonl`, 4 of
+  `sonder-inference-b2170c0.jsonl`). It adds a section; it changes no metric.
+  The request lookup covers the whole session, like the related events.
 - `related.ts` finds correlated events: `relatedGroups` returns the same
   tool call, the same request, the parent request
   (`attributes.parent_request_id`), child requests (requests whose events

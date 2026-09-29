@@ -180,7 +180,12 @@ export class MetricsIndex {
     private readonly errorTypes: string[] = [];
     /** First session.created model per stream and session, with its position. */
     private readonly sessionModels = new Map<string, { idx: number; model: string }>();
-    private memo: { count: number; value: Metrics } | null = null;
+    /**
+     * The two most recently queried prefixes, newest first. Two slots so two
+     * callers that alternate between counts (the replay cursor's prefix and the
+     * inspector's whole-session request lookup) do not evict each other.
+     */
+    private memo: { count: number; value: Metrics }[] = [];
     /** Events the last computed query replayed after its checkpoint (bounded-cost tests). */
     lastReplayed = 0;
 
@@ -328,11 +333,18 @@ export class MetricsIndex {
         if (this.processed < c) {
             this.extendTo(c);
         }
-        if (this.memo?.count === c) {
-            return this.memo.value;
+        const hit = this.memo.findIndex((m) => m.count === c);
+        if (hit >= 0) {
+            const entry = this.memo[hit]!;
+            if (hit > 0) {
+                this.memo.splice(hit, 1);
+                this.memo.unshift(entry);
+            }
+            return entry.value;
         }
         const value = this.compute(c);
-        this.memo = { count: c, value };
+        this.memo.unshift({ count: c, value });
+        this.memo.length = Math.min(this.memo.length, 2);
         return value;
     }
 

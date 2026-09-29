@@ -1379,13 +1379,25 @@ export class ObservatoryApp {
                       model.sub,
                       model.evidence,
                       "",
-                      model.rows.length > 0
-                          ? h(
-                                "ul",
-                                { class: "per-producer", "aria-label": `${model.title} per model` },
-                                ...model.rows.map(([name, text]) => h("li", { "data-model": name }, h("span", { class: "producer-cell", text: name }), ` ${text}`)),
-                            )
-                          : null,
+                      h(
+                          "div",
+                          { class: "reuse-breakdown" },
+                          model.rows.length > 0
+                              ? h(
+                                    "ul",
+                                    { class: "per-producer", "aria-label": `${model.title} per model` },
+                                    ...model.rows.map(([name, text]) => h("li", { "data-model": name }, h("span", { class: "producer-cell", text: name }), ` ${text}`)),
+                                )
+                              : null,
+                          model.sessionRows.length > 0
+                              ? h(
+                                    "ul",
+                                    { class: "per-producer", "aria-label": `${model.title} per session` },
+                                    ...model.sessionRows.map(([name, text]) => h("li", { "data-session": name }, h("span", { class: "producer-cell", text: `session ${name}` }), ` ${text}`)),
+                                    ...(model.moreSessions > 0 ? [h("li", { text: `+${model.moreSessions} more sessions` })] : []),
+                                )
+                              : null,
+                      ),
                   )
                 : null;
         const reuseCards = [reuseCard(promptCacheCardModel(m)), reuseCard(speculationCardModel(m))].filter((c): c is HTMLElement => c !== null);
@@ -1507,6 +1519,10 @@ export class ObservatoryApp {
                 relativeTime: (e) => fmtRelNs(this.cursor.relativeTime(e)),
                 onSelect: (e) => this.seekTo(e),
                 onClose: () => this.select(undefined),
+                // Whole session, like the related events above (renderInspector gets
+                // store.events): the panel is not rebuilt as the cursor moves, so a
+                // cursor-prefix span would go stale. The index memoizes this count
+                // next to the cursor's, so the two lookups do not evict each other.
                 requestSpan: (e) => {
                     const key = streamKey(e);
                     return metricsAt(this.cursor.events).requests.find((r) => r.requestId === e.request_id && r.streamKey === key);

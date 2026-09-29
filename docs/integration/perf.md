@@ -150,6 +150,9 @@ what the full computation returns; tests compare them directly.
   errors are position lists (the first `session.created` model per stream
   and session keeps its position); the small counters are checkpointed
   every 2048 events. `deriveMetrics` and the index share `assembleMetrics`.
+  The index memoizes the two most recently queried counts, so the replay
+  cursor's prefix and the inspector's whole-session request lookup
+  (`requestSpan`) do not evict each other.
   `tests/perf/metrics-parity.test.ts` pins the pre-existing metrics of the
   existing fixtures (including fixture:large 10k/40k/100k) by digest.
 - `TopologyTimeline` (`src/topology/derive.ts`): `graphAt(t)` equals

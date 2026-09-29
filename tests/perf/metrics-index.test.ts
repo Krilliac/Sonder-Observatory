@@ -203,4 +203,22 @@ describe("metricsAt cost", () => {
         expect(worst).toBeGreaterThan(0);
         expect(worst).toBeLessThan(METRICS_CHECKPOINT);
     });
+
+    it("keeps a scrubbed cursor prefix and the whole session memoized side by side", () => {
+        // The Overview asks for the cursor prefix, the inspector's request lookup for the whole session.
+        const index = new MetricsIndex(large);
+        const mid = Math.floor(large.length / 2) + 7;
+        const prefix = index.at(mid);
+        const whole = index.at(large.length);
+        for (let k = 0; k < 5; k += 1) {
+            expect(index.at(mid)).toBe(prefix);
+            expect(index.at(large.length)).toBe(whole);
+        }
+        // A third count evicts the least recently used one only.
+        const third = index.at(mid - 3);
+        expect(index.at(large.length)).toBe(whole);
+        expect(index.at(mid)).not.toBe(prefix);
+        expect(index.at(mid)).toEqual(deriveMetrics(large.slice(0, mid)));
+        expect(third).toEqual(deriveMetrics(large.slice(0, mid - 3)));
+    });
 });

@@ -130,9 +130,15 @@ describe("prompt cache and speculation metrics", () => {
             ["qwen3:8b", "22% cached · 34 / 155 prompt tokens · 2 reqs"],
             ["llama-3.2-3b-instruct-q4_k_m", "10% cached · 5 / 52 prompt tokens · 2 reqs"],
         ]);
+        expect(cache.sessionRows).toEqual([
+            ["sess-0a11a0000000cafe", "22% cached · 34 / 155 prompt tokens · 2 reqs"],
+            ["sess-0b22b0000000beef", "10% cached · 5 / 52 prompt tokens · 2 reqs"],
+        ]);
+        expect(cache.moreSessions).toBe(0);
         const spec = speculationCardModel(m)!;
         expect(spec.value).toBe("79% accepted");
         expect(spec.sub).toBe("11 of 14 draft tokens accepted · mean 5.5 accepted per request · 2 requests");
+        expect(spec.sessionRows).toEqual([["sess-0b22b0000000beef", "79% accepted · 11 / 14 draft tokens · 2 reqs"]]);
         expect(requestReuseRows(m.requests[1]!)).toEqual([
             ["model", "llama-3.2-3b-instruct-q4_k_m"],
             ["prompt cache", "5 / 12 prompt tokens cached (42%) · 7 evaluated · backend_cached_tokens"],
