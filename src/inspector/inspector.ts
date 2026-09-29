@@ -1,14 +1,18 @@
 import type { ObservatoryEvent } from "../protocol/events";
 import { classifyEvent } from "../query/classify";
-import { producerInstance } from "../query/attributes";
+import { producerInstance, samplerSettings } from "../query/attributes";
+import type { RequestSpan } from "../query/metrics";
 import { isSyntheticProducer } from "../recording/sobs";
 import { h } from "../renderer/dom";
+import { requestReuseRows } from "../renderer/reuseCards";
 import { relatedGroups } from "./related";
 
 export interface InspectorCallbacks {
     relativeTime(event: ObservatoryEvent): string;
     onSelect(event: ObservatoryEvent): void;
     onClose(): void;
+    /** The request span of an event with a request_id (whole session), if known. */
+    requestSpan?(event: ObservatoryEvent): RequestSpan | undefined;
 }
 
 const ENVELOPE_ROWS: (keyof ObservatoryEvent)[] = [
@@ -34,7 +38,9 @@ function producerRole(event: ObservatoryEvent): string {
  * Evidence view for one event: envelope, producer, sampling and raw
  * attributes exactly as received, plus correlated events across producers
  * (request, parent and child requests, run, agent, tool call; contract 8.4).
- * No values are interpreted or estimated.
+ * No values are estimated. Two labelled readouts sit beside the raw
+ * attributes when they apply: sampler settings (a null field reads "model
+ * default") and the request's backend prompt-cache / speculation reports.
  */
 export function renderInspector(
     event: ObservatoryEvent | undefined,
@@ -74,6 +80,39 @@ export function renderInspector(
         h("dt", { text: "class" }),
         h("dd", { text: classifyEvent(event) }),
     );
+
+    // Sampler settings of session.created / request.started: a null field (or
+    // num_ctx 0) is the model's own default, not blank or zero.
+    const sampler = samplerSettings(event);
+    const samplerSection =
+        sampler && sampler.length > 0
+            ? h(
+                  "section",
+                  { "data-testid": "sampler-settings" },
+                  h("h3", { text: event.attributes.sampling && (event.attributes.sampling as Record<string, unknown>).explicit_only === true ? "sampler settings (explicit only)" : "sampler settings" }),
+                  h(
+                      "dl",
+                      { class: "kv" },
+                      ...sampler.flatMap((row) => [
+                          h("dt", { text: row.key }),
+                          h("dd", { class: row.modelDefault ? "muted" : "mono", "data-model-default": row.modelDefault, text: row.text }),
+                      ]),
+                  ),
+              )
+            : null;
+
+    // Backend prompt-cache and speculation reports of the event's request (derived).
+    const span = event.request_id ? cb.requestSpan?.(event) : undefined;
+    const reuse = span ? requestReuseRows(span) : [];
+    const reuseSection =
+        reuse.length > 0
+            ? h(
+                  "section",
+                  { "data-testid": "request-reuse" },
+                  h("h3", { text: "request backend reuse (derived)" }),
+                  h("dl", { class: "kv" }, ...reuse.flatMap(([k, v]) => [h("dt", { text: k }), h("dd", { class: "mono", text: v })])),
+              )
+            : null;
 
     const groups = relatedGroups(event, events);
     const related =
@@ -122,6 +161,8 @@ export function renderInspector(
         h("p", { class: "mono big", text: event.event_type }),
         jump,
         envelope,
+        ...(reuseSection ? [reuseSection] : []),
+        ...(samplerSection ? [samplerSection] : []),
         ...(related ? [related] : []),
         h("h3", { text: "attributes (as received)" }),
         h("pre", { class: "json", text: JSON.stringify(event.attributes, null, 2) }),

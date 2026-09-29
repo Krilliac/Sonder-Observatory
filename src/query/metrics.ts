@@ -6,7 +6,18 @@
  */
 import type { ObservatoryEvent } from "../protocol/events";
 import { streamKey } from "../replay/order";
-import { backendEvalMs, backendTokenCount, memoryUsage, noteDroppedReport, outputTokenCount, sumDroppedReports } from "./attributes";
+import {
+    backendEvalMs,
+    backendTokenCount,
+    memoryUsage,
+    noteDroppedReport,
+    outputTokenCount,
+    promptCacheReport,
+    speculationReport,
+    sumDroppedReports,
+    type PromptCacheReport,
+    type SpeculationReport,
+} from "./attributes";
 import { isErrorEvent } from "./classify";
 
 export type Provenance = "measured" | "backend-reported" | "derived" | "estimated" | "unavailable";
@@ -69,7 +80,72 @@ export interface RequestSpan {
     tokenCount: number | null;
     /** Decode window used for the token rate; null when it cannot be measured. */
     decode: DecodeWindow | null;
+    /** session_id of the request.started event (additive). */
+    sessionId: string;
+    /**
+     * Model the request ran on (additive), best first: the first string
+     * `model` attribute on an event of the request (for example
+     * `backend.timing.prefill`), the `model` of the first `session.created`
+     * of the same stream and session, the request.started `model_instance_id`;
+     * null when none is reported.
+     */
+    model: string | null;
+    /** Latest backend prompt-cache report of the request (additive); null when none. */
+    promptCache: PromptCacheUse | null;
+    /** Latest backend speculative-decoding report of the request (additive); null when none. */
+    speculation: SpeculationUse | null;
 }
+
+/** A request's prompt-cache report, with the event it came from. */
+export interface PromptCacheUse extends PromptCacheReport {
+    /** cachedTokens / promptTokens; null for an empty prompt. */
+    hitRatio: number | null;
+    eventId: string;
+}
+
+/** A request's speculative-decoding report, with the event it came from. */
+export interface SpeculationUse extends SpeculationReport {
+    /** acceptedTokens / draftTokens; null when nothing was drafted. */
+    acceptanceRate: number | null;
+    eventId: string;
+}
+
+export function promptCacheUse(report: PromptCacheReport, eventId: string): PromptCacheUse {
+    return { ...report, hitRatio: report.promptTokens > 0 ? report.cachedTokens / report.promptTokens : null, eventId };
+}
+
+export function speculationUse(report: SpeculationReport, eventId: string): SpeculationUse {
+    return { ...report, acceptanceRate: report.draftTokens > 0 ? report.acceptedTokens / report.draftTokens : null, eventId };
+}
+
+/** Prompt-cache totals over a set of requests with a report. */
+export interface PromptCacheTotals {
+    /** Requests with a prompt-cache report. */
+    requests: number;
+    promptTokens: number;
+    cachedTokens: number;
+    evaluatedTokens: number;
+    /** cachedTokens / promptTokens (token-weighted); null when no prompt tokens. */
+    hitRatio: number | null;
+}
+
+/** Speculative-decoding totals over a set of requests with a report. */
+export interface SpeculationTotals {
+    /** Requests with a draft report. */
+    requests: number;
+    draftTokens: number;
+    acceptedTokens: number;
+    /** acceptedTokens / draftTokens (token-weighted); null when nothing was drafted. */
+    acceptanceRate: number | null;
+    /**
+     * Mean accepted draft tokens per reporting request. Not the per-draft-round
+     * accepted length: no producer reports the number of draft rounds yet.
+     */
+    acceptedPerRequest: number | null;
+}
+
+/** Key of requests whose model is not reported, in the byModel groupings. */
+export const UNKNOWN_MODEL = "(model not reported)";
 
 export interface ResourceSample {
     monoNs: number;
@@ -147,6 +223,21 @@ export interface Metrics {
     };
     /** Producer-reported drops: latest cumulative count per producer instance, summed. */
     droppedEvents: number;
+    /**
+     * Backend prompt-cache reuse (additive): totals over requests with a
+     * report, per model and per session_id, plus the reporting event ids.
+     */
+    promptCache: PromptCacheTotals & {
+        byModel: Record<string, PromptCacheTotals>;
+        bySession: Record<string, PromptCacheTotals>;
+        eventIds: string[];
+    };
+    /** Backend speculative-decoding acceptance (additive), grouped as promptCache. */
+    speculation: SpeculationTotals & {
+        byModel: Record<string, SpeculationTotals>;
+        bySession: Record<string, SpeculationTotals>;
+        eventIds: string[];
+    };
 }
 
 export const RECENT_WINDOW_MS = 5000;
@@ -505,6 +596,90 @@ export interface MetricsParts {
     counters: SessionCounters;
 }
 
+interface CacheAcc {
+    requests: number;
+    promptTokens: number;
+    cachedTokens: number;
+    evaluatedTokens: number;
+}
+
+interface SpecAcc {
+    requests: number;
+    draftTokens: number;
+    acceptedTokens: number;
+}
+
+function cacheTotals(a: CacheAcc): PromptCacheTotals {
+    return { ...a, hitRatio: a.promptTokens > 0 ? a.cachedTokens / a.promptTokens : null };
+}
+
+function specTotals(a: SpecAcc): SpeculationTotals {
+    return {
+        ...a,
+        acceptanceRate: a.draftTokens > 0 ? a.acceptedTokens / a.draftTokens : null,
+        acceptedPerRequest: a.requests > 0 ? a.acceptedTokens / a.requests : null,
+    };
+}
+
+function grouped<A>(groups: Map<string, A>, key: string, make: () => A): A {
+    let g = groups.get(key);
+    if (!g) {
+        g = make();
+        groups.set(key, g);
+    }
+    return g;
+}
+
+function mapValues<A, T>(groups: Map<string, A>, f: (a: A) => T): Record<string, T> {
+    const out: Record<string, T> = {};
+    for (const [k, v] of groups) {
+        out[k] = f(v);
+    }
+    return out;
+}
+
+/**
+ * Prompt-cache and speculation totals from the requests' latest reports.
+ * Token counts are integers, so the sums do not depend on summation order.
+ */
+function reuseMetrics(requests: readonly RequestSpan[]): Pick<Metrics, "promptCache" | "speculation"> {
+    const newCache = (): CacheAcc => ({ requests: 0, promptTokens: 0, cachedTokens: 0, evaluatedTokens: 0 });
+    const newSpec = (): SpecAcc => ({ requests: 0, draftTokens: 0, acceptedTokens: 0 });
+    const cache = newCache();
+    const spec = newSpec();
+    const cacheByModel = new Map<string, CacheAcc>();
+    const cacheBySession = new Map<string, CacheAcc>();
+    const specByModel = new Map<string, SpecAcc>();
+    const specBySession = new Map<string, SpecAcc>();
+    const cacheIds: string[] = [];
+    const specIds: string[] = [];
+    for (const span of requests) {
+        const c = span.promptCache;
+        if (c) {
+            for (const acc of [cache, grouped(cacheByModel, span.model ?? UNKNOWN_MODEL, newCache), grouped(cacheBySession, span.sessionId, newCache)]) {
+                acc.requests += 1;
+                acc.promptTokens += c.promptTokens;
+                acc.cachedTokens += c.cachedTokens;
+                acc.evaluatedTokens += c.evaluatedTokens;
+            }
+            cacheIds.push(c.eventId);
+        }
+        const s = span.speculation;
+        if (s) {
+            for (const acc of [spec, grouped(specByModel, span.model ?? UNKNOWN_MODEL, newSpec), grouped(specBySession, span.sessionId, newSpec)]) {
+                acc.requests += 1;
+                acc.draftTokens += s.draftTokens;
+                acc.acceptedTokens += s.acceptedTokens;
+            }
+            specIds.push(s.eventId);
+        }
+    }
+    return {
+        promptCache: { ...cacheTotals(cache), byModel: mapValues(cacheByModel, cacheTotals), bySession: mapValues(cacheBySession, cacheTotals), eventIds: cacheIds },
+        speculation: { ...specTotals(spec), byModel: mapValues(specByModel, specTotals), bySession: mapValues(specBySession, specTotals), eventIds: specIds },
+    };
+}
+
 /** The summary statistics shared by deriveMetrics and the incremental index. */
 export function assembleMetrics(p: MetricsParts): Metrics {
     const { requests, counters: c } = p;
@@ -553,7 +728,41 @@ export function assembleMetrics(p: MetricsParts): Metrics {
             latestComputeUtilization: c.latestCompute,
         },
         droppedEvents: sumDroppedReports(c.dropped),
+        ...reuseMetrics(requests),
     };
+}
+
+/**
+ * Per-request backend reports that deriveMetrics tracks besides the token
+ * facts: the first `model` attribute, and the latest prompt-cache and
+ * speculation reports. Token events never carry them and are skipped.
+ */
+export function noteSpanReports(e: ObservatoryEvent): { model: string | null; cache: PromptCacheUse | null; spec: SpeculationUse | null } | null {
+    const model = typeof e.attributes.model === "string" && e.attributes.model !== "" ? e.attributes.model : null;
+    const cacheReport = promptCacheReport(e);
+    const specReport = speculationReport(e);
+    if (model === null && cacheReport === null && specReport === null) {
+        return null;
+    }
+    return {
+        model,
+        cache: cacheReport ? promptCacheUse(cacheReport, e.event_id) : null,
+        spec: specReport ? speculationUse(specReport, e.event_id) : null,
+    };
+}
+
+/** Key of the first `session.created` model of a stream and session. */
+export function sessionModelKey(stream: string, sessionId: string): string {
+    return `${stream}\u0001${sessionId}`;
+}
+
+/** The `model` of a `session.created` event, or null. */
+export function sessionCreatedModel(e: ObservatoryEvent): string | null {
+    if (e.event_type !== "session.created") {
+        return null;
+    }
+    const m = e.attributes.model;
+    return typeof m === "string" && m !== "" ? m : null;
 }
 
 /**
@@ -571,6 +780,10 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
     const looseTokens: TokenTime[] = [];
     let chunkEvents = 0;
     const counters = newCounters();
+    /** Model sources of each span, resolved after the loop (see RequestSpan.model). */
+    const spanModels = new Map<RequestSpan, { attr: string | null; envelope: string | null; sessionKey: string }>();
+    /** First session.created model per stream and session. */
+    const sessionModels = new Map<string, string>();
 
     for (const e of events) {
         const t = e.event_type;
@@ -592,7 +805,16 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
                 backendTokens: null,
                 tokenCount: null,
                 decode: null,
+                sessionId: e.session_id,
+                model: null,
+                promptCache: null,
+                speculation: null,
             };
+            spanModels.set(span, {
+                attr: null,
+                envelope: typeof e.model_instance_id === "string" && e.model_instance_id !== "" ? e.model_instance_id : null,
+                sessionKey: sessionModelKey(stream, e.session_id),
+            });
             spans.set(spanKey, span);
             const times: TokenTime[] = [];
             tokenTimes.set(span, times);
@@ -644,12 +866,41 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
             }
         }
 
+        if (rid && t !== "inference.token.generated") {
+            // Most events carry no report: read the attributes before the span lookup.
+            const reports = noteSpanReports(e);
+            const span = reports ? spans.get(spanKey) : undefined;
+            if (span && reports) {
+                const models = spanModels.get(span)!;
+                if (models.attr === null && reports.model !== null) {
+                    models.attr = reports.model;
+                }
+                if (reports.cache) {
+                    span.promptCache = reports.cache;
+                }
+                if (reports.spec) {
+                    span.speculation = reports.spec;
+                }
+            }
+        }
+        if (t === "session.created") {
+            const model = sessionCreatedModel(e);
+            const key = model !== null ? sessionModelKey(streamKey(e), e.session_id) : "";
+            if (model !== null && !sessionModels.has(key)) {
+                sessionModels.set(key, model);
+            }
+        }
+
         if (isErrorEvent(e)) {
             errorsByType[t] = (errorsByType[t] ?? 0) + 1;
             errorIds.push(e.event_id);
         }
 
         stepCounters(counters, e);
+    }
+
+    for (const [span, models] of spanModels) {
+        span.model = models.attr ?? sessionModels.get(models.sessionKey) ?? models.envelope;
     }
 
     return assembleMetrics({

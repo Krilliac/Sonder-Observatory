@@ -92,6 +92,30 @@ The Ollama timing helper emits `backend.model.load.reported`,
 `backend.timing.prefill` and `backend.timing.decode` (class `inference`); the
 engine does not call it at 912503a.
 
+### Prompt-cache reuse, speculative decoding and model-default sampling
+
+Read by `promptCacheReport`, `speculationReport` and `samplerSettings`
+(src/query/attributes.ts). All fields are optional; a stream without them
+derives exactly the metrics it did before (tests/perf/metrics-parity.test.ts).
+
+| Source | Attributes | Observatory reading |
+| --- | --- | --- |
+| Ollama timing (main a2aa72d): `backend.timing.prefill` and the timing attributes | `prompt_eval_count`, `prompt_eval_cached_count` (0 before Ollama 0.33.3) | prompt tokens = `prompt_eval_count`, of which `prompt_eval_cached_count` came from the cache; evaluated = the difference |
+| llamaserver backend (PR #32, `feat/llama-server-backend`): `request.completed`, `inference.prefill.completed`, `inference.decode.completed` | `backend_cached_tokens` with `prompt_tokens` (which already includes the cached tokens); `backend_draft_tokens`, `backend_draft_accepted_tokens` (`backend_draft_acceptance_ratio` is the same ratio and is not read) | cache as above; draft acceptance = accepted / drafted |
+| raw llama-server timings, if forwarded | `prompt_n` + `cache_n` (`prompt_n` excludes the cache); `draft_n`, `draft_n_accepted` | same readings |
+| `session.created`, `request.started` | `sampling{…}` with `explicit_only`; a null field is the model's own default, `num_ctx: 0` means model default | inspector "sampler settings" shows "model default" instead of a value |
+
+A request keeps its latest report of each kind; a report with more cached
+(accepted) than prompt (drafted) tokens is ignored as inconsistent. Totals
+are token-weighted and grouped per model (first `model` attribute on the
+request, else the `session.created` model of its stream and session, else
+`model_instance_id`) and per `session_id`. These are backend observations,
+distinct from the scheduler's logical `reused_prompt_tokens`, which is not
+read. Open questions: `prompt_eval_cached_count: 0` cannot be told apart
+from an Ollama that predates the field; the "mean accepted length" shown is
+accepted draft tokens per request, because no producer reports the number of
+draft rounds that a per-round accepted length needs.
+
 The requests this document made at b2170c0 (name the stream, group a run,
 declare the capture policy, live drop reports, periodic memory, tokens vs
 chunks, helper duplicates, metadata-only loads, per-event level, KV and

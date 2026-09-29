@@ -21,7 +21,22 @@ import { isOrdered, onPrefixExtended } from "../replay/lookup";
 import { streamKey } from "../replay/order";
 import { backendEvalMs, backendTokenCount, outputTokenCount } from "./attributes";
 import { isErrorEvent } from "./classify";
-import { assembleMetrics, cloneCounters, newCounters, stepCounters, type Metrics, type RequestSpan, type SessionCounters, type SpanWork, type TokenSeries } from "./metrics";
+import {
+    assembleMetrics,
+    cloneCounters,
+    newCounters,
+    noteSpanReports,
+    sessionCreatedModel,
+    sessionModelKey,
+    stepCounters,
+    type Metrics,
+    type PromptCacheUse,
+    type RequestSpan,
+    type SessionCounters,
+    type SpanWork,
+    type SpeculationUse,
+    type TokenSeries,
+} from "./metrics";
 
 /** Events between counter checkpoints (bounds the replay per query). */
 export const METRICS_CHECKPOINT = 2048;
@@ -124,6 +139,18 @@ interface SpanInstance {
     /** First output event, token or chunk (-1: none). */
     firstOutIdx: number;
     firstOutNs: number;
+    sessionId: string;
+    /** request.started model_instance_id, and the session.created model key. */
+    envModel: string | null;
+    sessionKey: string;
+    /** First event with a `model` attribute (-1: none) and that model. */
+    attrModelIdx: number;
+    attrModel: string | null;
+    /** Prompt-cache and speculation reports, in order. */
+    cacheIdx: number[];
+    cache: PromptCacheUse[];
+    specIdx: number[];
+    spec: SpeculationUse[];
 }
 
 interface SpanKeyEntry {
@@ -151,6 +178,8 @@ export class MetricsIndex {
     private readonly errorIdx: number[] = [];
     private readonly errorIds: string[] = [];
     private readonly errorTypes: string[] = [];
+    /** First session.created model per stream and session, with its position. */
+    private readonly sessionModels = new Map<string, { idx: number; model: string }>();
     private memo: { count: number; value: Metrics } | null = null;
     /** Events the last computed query replayed after its checkpoint (bounded-cost tests). */
     lastReplayed = 0;
@@ -203,6 +232,15 @@ export class MetricsIndex {
                 chunkIdx: [],
                 firstOutIdx: -1,
                 firstOutNs: 0,
+                sessionId: e.session_id,
+                envModel: typeof e.model_instance_id === "string" && e.model_instance_id !== "" ? e.model_instance_id : null,
+                sessionKey: sessionModelKey(stream, e.session_id),
+                attrModelIdx: -1,
+                attrModel: null,
+                cacheIdx: [],
+                cache: [],
+                specIdx: [],
+                spec: [],
             };
             if (entry) {
                 entry.instances.push(inst);
@@ -245,6 +283,35 @@ export class MetricsIndex {
                 }
             } else if (n !== null) {
                 this.loose.push(i, e.mono_ns, n);
+            }
+        }
+
+        if (rid && t !== "inference.token.generated") {
+            // After the chain: a request.started reports for the span it opened.
+            const reports = noteSpanReports(e);
+            const target = reports ? this.keys.get(spanKey)?.instances.at(-1) : undefined;
+            if (target && reports) {
+                if (target.attrModelIdx < 0 && reports.model !== null) {
+                    target.attrModelIdx = i;
+                    target.attrModel = reports.model;
+                }
+                if (reports.cache) {
+                    target.cacheIdx.push(i);
+                    target.cache.push(reports.cache);
+                }
+                if (reports.spec) {
+                    target.specIdx.push(i);
+                    target.spec.push(reports.spec);
+                }
+            }
+        }
+        if (t === "session.created") {
+            const model = sessionCreatedModel(e);
+            if (model !== null) {
+                const key = sessionModelKey(streamKey(e), e.session_id);
+                if (!this.sessionModels.has(key)) {
+                    this.sessionModels.set(key, { idx: i, model });
+                }
             }
         }
 
@@ -298,6 +365,9 @@ export class MetricsIndex {
             const ended = inst.endIdx >= 0 && inst.endIdx < c;
             const nTok = countBelow(inst.tokens.idx, c);
             const nEval = countBelow(inst.evalIdx, c);
+            const nCache = countBelow(inst.cacheIdx, c);
+            const nSpec = countBelow(inst.specIdx, c);
+            const sessionModel = this.sessionModels.get(inst.sessionKey);
             const span: RequestSpan = {
                 requestId: inst.requestId,
                 streamKey: inst.streamKey,
@@ -311,6 +381,13 @@ export class MetricsIndex {
                 backendTokens: ended ? inst.backendTokens : null,
                 tokenCount: null,
                 decode: null,
+                sessionId: inst.sessionId,
+                model:
+                    (inst.attrModelIdx >= 0 && inst.attrModelIdx < c ? inst.attrModel : null) ??
+                    (sessionModel && sessionModel.idx < c ? sessionModel.model : null) ??
+                    inst.envModel,
+                promptCache: nCache > 0 ? inst.cache[nCache - 1]! : null,
+                speculation: nSpec > 0 ? inst.spec[nSpec - 1]! : null,
             };
             requests.push(span);
             work.set(span, {

@@ -11,9 +11,11 @@ import { describeRange, isFullRange, type ExportRange } from "../export/filter";
 import { EXPORT_FORMATS } from "../export/save";
 import { EVENT_CLASSES, isErrorEvent, type EventClass } from "../query/classify";
 import type { Metrics } from "../query/metrics";
+import { metricsAt } from "../query/metricsIndex";
 import { stripSeries } from "../query/series";
 import { loadRecording, RECORDING_EXTENSION } from "../recording/sobs";
 import { ReplayCursor } from "../replay/controller";
+import { streamKey } from "../replay/order";
 import { SessionStore } from "../replay/session";
 import { TopologyPanel } from "../topology";
 import { brandMark } from "./brand";
@@ -30,6 +32,7 @@ import { Onboarding } from "./onboarding";
 import type { ObservatoryPanel, PanelContext } from "./panels";
 import { parseLaunchParams, redactUrlSecrets, secretParamWarning, urlWithoutSecrets } from "./params";
 import { producerCardModel, ProducersPanel } from "./producersPanel";
+import { promptCacheCardModel, speculationCardModel, type ReuseCardModel } from "./reuseCards";
 import { readShortcutsEnabled, ShortcutsDialog, shortcutAction, writeShortcutsEnabled, type ShortcutAction } from "./shortcuts";
 import { mountSplitter } from "./splitter";
 import { safeStorage, type ThemeController } from "./theme";
@@ -1367,6 +1370,25 @@ export class ObservatoryApp {
                       ),
                   )
                 : null;
+        // Present only when a request reported them, so other streams render as before.
+        const reuseCard = (model: ReuseCardModel | null) =>
+            model
+                ? card(
+                      model.title,
+                      model.value,
+                      model.sub,
+                      model.evidence,
+                      "",
+                      model.rows.length > 0
+                          ? h(
+                                "ul",
+                                { class: "per-producer", "aria-label": `${model.title} per model` },
+                                ...model.rows.map(([name, text]) => h("li", { "data-model": name }, h("span", { class: "producer-cell", text: name }), ` ${text}`)),
+                            )
+                          : null,
+                  )
+                : null;
+        const reuseCards = [reuseCard(promptCacheCardModel(m)), reuseCard(speculationCardModel(m))].filter((c): c is HTMLElement => c !== null);
         byId("cards").replaceChildren(
             card(
                 "Request latency",
@@ -1383,6 +1405,7 @@ export class ObservatoryApp {
                 derived(m.timeToFirstToken.count, "requests with a first token"),
             ),
             card("Token rate", tokenCard.value, tokenCard.sub, tokenCard.evidence),
+            ...reuseCards,
             card(
                 "Errors",
                 `${m.errors.total}`,
@@ -1484,6 +1507,10 @@ export class ObservatoryApp {
                 relativeTime: (e) => fmtRelNs(this.cursor.relativeTime(e)),
                 onSelect: (e) => this.seekTo(e),
                 onClose: () => this.select(undefined),
+                requestSpan: (e) => {
+                    const key = streamKey(e);
+                    return metricsAt(this.cursor.events).requests.find((r) => r.requestId === e.request_id && r.streamKey === key);
+                },
             }),
         );
     }

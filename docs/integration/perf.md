@@ -146,8 +146,12 @@ what the full computation returns; tests compare them directly.
 - `src/query/metricsIndex.ts`: `metricsAt(events, count)` (and
   `ReplayCursor.metrics()`, used by `render()`) equals
   `deriveMetrics(events.slice(0, count))`. Spans, token/chunk events, decode
-  reports and errors are position lists; the small counters are checkpointed
+  reports, prompt-cache / speculation reports, first model attributes and
+  errors are position lists (the first `session.created` model per stream
+  and session keeps its position); the small counters are checkpointed
   every 2048 events. `deriveMetrics` and the index share `assembleMetrics`.
+  `tests/perf/metrics-parity.test.ts` pins the pre-existing metrics of the
+  existing fixtures (including fixture:large 10k/40k/100k) by digest.
 - `TopologyTimeline` (`src/topology/derive.ts`): `graphAt(t)` equals
   `deriveTopology(events, { atMonoNs: t })`. It keeps only topology events and
   snapshots the builder every 512 of them (or more when the state is large,
