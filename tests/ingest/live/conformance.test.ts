@@ -267,7 +267,7 @@ describe("conformance checks", () => {
         const report = await checkProducer(p.urls.base, { origin: ORIGIN, ...FAST, minEvents: p.events.length });
         expect(report.failures).toEqual([]);
         const m = deriveMetrics(orderEvents(report.ndjson!.events).events);
-        expect(m.promptCache).toMatchObject({ requests: 4, promptTokens: 207, cachedTokens: 39 });
+        expect(m.promptCache).toMatchObject({ requests: 3, promptTokens: 87, cachedTokens: 39 });
         expect(m.speculation).toMatchObject({ requests: 2, draftTokens: 14, acceptedTokens: 11 });
         expect(Object.keys(m.promptCache.byModel)).toEqual(["qwen3:8b", "llama-3.2-3b-instruct-q4_k_m"]);
     }, 30_000);

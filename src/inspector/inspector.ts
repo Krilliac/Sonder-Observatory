@@ -81,8 +81,9 @@ export function renderInspector(
         h("dd", { text: classifyEvent(event) }),
     );
 
-    // Sampler settings of session.created / request.started: a null field (or
-    // num_ctx 0) is the model's own default, not blank or zero.
+    // Sampler settings of session.created / request.started: a null
+    // explicit-only field (or num_ctx 0) is the model's own default and a null
+    // seed is "unset (backend chooses)"; never blank or zero.
     const sampler = samplerSettings(event);
     const samplerSection =
         sampler && sampler.length > 0

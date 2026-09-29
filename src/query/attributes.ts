@@ -202,8 +202,11 @@ export interface PromptCacheReport {
  * Backend prompt-cache reuse on an event, from (in order):
  * - `prompt_eval_count` + `prompt_eval_cached_count` (Sonder-Inference Ollama
  *   timing: `backend.timing.prefill` and the timing attributes; the cached
- *   count is the part of the prompt Ollama 0.33.3+ served from its cache, and
- *   is 0 on older Ollama);
+ *   count is the part of the prompt Ollama 0.33.3+ served from its cache).
+ *   Only a positive cached count is a report: the producer always emits the
+ *   field and writes 0 when Ollama omits it, so a 0 cannot be told apart from
+ *   an Ollama that predates the field and is treated as unreported (missing
+ *   evidence), never as a measured 0% hit;
  * - `prompt_tokens` + `backend_cached_tokens` (Sonder-Inference llamaserver
  *   backend on `request.completed` and `inference.prefill.completed`, where
  *   `prompt_tokens` already includes the cached tokens);
@@ -216,7 +219,7 @@ export interface PromptCacheReport {
 export function promptCacheReport(event: ObservatoryEvent): PromptCacheReport | null {
     const a = event.attributes;
     const evalCached = count(a.prompt_eval_cached_count);
-    if (evalCached !== null) {
+    if (evalCached !== null && evalCached > 0) {
         const total = count(a.prompt_eval_count);
         if (total !== null && evalCached <= total) {
             return { promptTokens: total, cachedTokens: evalCached, evaluatedTokens: total - evalCached, source: "prompt_eval_cached_count" };
@@ -276,19 +279,39 @@ export function speculationReport(event: ObservatoryEvent): SpeculationReport | 
 /** One sampler setting of a `sampling` attribute object, for display. */
 export interface SamplerSetting {
     key: string;
-    /** Display text: the value, or "model default" when the producer applied none. */
+    /** Display text: the value, "model default" when the producer applied none, or "unset …". */
     text: string;
     modelDefault: boolean;
 }
 
 /**
+ * The sampler fields Sonder-Inference records as null under `explicit_only`
+ * when the caller did not set them (`SamplingConfig::Field`, written through
+ * `sampling_json()`'s `field()` wrapper). Only for these does null mean the
+ * model's own default.
+ */
+const EXPLICIT_ONLY_FIELDS: ReadonlySet<string> = new Set([
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "repeat_penalty",
+    "repeat_last_n",
+    "presence_penalty",
+    "frequency_penalty",
+]);
+
+/**
  * The sampler settings of an event's `attributes.sampling` object
  * (Sonder-Inference `session.created` / `request.started`), in producer
- * order, or null when the event has none. A null field means "model default"
- * (with `explicit_only`, the caller did not set it and a model-default
- * backend such as Ollama applied the model's own value), and so does
- * `num_ctx: 0`. `explicit_only` itself is not a sampler setting and is
- * reported by the caller. Nested objects are skipped.
+ * order, or null when the event has none. A null explicit-only field
+ * (EXPLICIT_ONLY_FIELDS) means "model default": the caller did not set it and
+ * a model-default backend such as Ollama applied the model's own value.
+ * `num_ctx: 0` is also the model default. A null `seed` is not a model
+ * default: unset lets the backend choose (the native sampler draws an entropy
+ * seed), so it reads "unset (backend chooses)". Any other null is shown as
+ * "unset". `explicit_only` itself is not a sampler setting and is reported by
+ * the caller. Nested objects are skipped.
  */
 export function samplerSettings(event: ObservatoryEvent): SamplerSetting[] | null {
     const s = event.attributes.sampling;
@@ -300,8 +323,10 @@ export function samplerSettings(event: ObservatoryEvent): SamplerSetting[] | nul
         if (key === "explicit_only") {
             continue;
         }
-        if (value === null || (key === "num_ctx" && value === 0)) {
+        if ((value === null && EXPLICIT_ONLY_FIELDS.has(key)) || (key === "num_ctx" && value === 0)) {
             rows.push({ key, text: "model default", modelDefault: true });
+        } else if (value === null) {
+            rows.push({ key, text: key === "seed" ? "unset (backend chooses)" : "unset", modelDefault: false });
         } else if (typeof value !== "object") {
             rows.push({ key, text: String(value), modelDefault: false });
         }

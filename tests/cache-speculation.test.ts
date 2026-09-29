@@ -33,8 +33,14 @@ describe("attribute readers", () => {
             evaluatedTokens: 1,
             source: "prompt_eval_cached_count",
         });
-        // Older Ollama reports 0: a real zero, shown as 0% cached.
-        expect(promptCacheReport(attrs({ prompt_eval_count: 12, prompt_eval_cached_count: 0 }))?.cachedTokens).toBe(0);
+        // The producer writes 0 when Ollama omits the field (older Ollama), so a
+        // 0 is missing evidence, not a measured 0% hit.
+        expect(promptCacheReport(attrs({ prompt_eval_count: 12, prompt_eval_cached_count: 0 }))).toBeNull();
+        // ...and does not hide another convention on the same event.
+        expect(promptCacheReport(attrs({ prompt_eval_count: 12, prompt_eval_cached_count: 0, prompt_tokens: 12, backend_cached_tokens: 0 }))).toMatchObject({
+            cachedTokens: 0,
+            source: "backend_cached_tokens",
+        });
     });
 
     it("reads llamaserver backend_cached_tokens against prompt_tokens, and raw cache_n / prompt_n", () => {
@@ -67,18 +73,27 @@ describe("attribute readers", () => {
         expect(speculationReport(attrs({ draft_n: 0, draft_n_accepted: 0 }))).toEqual({ draftTokens: 0, acceptedTokens: 0, source: "draft_n" });
     });
 
-    it("renders null sampler fields and num_ctx 0 as model default", () => {
+    it("renders null explicit-only sampler fields and num_ctx 0 as model default, a null seed as unset", () => {
         const e = at(1, "request.started", {
-            attributes: { sampling: { temperature: null, top_k: 0, top_p: 0.9, num_ctx: 0, seed: null, max_tokens: 64, explicit_only: true, nested: { a: 1 } } },
+            attributes: {
+                sampling: { temperature: null, top_k: 0, top_p: 0.9, typical_p: 1.0, num_ctx: 0, seed: null, max_tokens: 64, explicit_only: true, other: null, nested: { a: 1 } },
+            },
         });
         expect(samplerSettings(e)).toEqual([
             { key: "temperature", text: "model default", modelDefault: true },
             { key: "top_k", text: "0", modelDefault: false },
             { key: "top_p", text: "0.9", modelDefault: false },
+            { key: "typical_p", text: "1", modelDefault: false },
             { key: "num_ctx", text: "model default", modelDefault: true },
-            { key: "seed", text: "model default", modelDefault: true },
+            // Sonder-Inference: "Unset lets the backend choose" (an entropy seed), not the model's default.
+            { key: "seed", text: "unset (backend chooses)", modelDefault: false },
             { key: "max_tokens", text: "64", modelDefault: false },
+            { key: "other", text: "unset", modelDefault: false },
         ]);
+        // Without explicit_only (older recordings) a null seed is still unset, not a model default.
+        const legacy = samplerSettings(at(4, "session.created", { attributes: { sampling: { temperature: 0.8, seed: null, max_tokens: 128 } } }))!;
+        expect(legacy.find((r) => r.key === "seed")).toEqual({ key: "seed", text: "unset (backend chooses)", modelDefault: false });
+        expect(legacy.some((r) => r.modelDefault)).toBe(false);
         expect(samplerSettings(at(2, "request.started", { attributes: { kind: "chat" } }))).toBeNull();
         expect(samplerSettings(at(3, "request.started", { attributes: { sampling: [1] } }))).toBeNull();
     });
@@ -92,7 +107,8 @@ describe("prompt cache and speculation metrics", () => {
         expect(m.requests.map((r) => [r.requestId, r.model, r.promptCache?.cachedTokens, r.promptCache?.promptTokens, r.speculation?.acceptedTokens ?? null])).toEqual([
             ["req-0a11a00000000001", "qwen3:8b", 34, 35, null],
             ["req-0b22b00000000003", "llama-3.2-3b-instruct-q4_k_m", 5, 12, 2],
-            ["req-0a11a00000000002", "qwen3:8b", 0, 120, null],
+            // prompt_eval_cached_count 0 is indistinguishable from an Ollama that predates it: no report.
+            ["req-0a11a00000000002", "qwen3:8b", undefined, undefined, null],
             ["req-0b22b00000000004", "llama-3.2-3b-instruct-q4_k_m", 0, 40, 9],
         ]);
         const r1 = m.requests[0]!;
@@ -104,13 +120,13 @@ describe("prompt cache and speculation metrics", () => {
     });
 
     it("aggregates token-weighted per session and per model", () => {
-        expect(m.promptCache).toMatchObject({ requests: 4, promptTokens: 207, cachedTokens: 39, evaluatedTokens: 168, hitRatio: 39 / 207 });
+        expect(m.promptCache).toMatchObject({ requests: 3, promptTokens: 87, cachedTokens: 39, evaluatedTokens: 48, hitRatio: 39 / 87 });
         expect(m.promptCache.byModel).toEqual({
-            "qwen3:8b": { requests: 2, promptTokens: 155, cachedTokens: 34, evaluatedTokens: 121, hitRatio: 34 / 155 },
+            "qwen3:8b": { requests: 1, promptTokens: 35, cachedTokens: 34, evaluatedTokens: 1, hitRatio: 34 / 35 },
             "llama-3.2-3b-instruct-q4_k_m": { requests: 2, promptTokens: 52, cachedTokens: 5, evaluatedTokens: 47, hitRatio: 5 / 52 },
         });
         expect(Object.keys(m.promptCache.bySession)).toEqual(["sess-0a11a0000000cafe", "sess-0b22b0000000beef"]);
-        expect(m.promptCache.eventIds).toHaveLength(4);
+        expect(m.promptCache.eventIds).toHaveLength(3);
         expect(m.speculation).toMatchObject({ requests: 2, draftTokens: 14, acceptedTokens: 11, acceptanceRate: 11 / 14, acceptedPerRequest: 5.5 });
         expect(Object.keys(m.speculation.byModel)).toEqual(["llama-3.2-3b-instruct-q4_k_m"]);
         expect(m.speculation.bySession["sess-0b22b0000000beef"]).toMatchObject({ requests: 2, acceptanceRate: 11 / 14 });
@@ -124,14 +140,14 @@ describe("prompt cache and speculation metrics", () => {
 
     it("renders cards and inspector rows only with reports", () => {
         const cache = promptCacheCardModel(m)!;
-        expect(cache.value).toBe("19% cached");
-        expect(cache.sub).toBe("39 of 207 prompt tokens served from cache · 168 evaluated · 4 requests in 2 sessions");
+        expect(cache.value).toBe("45% cached");
+        expect(cache.sub).toBe("39 of 87 prompt tokens served from cache · 48 evaluated · 3 requests in 2 sessions");
         expect(cache.rows).toEqual([
-            ["qwen3:8b", "22% cached · 34 / 155 prompt tokens · 2 reqs"],
+            ["qwen3:8b", "97% cached · 34 / 35 prompt tokens · 1 req"],
             ["llama-3.2-3b-instruct-q4_k_m", "10% cached · 5 / 52 prompt tokens · 2 reqs"],
         ]);
         expect(cache.sessionRows).toEqual([
-            ["sess-0a11a0000000cafe", "22% cached · 34 / 155 prompt tokens · 2 reqs"],
+            ["sess-0a11a0000000cafe", "97% cached · 34 / 35 prompt tokens · 1 req"],
             ["sess-0b22b0000000beef", "10% cached · 5 / 52 prompt tokens · 2 reqs"],
         ]);
         expect(cache.moreSessions).toBe(0);
@@ -144,6 +160,8 @@ describe("prompt cache and speculation metrics", () => {
             ["prompt cache", "5 / 12 prompt tokens cached (42%) · 7 evaluated · backend_cached_tokens"],
             ["speculation", "2 / 4 draft tokens accepted (50%) · backend_draft_tokens"],
         ]);
+        // The request whose only report was prompt_eval_cached_count 0 gets no prompt-cache row.
+        expect(requestReuseRows(m.requests[2]!)).toEqual([]);
         const bare = deriveMetrics([at(1, "request.started", { request_id: "r" }), at(2, "request.completed", { request_id: "r" })]);
         expect(promptCacheCardModel(bare)).toBeNull();
         expect(speculationCardModel(bare)).toBeNull();
@@ -158,15 +176,16 @@ describe("prompt cache and speculation metrics", () => {
             "top_k",
             "min_p",
             "repeat_penalty",
-            "typical_p",
             "repeat_last_n",
             "presence_penalty",
             "frequency_penalty",
             "num_ctx",
-            "max_tokens",
-            "seed",
         ]);
         expect(rows.find((r) => r.key === "top_p")).toEqual({ key: "top_p", text: "0.9", modelDefault: false });
+        // Producer shapes: typical_p and max_tokens are always values, seed null is "backend chooses".
+        expect(rows.find((r) => r.key === "typical_p")).toEqual({ key: "typical_p", text: "1", modelDefault: false });
+        expect(rows.find((r) => r.key === "max_tokens")).toEqual({ key: "max_tokens", text: "256", modelDefault: false });
+        expect(rows.find((r) => r.key === "seed")).toEqual({ key: "seed", text: "unset (backend chooses)", modelDefault: false });
     });
 
     it("metricsAt equals deriveMetrics for every prefix of the fixture", () => {
