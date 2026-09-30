@@ -11,6 +11,7 @@ import { describeRange, isFullRange, type ExportRange } from "../export/filter";
 import { EXPORT_FORMATS } from "../export/save";
 import { EVENT_CLASSES, isErrorEvent, type EventClass } from "../query/classify";
 import type { Metrics } from "../query/metrics";
+import { gpuMemoryAt } from "../query/gpuMemoryIndex";
 import { metricsAt } from "../query/metricsIndex";
 import { stripSeries } from "../query/series";
 import { loadRecording, RECORDING_EXTENSION } from "../recording/sobs";
@@ -26,6 +27,7 @@ import { mountDropZone, RECORDING_FILE_EXTENSIONS } from "./dropZone";
 import { EventTable } from "./eventTable";
 import { ExportDialog, type ExportChoice } from "./exportDialog";
 import { fmtBytes, fmtMs, fmtPct, fmtRelNs } from "./format";
+import { renderGpuCards } from "./gpuCards";
 import { renderMetricStrip, stripItems } from "./metricStrip";
 import { errorSearchStart, findMatching, producersInSession, syntheticBannerText, timelineSummaryText } from "./navigation";
 import { Onboarding } from "./onboarding";
@@ -1418,6 +1420,7 @@ export class ObservatoryApp {
             ),
             card("Token rate", tokenCard.value, tokenCard.sub, tokenCard.evidence),
             ...reuseCards,
+            ...renderGpuCards(gpuMemoryAt(this.cursor.events, this.cursor.visibleCount())),
             card(
                 "Errors",
                 `${m.errors.total}`,
