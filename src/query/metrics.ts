@@ -128,9 +128,11 @@ export interface PromptCacheTotals {
     /** cachedTokens / promptTokens (token-weighted); null when no prompt tokens. */
     hitRatio: number | null;
     /**
-     * Requests without any prompt-cache report (the field is absent, e.g. an
-     * Ollama or producer that predates it): unknown, so excluded from
-     * `requests` and the ratio rather than counted as misses. On the top-level
+     * Settled (completed, failed or cancelled) requests without any
+     * prompt-cache report (the field is absent, e.g. an Ollama or producer
+     * that predates it): unknown, so excluded from `requests` and the ratio
+     * rather than counted as misses. Open requests are not counted: they may
+     * still report. On the top-level
      * totals this is every such request; in a byModel / bySession group, the
      * ones of that model / session (groups exist only where at least one
      * request reported).
@@ -651,8 +653,8 @@ function mapValues<A, T>(groups: Map<string, A>, f: (a: A) => T): Record<string,
 /**
  * Prompt-cache and speculation totals from the requests' latest reports.
  * Token counts are integers, so the sums do not depend on summation order.
- * A request without a prompt-cache report is excluded from the cache ratio
- * and counted in unreportedRequests.
+ * A request without a prompt-cache report is excluded from the cache ratio;
+ * once settled it is counted in unreportedRequests.
  */
 function reuseMetrics(requests: readonly RequestSpan[]): Pick<Metrics, "promptCache" | "speculation"> {
     const newCache = (): CacheAcc => ({ requests: 0, promptTokens: 0, cachedTokens: 0, evaluatedTokens: 0, unreportedRequests: 0 });
@@ -686,10 +688,11 @@ function reuseMetrics(requests: readonly RequestSpan[]): Pick<Metrics, "promptCa
             specIds.push(s.eventId);
         }
     }
-    // Requests without a prompt-cache report are unknown, not misses: counted
-    // apart, and only into groups that exist (a group needs one report).
+    // Settled requests without a prompt-cache report are unknown, not misses:
+    // counted apart, and only into groups that exist (a group needs one
+    // report). An open request may still report, so it is not counted yet.
     for (const span of requests) {
-        if (!span.promptCache) {
+        if (!span.promptCache && span.outcome !== "open") {
             cache.unreportedRequests += 1;
             const byModel = cacheByModel.get(span.model ?? UNKNOWN_MODEL);
             const bySession = cacheBySession.get(span.sessionId);

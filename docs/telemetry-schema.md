@@ -112,7 +112,8 @@ request, else the `session.created` model of its stream and session, else
 `model_instance_id`) and per `session_id`. These are backend observations,
 distinct from the scheduler's logical `reused_prompt_tokens`, which is not
 read. A request with no prompt-cache report at all (the fields are absent)
-is unknown, not a miss: it is excluded from the ratio and counted in
+is unknown, not a miss: it is excluded from the ratio and, once settled
+(an open request may still report), counted in
 `promptCache.unreportedRequests` (and per model / session group where that
 group exists), and the Overview card says "N requests without cache data".
 A producer that writes 0 for a cached count Ollama omitted (Ollama before

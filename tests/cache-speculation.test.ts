@@ -212,8 +212,11 @@ describe("prompt cache and speculation metrics", () => {
             at(5, "request.started", { request_id: "c", session_id: "s1" }),
             // No cached-count field (an older producer / Ollama): unknown, excluded.
             prefill(6, "c", "s1", { prompt_eval_count: 100 }),
-            at(7, "request.started", { request_id: "d", session_id: "s2" }),
-            at(8, "request.completed", { request_id: "d", session_id: "s2" }),
+            at(7, "request.completed", { request_id: "c", session_id: "s1" }),
+            at(8, "request.started", { request_id: "d", session_id: "s2" }),
+            at(9, "request.completed", { request_id: "d", session_id: "s2" }),
+            // Still open: it may report later, so it is not counted as without data.
+            at(10, "request.started", { request_id: "e", session_id: "s1" }),
         ];
         const u = deriveMetrics(ev);
         expect(u.promptCache).toMatchObject({ requests: 2, promptTokens: 200, cachedTokens: 80, evaluatedTokens: 120, hitRatio: 0.4, unreportedRequests: 2 });
