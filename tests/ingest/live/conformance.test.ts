@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import {
     readTokenFile,
@@ -17,6 +18,8 @@ import {
 import { LiveConnectionManager } from "../../../src/ingest/live/manager";
 import { validateDiscovery } from "../../../src/protocol/discovery";
 import { validateEvent } from "../../../src/protocol/validate";
+import { deriveMetrics } from "../../../src/query/metrics";
+import { orderEvents } from "../../../src/replay/order";
 import { SessionStore } from "../../../src/replay/session";
 import { checkProducer } from "../../conformance/checks";
 
@@ -254,6 +257,19 @@ describe("conformance checks", () => {
             const anonymous = await checkProducer(p.urls.base, { origin: ORIGIN, ...FAST });
             expect(anonymous.failures.join("\n")).toMatch(/HTTP 401/);
         }
+    }, 30_000);
+
+    it("pass when the fake producer serves the prompt-cache / speculation fixture, whose reports survive ingest", async () => {
+        const file = fileURLToPath(new URL("../../fixtures/sonder-inference-cache-spec.jsonl", import.meta.url));
+        const p = await producer({ role: "inference", file });
+        expect(p.events).toHaveLength(42);
+        // Sample the whole fixture, not just the first FAST.minEvents.
+        const report = await checkProducer(p.urls.base, { origin: ORIGIN, ...FAST, minEvents: p.events.length });
+        expect(report.failures).toEqual([]);
+        const m = deriveMetrics(orderEvents(report.ndjson!.events).events);
+        expect(m.promptCache).toMatchObject({ requests: 4, promptTokens: 207, cachedTokens: 39, unreportedRequests: 0 });
+        expect(m.speculation).toMatchObject({ requests: 2, draftTokens: 14, acceptedTokens: 11 });
+        expect(Object.keys(m.promptCache.byModel)).toEqual(["qwen3:8b", "llama-3.2-3b-instruct-q4_k_m"]);
     }, 30_000);
 
     interface BadOptions {
