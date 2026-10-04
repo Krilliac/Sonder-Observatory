@@ -392,7 +392,7 @@ export class LiveIngestClient {
                 if (this.kind !== "websocket" && this.options.httpBackpressure !== "drop") {
                     return this.ingestHttp(text, id, current);
                 }
-                this.ingest(text, id);
+                this.ingest(text, id, this.kind !== "websocket");
             },
             onInvalidFrame: (reason) => {
                 if (current()) {
@@ -535,10 +535,13 @@ export class LiveIngestClient {
         this.scheduleFlush();
     }
 
-    private ingest(text: string, sseId: string | null): void {
+    private ingest(text: string, sseId: string | null, trackSourceCursor: boolean): void {
         for (const part of this.decode(text)) {
             if ("event" in part) {
-                this.accept(part.event);
+                this.accept(part.event, !trackSourceCursor);
+            } else if (trackSourceCursor && sseId === null && part.cursor !== null) {
+                // HTTP drop mode consumes the whole line synchronously, including fanout.
+                this.statusValue.lastEventId = part.cursor;
             }
         }
         this.finishPayload(sseId);
