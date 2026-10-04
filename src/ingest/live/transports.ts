@@ -230,26 +230,30 @@ export function openHttpStream(
         }
 
         const reader = response.body.getReader();
-        for (;;) {
-            await callbacks.waitForCapacity();
-            if (closed) {
-                break;
-            }
-            const { done, value } = await reader.read();
-            if (closed) {
-                break;
-            }
-            if (done) {
-                feed(decoder.decode());
-                end();
+        try {
+            for (;;) {
+                await callbacks.waitForCapacity();
+                if (closed) {
+                    break;
+                }
+                const { done, value } = await reader.read();
+                if (closed) {
+                    break;
+                }
+                if (done) {
+                    feed(decoder.decode());
+                    end();
+                    await deliver();
+                    finish("stream ended", false);
+                    break;
+                }
+                feed(decoder.decode(value, { stream: true }));
                 await deliver();
-                finish("stream ended", false);
-                break;
             }
-            feed(decoder.decode(value, { stream: true }));
-            await deliver();
+        } finally {
+            await reader.cancel().catch(() => undefined);
+            reader.releaseLock();
         }
-        reader.cancel().catch(() => undefined);
     };
 
     run().catch((error: unknown) => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { startFakeLiveProducer } from "../../../scripts/fake-live-producer.mjs";
+import { openHttpStream, type TransportCallbacks } from "../../../src/ingest/live/transports";
 import { LiveIngestClient } from "../../../src/ingest/live/client";
 import type { ObservatoryEvent } from "../../../src/protocol/events";
 import { SessionStore } from "../../../src/replay/session";
@@ -20,6 +21,109 @@ function events(count: number): ObservatoryEvent[] {
 }
 
 describe("live transport stress with bounded retention", () => {
+    it.each(["sse", "ndjson"] as const)("resumes partial %s adapter fanout from the last complete producer cursor", async (transport) => {
+        const source = events(8);
+        const fanout = source.slice(1);
+        const frame = (event: ObservatoryEvent) => transport === "sse"
+            ? `id: producer-${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`
+            : JSON.stringify(event) + "\n";
+        let calls = 0;
+        const resumes: (string | null)[] = [];
+        let release!: () => void;
+        const blocked = new Promise<void>((resolve) => { release = resolve; });
+        let hold = true;
+        const store = new SessionStore();
+        const client = new LiveIngestClient({
+            url: `http://127.0.0.1:8766/${transport}`,
+            fetch: async (_url, init) => {
+                resumes.push(new Headers(init?.headers).get("Last-Event-ID"));
+                const wire = (calls++ === 0 ? frame(source[0]!) : "") + frame(source[1]!);
+                const body = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(wire)); } });
+                return new Response(body, { headers: { "Content-Type": transport === "sse" ? "text/event-stream" : "application/x-ndjson" } });
+            },
+            adapter: (value) => (value as ObservatoryEvent).event_id === "stress-1" ? fanout : value,
+            bufferCapacity: 4,
+            batchSize: 2,
+            flushIntervalMs: 1,
+            sink: { append: async (batch) => {
+                store.append(batch);
+                if (hold && batch.some((event) => event.event_id === "stress-1")) {
+                    await blocked;
+                }
+            } },
+        });
+        try {
+            client.start();
+            await expect.poll(() => store.events.length).toBe(2);
+            expect(client.status.lastEventId).toBe(transport === "sse" ? "producer-0" : "stress-0");
+            const stopped = client.stop();
+            release();
+            await stopped;
+            hold = false;
+            client.start();
+            await expect.poll(() => store.events.length).toBe(source.length);
+            await expect.poll(() => client.status.lastEventId).toBe(transport === "sse" ? "producer-1" : "stress-1");
+            expect(resumes).toEqual([null, transport === "sse" ? "producer-0" : "stress-0"]);
+            expect(store.events).toEqual(source);
+            expect(store.duplicates).toBeGreaterThan(0);
+            expect(client.status.dropped).toBe(0);
+        } finally {
+            release();
+            await client.stop();
+        }
+    });
+
+    it("keeps the prior NDJSON producer cursor when an adapter source has no envelope cursor", async () => {
+        const source = events(8);
+        const wire = JSON.stringify(source[0]) + "\n" + JSON.stringify({ batch: source.slice(1) }) + "\n";
+        const body = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(wire)); } });
+        const store = new SessionStore();
+        const client = new LiveIngestClient({
+            url: "http://127.0.0.1:8766/ndjson",
+            fetch: async () => new Response(body, { headers: { "Content-Type": "application/x-ndjson" } }),
+            adapter: (value) => (value as { batch?: unknown }).batch ?? value,
+            bufferCapacity: 4,
+            batchSize: 2,
+            flushIntervalMs: 1,
+            sink: { append: (batch) => { store.append(batch); } },
+        });
+        try {
+            client.start();
+            await expect.poll(() => store.events.length).toBe(source.length);
+            expect(client.status.lastEventId).toBe("stress-0");
+            expect(store.events).toEqual(source);
+        } finally {
+            await client.stop();
+        }
+    });
+
+    it("cancels the HTTP body when an ordinary asynchronous consumer rejects", async () => {
+        let cancelled = 0;
+        let done!: () => void;
+        const finished = new Promise<void>((resolve) => { done = resolve; });
+        const body = new ReadableStream<Uint8Array>({
+            start(controller) { controller.enqueue(new TextEncoder().encode(JSON.stringify(events(1)[0]) + "\n")); },
+            cancel() { cancelled += 1; },
+        });
+        const callbacks: TransportCallbacks = {
+            onOpen: () => {},
+            onPayload: async () => { throw new Error("consumer unavailable"); },
+            onInvalidFrame: () => {},
+            onRetryHint: () => {},
+            onClose: () => { done(); },
+            waitForCapacity: async () => {},
+        };
+        const handle = openHttpStream({ url: "http://127.0.0.1:8766/ndjson", kind: "ndjson", lastEventId: null, resumeParam: "last_event_id" }, callbacks,
+            async () => new Response(body, { headers: { "Content-Type": "application/x-ndjson" } }));
+        try {
+            await finished;
+            expect(cancelled).toBe(1);
+            expect(body.locked).toBe(false);
+        } finally {
+            handle.close();
+        }
+    });
+
     it.each(["sse", "ndjson"] as const)("pauses within one ordinary coalesced %s chunk before overflowing the queue", async (transport) => {
         const source = events(24);
         const wire = transport === "sse"
