@@ -158,7 +158,7 @@ kept for `--skip-build`).
 
 A Linux run completed all **30 gates** in 93.1 seconds using the actual
 Runtime and Inference servers with Inference's mock backend. Both live
-producer conformance tests and both connected-browser tests ran with no
+producer conformance tests and both ecosystem browser tests ran with no
 skips; the Flutter live-payload test ran. Chat and A2A correlation,
 consented recording/export/replay, the four failure controls and all 14
 supervised process-group cleanups passed. Git status and guarded home paths
