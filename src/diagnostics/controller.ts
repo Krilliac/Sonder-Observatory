@@ -1,16 +1,12 @@
-/**
- * DOM-free state for the findings list. The renderer supplies a
- * DiagnosticsSelectionHost (see INTEGRATION_NOTES.md) so selecting a finding
- * highlights its evidence in the lead's timeline/table and opens the first
- * evidence event in the inspector.
- */
+/** DOM-free findings/evidence selection and bounded page state. */
 import type { Finding, FindingKind, Severity } from "./types";
 import { SEVERITY_RANK } from "./types";
 
+export const FINDINGS_PAGE_SIZE = 50;
+export const EVIDENCE_PAGE_SIZE = 50;
+
 export interface DiagnosticsSelectionHost {
-    /** Highlight these event ids in timeline/table; an empty list clears highlighting. */
     highlightEvents(eventIds: readonly string[]): void;
-    /** Select one event in the inspector and move the replay cursor to it. */
     selectEvent(eventId: string): void;
 }
 
@@ -20,71 +16,163 @@ export interface FindingsFilter {
     kinds: readonly FindingKind[];
 }
 
+export interface FindingsPage<T> {
+    items: readonly T[];
+    index: number;
+    pages: number;
+    total: number;
+    /** Zero-based inclusive start and exclusive end. */
+    start: number;
+    end: number;
+}
+
+function page<T>(items: readonly T[], index: number, size: number): FindingsPage<T> {
+    const pages = Math.ceil(items.length / size);
+    const bounded = Math.max(0, Math.min(index, pages - 1));
+    const start = bounded * size;
+    const end = Math.min(start + size, items.length);
+    return { items: items.slice(start, end), index: bounded, pages, total: items.length, start, end };
+}
+
+function validPage(index: number): void {
+    if (!Number.isSafeInteger(index) || index < 0) {
+        throw new RangeError("page index must be a non-negative safe integer");
+    }
+}
+
 export class FindingsController {
     private findings: Finding[] = [];
+    private byId = new Map<string, Finding>();
     private selectedId: string | null = null;
+    private findingPageIndex = 0;
+    private evidencePageIndex = 0;
+    private version = 0;
+    private filtered: Finding[] | null = null;
+    private filterKey = "";
+    private severityCounts: Record<Severity, number> = { info: 0, warning: 0, critical: 0 };
     filter: FindingsFilter = { minSeverity: "info", kinds: [] };
 
     constructor(private readonly host: DiagnosticsSelectionHost) {}
 
-    /** Replaces the findings; keeps the selection if the same finding id still exists. */
-    setFindings(findings: readonly Finding[]): void {
-        this.findings = [...findings];
-        if (this.selectedId && !this.findings.some((f) => f.id === this.selectedId)) {
-            this.clear();
-        }
+    /** Includes page/filter changes so the host can invalidate its DOM cache. */
+    get revision(): number {
+        this.filteredFindings();
+        return this.version;
     }
 
+    setFindings(findings: readonly Finding[]): void {
+        this.findings = [...findings];
+        this.byId.clear();
+        this.severityCounts = { info: 0, warning: 0, critical: 0 };
+        for (const finding of this.findings) {
+            if (!this.byId.has(finding.id)) {
+                this.byId.set(finding.id, finding);
+            }
+            this.severityCounts[finding.severity] += 1;
+        }
+        this.filtered = null;
+        this.version += 1;
+        if (this.selectedId && !this.byId.has(this.selectedId)) {
+            this.clear();
+        }
+        const list = this.filteredFindings();
+        const selectedIndex = list.findIndex((finding) => finding.id === this.selectedId);
+        this.findingPageIndex = selectedIndex >= 0
+            ? Math.floor(selectedIndex / FINDINGS_PAGE_SIZE)
+            : page(list, this.findingPageIndex, FINDINGS_PAGE_SIZE).index;
+        this.evidencePageIndex = page(this.selected()?.evidenceEventIds ?? [], this.evidencePageIndex, EVIDENCE_PAGE_SIZE).index;
+    }
+
+    private filteredFindings(): Finding[] {
+        const key = `${this.filter.minSeverity}|${this.filter.kinds.join("|")}`;
+        if (key !== this.filterKey) {
+            this.filterKey = key;
+            this.findingPageIndex = 0;
+            this.filtered = null;
+            this.version += 1;
+        }
+        if (!this.filtered) {
+            const min = SEVERITY_RANK[this.filter.minSeverity];
+            const kinds = this.filter.kinds;
+            this.filtered = this.findings.filter((finding) => SEVERITY_RANK[finding.severity] >= min && (kinds.length === 0 || kinds.includes(finding.kind)));
+        }
+        return this.filtered;
+    }
+
+    /** Full filtered list remains available; pages only bound DOM construction. */
     visible(): Finding[] {
-        const min = SEVERITY_RANK[this.filter.minSeverity];
-        const kinds = this.filter.kinds;
-        return this.findings.filter((f) => SEVERITY_RANK[f.severity] >= min && (kinds.length === 0 || kinds.includes(f.kind)));
+        return [...this.filteredFindings()];
+    }
+
+    findingsPage(): FindingsPage<Finding> {
+        return page(this.filteredFindings(), this.findingPageIndex, FINDINGS_PAGE_SIZE);
+    }
+
+    evidencePage(): FindingsPage<string> {
+        return page(this.selected()?.evidenceEventIds ?? [], this.evidencePageIndex, EVIDENCE_PAGE_SIZE);
+    }
+
+    setFindingsPage(index: number): void {
+        validPage(index);
+        this.findingPageIndex = page(this.filteredFindings(), index, FINDINGS_PAGE_SIZE).index;
+        this.version += 1;
+    }
+
+    setEvidencePage(index: number): void {
+        validPage(index);
+        this.evidencePageIndex = page(this.selected()?.evidenceEventIds ?? [], index, EVIDENCE_PAGE_SIZE).index;
+        this.version += 1;
     }
 
     selected(): Finding | undefined {
-        return this.findings.find((f) => f.id === this.selectedId);
+        return this.selectedId ? this.byId.get(this.selectedId) : undefined;
     }
 
-    /** Selecting highlights all evidence and inspects the first evidence event. */
+    /** Highlights all evidence, including ids outside the mounted page. */
     select(findingId: string): void {
-        const f = this.findings.find((x) => x.id === findingId);
-        if (!f) {
+        const finding = this.byId.get(findingId);
+        if (!finding) {
             return;
         }
-        this.selectedId = f.id;
-        this.host.highlightEvents(f.evidenceEventIds);
-        this.host.selectEvent(f.evidenceEventIds[0]!);
+        if (this.selectedId !== finding.id) {
+            this.evidencePageIndex = 0;
+        }
+        this.selectedId = finding.id;
+        const index = this.filteredFindings().findIndex((item) => item.id === finding.id);
+        if (index >= 0) {
+            this.findingPageIndex = Math.floor(index / FINDINGS_PAGE_SIZE);
+        }
+        this.version += 1;
+        this.host.highlightEvents(finding.evidenceEventIds);
+        this.host.selectEvent(finding.evidenceEventIds[0]!);
     }
 
-    /** Inspect a specific evidence event of the selected finding. */
     inspectEvidence(eventId: string): void {
-        const f = this.selected();
-        if (f && f.evidenceEventIds.includes(eventId)) {
+        const finding = this.selected();
+        if (finding && finding.evidenceEventIds.includes(eventId)) {
             this.host.selectEvent(eventId);
         }
     }
 
     clear(): void {
         this.selectedId = null;
+        this.evidencePageIndex = 0;
+        this.version += 1;
         this.host.highlightEvents([]);
     }
 
-    /** Keyboard navigation over the visible list (+1 / -1). */
+    /** Navigation spans the full filtered list and reveals the selected page. */
     move(delta: 1 | -1): void {
-        const list = this.visible();
+        const list = this.filteredFindings();
         if (list.length === 0) {
             return;
         }
-        const idx = list.findIndex((f) => f.id === this.selectedId);
-        const next = idx < 0 ? (delta > 0 ? 0 : list.length - 1) : Math.min(Math.max(idx + delta, 0), list.length - 1);
+        const index = list.findIndex((finding) => finding.id === this.selectedId);
+        const next = index < 0 ? (delta > 0 ? 0 : list.length - 1) : Math.min(Math.max(index + delta, 0), list.length - 1);
         this.select(list[next]!.id);
     }
 
     counts(): Record<Severity, number> {
-        const c: Record<Severity, number> = { info: 0, warning: 0, critical: 0 };
-        for (const f of this.findings) {
-            c[f.severity] += 1;
-        }
-        return c;
+        return { ...this.severityCounts };
     }
 }

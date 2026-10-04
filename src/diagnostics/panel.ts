@@ -5,7 +5,7 @@
  * carries aria-current and aria-expanded for its evidence list);
  * ArrowUp/ArrowDown move the selection and Escape clears it.
  */
-import type { FindingsController } from "./controller";
+import type { FindingsController, FindingsPage } from "./controller";
 import type { Finding, Severity } from "./types";
 
 type Child = Node | null;
@@ -45,24 +45,38 @@ function evidenceId(f: Finding): string {
     return `diag-evidence-${f.id.replace(/[^A-Za-z0-9_-]/g, "_")}`;
 }
 
+function pager<T>(state: FindingsPage<T>, kind: "findings" | "evidence", change: (index: number) => void, opts: FindingsPanelOptions): HTMLElement | null {
+    if (state.pages <= 1) {
+        return null;
+    }
+    const nav = h("nav", { class: "panel-head diag-pagination", "aria-label": `Diagnostic ${kind} pages` });
+    const labels = [["First", 0], ["Previous", state.index - 1], ["Next", state.index + 1], ["Last", state.pages - 1]] as const;
+    for (const [label, index] of labels) {
+        const button = h("button", { type: "button", text: label, "aria-label": `${label} ${kind} page` });
+        button.disabled = index < 0 || index >= state.pages || index === state.index;
+        button.addEventListener("click", () => { change(index); opts.onChange(); });
+        nav.append(button);
+    }
+    nav.append(h("span", { class: `muted diag-${kind}-page`, role: "status", "aria-live": "polite",
+        text: `${kind === "findings" ? "Findings" : "Evidence"} ${state.start + 1}–${state.end} of ${state.total} (page ${state.index + 1} of ${state.pages})` }));
+    return nav;
+}
+
 function evidenceList(f: Finding, controller: FindingsController, opts: FindingsPanelOptions): HTMLElement {
-    return h(
-        "ul",
-        { class: "diag-evidence", id: evidenceId(f), "aria-label": `Evidence for ${f.kind}` },
-        ...f.evidenceEventIds.map((id) => {
-            const btn = h("button", { type: "button", class: "link mono", text: id });
-            btn.addEventListener("click", () => {
-                controller.inspectEvidence(id);
-                opts.onChange();
-            });
-            return h("li", {}, btn);
-        }),
-    );
+    const state = controller.evidencePage();
+    const list = h("ul", { class: "diag-evidence", id: evidenceId(f), "aria-label": `Evidence for ${f.kind}` });
+    for (const id of state.items) {
+        const button = h("button", { type: "button", class: "link mono", text: id });
+        button.addEventListener("click", () => { controller.inspectEvidence(id); opts.onChange(); });
+        list.append(h("li", {}, button));
+    }
+    return h("div", {}, pager(state, "evidence", (index) => controller.setEvidencePage(index), opts), list);
 }
 
 export function renderFindingsPanel(controller: FindingsController, opts: FindingsPanelOptions): Node[] {
     const counts = controller.counts();
-    const visible = controller.visible();
+    const state = controller.findingsPage();
+    const visible = state.items;
     const selected = controller.selected();
     const head = h(
         "div",
@@ -116,5 +130,5 @@ export function renderFindingsPanel(controller: FindingsController, opts: Findin
         });
         list.append(h("li", {}, btn, isSel ? evidenceList(f, controller, opts) : null));
     }
-    return [head, note, list];
+    return [head, note, ...[pager(state, "findings", (index) => controller.setFindingsPage(index), opts)].filter((node): node is HTMLElement => node !== null), list];
 }

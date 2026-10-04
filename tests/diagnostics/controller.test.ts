@@ -67,3 +67,88 @@ describe("FindingsController", () => {
         expect(counts.info + counts.warning + counts.critical).toBe(findings.length);
     });
 });
+
+/** Pages affect presentation only: all findings/evidence remain addressable. */
+describe("FindingsController pagination", () => {
+    function fixture(count: number) {
+        const source = runDiagnostics(DIAGNOSTIC_CASES.flatMap((item) => item.events))[0]!;
+        return Array.from({ length: count }, (_, index) => ({ ...source, id: `finding_${index}`,
+            severity: index % 2 === 0 ? "critical" as const : "warning" as const,
+            evidenceEventIds: Array.from({ length: 125 }, (_, evidence) => `evt_${index}_${evidence}`) }));
+    }
+
+    it("walks every finding exactly once through bounded pages without changing counts", () => {
+        const { host } = fakeHost();
+        const controller = new FindingsController(host);
+        const findings = fixture(125);
+        controller.setFindings(findings);
+        const ids: string[] = [];
+        for (let index = 0; index < 3; index += 1) {
+            controller.setFindingsPage(index);
+            const page = controller.findingsPage();
+            expect(page.items.length).toBeLessThanOrEqual(50);
+            expect(page.total).toBe(125);
+            ids.push(...page.items.map((finding) => finding.id));
+        }
+        expect(ids).toEqual(findings.map((finding) => finding.id));
+        expect(controller.visible()).toEqual(findings);
+        expect(controller.counts()).toEqual({ info: 0, warning: 62, critical: 63 });
+        controller.setFindingsPage(100);
+        expect(controller.findingsPage().index).toBe(2);
+    });
+
+    it("keyboard selection reveals the next page and highlights all evidence", () => {
+        const { host, calls } = fakeHost();
+        const controller = new FindingsController(host);
+        const findings = fixture(125);
+        controller.setFindings(findings);
+        controller.select("finding_49");
+        const revision = controller.revision;
+        controller.move(1);
+        expect(controller.findingsPage().index).toBe(1);
+        expect(controller.selected()?.id).toBe("finding_50");
+        expect(controller.revision).toBeGreaterThan(revision);
+        expect(calls.highlighted.at(-1)).toEqual(findings[50]!.evidenceEventIds);
+        controller.move(-1);
+        expect(controller.findingsPage().index).toBe(0);
+    });
+
+    it("evidence paging keeps selection and inspections available beyond the first page", () => {
+        const { host, calls } = fakeHost();
+        const controller = new FindingsController(host);
+        controller.setFindings(fixture(2));
+        controller.select("finding_0");
+        controller.setEvidencePage(2);
+        const page = controller.evidencePage();
+        expect(page.items.length).toBe(25);
+        expect(page.total).toBe(125);
+        controller.inspectEvidence(page.items.at(-1)!);
+        expect(calls.selected.at(-1)).toBe("evt_0_124");
+        expect(controller.evidencePage().index).toBe(2);
+        controller.select("finding_1");
+        expect(controller.evidencePage().index).toBe(0);
+    });
+
+    it("filter changes reset paging and source replacement clamps both boundaries", () => {
+        const { host, calls } = fakeHost();
+        const controller = new FindingsController(host);
+        const findings = fixture(125);
+        controller.setFindings(findings);
+        controller.setFindingsPage(2);
+        const revision = controller.revision;
+        controller.filter.minSeverity = "critical";
+        expect(controller.revision).toBeGreaterThan(revision);
+        expect(controller.findingsPage().index).toBe(0);
+        expect(controller.findingsPage().total).toBe(63);
+        controller.select("finding_124");
+        controller.setEvidencePage(2);
+        controller.setFindings([{ ...findings[124]!, evidenceEventIds: ["evt_124_0"] }]);
+        expect(controller.selected()?.id).toBe("finding_124");
+        expect(controller.findingsPage().index).toBe(0);
+        expect(controller.evidencePage().index).toBe(0);
+        controller.setFindings([]);
+        expect(controller.selected()).toBeUndefined();
+        expect(controller.findingsPage().items).toEqual([]);
+        expect(calls.highlighted.at(-1)).toEqual([]);
+    });
+});
