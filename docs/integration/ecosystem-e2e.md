@@ -27,7 +27,8 @@ performance signal.
 ## Prerequisites
 
 - Linux or macOS (the orchestrator uses POSIX process groups).
-- Node 20.19+ and `npm ci` in this repository.
+- Node 22.x (22.13 or newer), 24.x or 26+ as declared in `package.json`, and `npm ci` in
+  this repository. Node 20 is retained only as a legacy CI compatibility lane.
 - A Sonder-Inference checkout with the `serve` module, CMake 3.21+, a C++20
   compiler, Ninja optional.
 - A Sonder Runtime checkout and a Python with its requirements
@@ -152,6 +153,38 @@ kept for `--skip-build`).
   `live` is reported with every card's state and error text.
 - A failure whose cause is in Sonder-Inference or Sonder Runtime is fixed in
   that repository; this lane reports it with the logs above.
+
+## Qualified scope (2026-10-04)
+
+A Linux run completed all **30 gates** in 93.1 seconds using the actual
+Runtime and Inference servers with Inference's mock backend. Both live
+producer conformance tests and both ecosystem browser tests ran with no
+skips; the Flutter live-payload test ran. Chat and A2A correlation,
+consented recording/export/replay, the four failure controls and all 14
+supervised process-group cleanups passed. Git status and guarded home paths
+were unchanged. These are interoperability and cleanup receipts; the
+authored mock output does not establish provider or model quality.
+
+The qualified sources are reproducible from these published revisions:
+
+| Repository | Revision | Source tree |
+|---|---|---|
+| Runtime | `1abf048216d68d02c5a06d18397d5306ebc0ff75` ([PR #663](https://github.com/Krilliac/Sonder-runtime/pull/663)) | `8c35d40e47d31246ef5dafb9e394845f73a90568` |
+| Inference | `3bdef59a7fa8bdb202d36b8117f9bb52bd904969` ([PR #53](https://github.com/Krilliac/Sonder-Inference/pull/53)) | `ad65a3bac03af736645f1d3d9eada61102b6db28` |
+| Observatory | `0d830ea694750977fc1dde6026a3b077df0956ba` ([PR #47](https://github.com/Krilliac/Sonder-Observatory/pull/47)) | `806bba937f5c1cc19ad59b0803088551263914b2` |
+
+The local Runtime checkout reported `9d5fb14228f3d25de2dfa7cfd043d4f8b290424f`
+and the Observatory checkout reported `c7b673d8c871308ca0d6a762495338666ded38eb`;
+their trees match the published revisions above exactly. Inference's tested
+binary reported `3bdef59a7fa8`. Later merges or documentation edits do not
+extend this receipt to different code automatically.
+
+The run's `summary.json` uses schema `sonder.ecosystem.e2e/1`, started at
+`2026-10-04T12:54:57.243Z` and finished at `2026-10-04T12:56:30.372Z`, with
+`ok: true`, no failed gates, `keepRunning: false` and `noFlutter: false`.
+Generated recordings, screenshots and logs remain outside Git. Use a fresh
+`E2E_WORKDIR` with the command above to produce the same receipt structure;
+gate outcomes, rather than a timing target, determine success.
 
 ## Limits
 

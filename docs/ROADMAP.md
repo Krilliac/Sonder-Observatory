@@ -29,6 +29,14 @@ Success gate: developer can identify request latency, token rate, errors, agent/
 
 Status 2026-09-26: met against the **synthetic** fixture only. Validating the gate against a real Sonder Runtime / Sonder-Inference recording is blocked on producer instrumentation and the open protocol questions in [decisions](DECISIONS.md).
 
+Update 2026-10-04: real Runtime and Inference processes now pass the
+[ecosystem end-to-end qualification](integration/ecosystem-e2e.md#qualified-scope-2026-10-04),
+including discovery, live telemetry correlation, recording/export/replay,
+Flutter payload parsing, failure controls and supervised cleanup. Inference
+uses its explicitly **synthetic mock backend**. This closes the producer
+interoperability blocker within that scope; it does not qualify real model
+quality, GPU performance, every analytical view or the open protocol proposals.
+
 Deferred from Milestone 1: Tauri bundle/installer, a Runtime-issued telemetry capability token, indexed seeking for long recordings (replay currently loads the whole file), recorder quota/rotation, ZIP `.sobs` packaging, event-type filters beyond class/text.
 
 ## Ecosystem integration (live producer protocol v1)
@@ -41,7 +49,7 @@ Added 2026-09-26 on top of Milestone 1, for the Sonder ecosystem contract v1:
 - [x] fake producer role modes and the producer conformance suite (`tests/conformance/`)
 - [x] desktop launch: repeatable `--connect`, `--token-file` bound per URL
 - [x] renderer producer cards, presets and repeatable `?connect=` parameters (`LiveConnectionManager`; browser connection tests)
-- [ ] end-to-end run against real Sonder Runtime and Sonder-Inference producers
+- [x] end-to-end run against real Sonder Runtime and Sonder-Inference processes with a synthetic mock inference backend; see [qualified scope and receipts](integration/ecosystem-e2e.md#qualified-scope-2026-10-04)
 
 ## Milestone 2 — Sonder topology
 
