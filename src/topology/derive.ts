@@ -735,6 +735,11 @@ export class TopologyTimeline {
     extendTo(next: readonly ObservatoryEvent[]): TopologyTimeline {
         return new TopologyTimeline(next, this.core);
     }
+
+    /** True only for wrappers continuing the same verified in-order history. */
+    continues(previous: TopologyTimeline): boolean {
+        return this.core === previous.core && this.events.length >= previous.events.length;
+    }
 }
 
 const timelines = new WeakMap<readonly ObservatoryEvent[], TopologyTimeline>();
