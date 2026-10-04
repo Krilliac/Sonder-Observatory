@@ -1178,7 +1178,7 @@ export class ObservatoryApp {
             this.findingsVersion += 1;
             this.diag.setFindings(runDiagnostics(this.store.events));
         }
-        const stamp = `${this.findingsVersion}|${this.diag.selected()?.id ?? ""}|${this.store.synthetic}|${this.cursor.originNs}`;
+        const stamp = `${this.findingsVersion}|${this.diag.revision}|${this.store.synthetic}|${this.cursor.originNs}`;
         if (stamp === this.diagStamp) {
             return;
         }

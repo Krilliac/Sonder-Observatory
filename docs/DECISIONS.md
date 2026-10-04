@@ -355,3 +355,13 @@ instead of relying only on capacity before the next network read.
   Owners to decide: keep them closed (new values need /2), or relax them to
   strings with known values documented, consumers ignoring unknown schemes
   and roles.
+
+
+## 2026-10-04 — Diagnostics presentation bounds
+
+The Diagnostics finding/evidence lists use 50-item pages instead of mounting
+every row/button. All derived findings/evidence stay in the model and exports;
+selection highlights all evidence, and keyboard navigation crosses pages.
+The renderer cache tracks the controller's presentation revision. This bounds
+these DOM lists only; detector evaluation and recording retention are unchanged.
+See [the integration contract](integration/diagnostics-pagination.md).

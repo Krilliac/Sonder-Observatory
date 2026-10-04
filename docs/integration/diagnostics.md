@@ -119,3 +119,13 @@ the branch builds whether or not the renderer has landed.
   config); its behaviour is in `FindingsController`, which is tested.
 - Findings over a live stream are recomputed from scratch; fine for M1-sized
   sessions. Incremental evaluation can be added later without API change.
+
+
+## 2026-10-04 — finding and evidence pagination
+
+The renderer now pages finding rows and selected evidence buttons at 50 each,
+while preserving all findings/evidence, severity counts, highlight semantics,
+exports and keyboard access across page boundaries. The host DOM cache uses
+controller.revision so page changes render even with the same selected id.
+The [pagination contract and qualification](diagnostics-pagination.md) records
+the real browser baseline, candidate scale checks, controls and remaining scope.

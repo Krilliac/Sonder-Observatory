@@ -243,3 +243,16 @@ while consuming each decoded event, and the HTTP transport awaits consumption
 before reading again. Small deterministic coalesced-chunk checks complement
 the real-socket stress tests. WebSocket overflow and explicit HTTP drop mode
 keep their existing loss accounting.
+
+
+## 2026-10-04 — bounded Diagnostics DOM
+
+The previously unported findings paging is now integrated for Diagnostics.
+Both finding rows and selected evidence buttons mount at most 50 per page,
+with every item reachable and full derivation/export/selection retained.
+On the same 8,000-event synthetic fixture the observed finding-list DOM fell
+from 5,001 rows / 35,012 nodes to 50 rows / 361 nodes. An 80,000-event candidate
+with 50,001 findings retained that row/node count. See
+[Diagnostics pagination](diagnostics-pagination.md) for attributed measurements,
+reproducible stress controls and the exact scope. This does not bound complete
+recording memory or topology DOM, or move detector evaluation off the main thread.
