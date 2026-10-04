@@ -100,7 +100,7 @@ export interface LiveIngestOptions {
     httpBackpressure?: "pause" | "drop";
     /** Reconnect after the connection closes. Default true. */
     reconnect?: boolean;
-    /** Give up after this many consecutive failed attempts. Default Infinity. */
+    /** Give up after this many consecutive attempts without valid events. Default Infinity. */
     maxRetries?: number;
     backoff?: BackoffOptions;
     /** Ask the producer to resume after lastEventId. Default true. */
@@ -270,6 +270,9 @@ export class LiveIngestClient {
             this.kind = endpoint.kind;
         }
         this.stopped = false;
+        // An explicit start is a new retry run; automatic reconnects stay in connect().
+        this.failures = 0;
+        this.backoff.reset();
         this.connect();
     }
 
@@ -373,7 +376,6 @@ export class LiveIngestClient {
                 if (!current()) {
                     return;
                 }
-                this.failures = 0;
                 const reopened = this.everOpened;
                 this.everOpened = true;
                 this.update({
@@ -515,6 +517,7 @@ export class LiveIngestClient {
         this.buffer.push(event);
         if (!this.gotDataSinceOpen) {
             this.gotDataSinceOpen = true;
+            this.failures = 0;
             this.backoff.reset();
         }
         this.statusValue.received += 1;
