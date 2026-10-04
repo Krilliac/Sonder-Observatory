@@ -29,6 +29,12 @@ valid counters and privacy controls. Two browser cases in `e2e/export.spec.ts`
 exercise direct count-only downloads and Cancel/explicit acknowledgment for
 actual message content, using synthetic fixtures.
 
+The three-repository ecosystem test also saves and reopens the content-free
+mock recording without a false warning. It then modifies a separate recording
+copy of an explicitly synthetic Inference envelope to carry a message payload,
+verifying that Cancel writes nothing and explicit acknowledgment permits that
+synthetic privacy control. Producer telemetry and execution state are untouched.
+
 Run the bounded offline scan from the repository root:
 
 ```sh
