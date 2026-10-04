@@ -1,3 +1,4 @@
+import { writeFile } from "node:fs/promises";
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
 import { build } from "vite";
@@ -21,8 +22,12 @@ test("Agents bounds evidence and diagnostic lists while retaining final events",
         attributes: { budget: "synthetic-context", used_fraction: 0.97 },
     }));
     const buffer = Buffer.from(lines.join("\n") + "\n");
+    // Playwright rejects in-memory uploads over 50 MiB. Keep large generated
+    // recordings in ignored output and exercise the actual file loader.
+    const file = testInfo.outputPath("topology-pages.ndjson");
+    await writeFile(file, buffer);
     await openFixture(page, "view=agents");
-    await page.locator("#file-input").setInputFiles({ name: "topology-pages.ndjson", mimeType: "application/x-ndjson", buffer });
+    await page.locator("#file-input").setInputFiles(file);
     await expect(page.locator("#cursor-label")).toContainText(`${count}/${count} events`, { timeout: 60_000 });
     await expect(page.locator("#synthetic-badge")).toBeVisible();
     const node = page.locator("#view-agents g.topology-node");
