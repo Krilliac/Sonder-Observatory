@@ -241,7 +241,15 @@ test.describe("Sonder ecosystem (live Runtime + Sonder-Inference)", () => {
         await expect(card(page, "sonder-runtime").locator("[data-testid=producer-state]")).toHaveText("disconnected");
         const [, total] = await cursorCounts(page);
         expect(total).toBeGreaterThan(0);
-        const [download] = await Promise.all([page.waitForEvent("download"), page.locator("#save-btn").click()]);
+        const downloadReady = page.waitForEvent("download");
+        await page.locator("#save-btn").click();
+        // The ordinary mock turn carries response text even when the producers
+        // declare capture off. Saving must still require explicit fixture consent.
+        const warning = page.getByRole("dialog", { name: "This export may contain sensitive data" });
+        await expect(warning).toBeVisible();
+        await expect(warning.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+        await warning.getByRole("button", { name: "Export anyway", exact: true }).click();
+        const download = await downloadReady;
         const saved = process.env.E2E_RECORDING_PATH?.trim() || testInfo.outputPath("ecosystem.sobs");
         await download.saveAs(saved);
         const lines = readFileSync(saved, "utf8").split("\n").filter((l) => l.trim() !== "");

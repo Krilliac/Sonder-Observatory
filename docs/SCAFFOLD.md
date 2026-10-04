@@ -22,7 +22,7 @@ preserved.
 - [x] dependency manifest and build system (npm, TypeScript, Vite)
 - [x] protocol TypeScript types + runtime validator (mirror of the schema)
 - [x] synthetic telemetry fixture and generator
-- [x] live WebSocket transport + recording file loading
+- [x] live WebSocket, SSE and NDJSON transports, multi-producer connection UI, and recording file loading
 - [x] recorder (`.sobs`) and replay with scrubber
 - [x] web renderer: metric cards, timeline, event table, inspector
 - [x] unit test suite and CI workflow
@@ -34,7 +34,7 @@ preserved.
 
 1. Resolve protocol ownership and compatibility policy with Runtime and Inference.
 2. Confirm producer attribute names used by metric derivation ([decisions](DECISIONS.md)).
-3. Run `tauri dev`/`tauri build` on Windows, wire the desktop bridge, and review dependency licenses (the project is Apache-2.0).
+3. Run `tauri dev`/`tauri build` on Windows and review dependency licenses (the project is Apache-2.0).
 4. Record a real producer session and re-check the Milestone 1 success gate.
 
 Producer instrumentation stays with Runtime/Inference. Observatory must remain

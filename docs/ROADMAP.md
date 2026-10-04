@@ -40,7 +40,7 @@ Added 2026-09-26 on top of Milestone 1, for the Sonder ecosystem contract v1:
 - [x] per-producer request spans and cumulative drop accounting; `.sobs` manifests record producer roles
 - [x] fake producer role modes and the producer conformance suite (`tests/conformance/`)
 - [x] desktop launch: repeatable `--connect`, `--token-file` bound per URL
-- [ ] renderer producer cards, presets and `?connect=` parameters (UX work)
+- [x] renderer producer cards, presets and repeatable `?connect=` parameters (`LiveConnectionManager`; browser connection tests)
 - [ ] end-to-end run against real Sonder Runtime and Sonder-Inference producers
 
 ## Milestone 2 — Sonder topology

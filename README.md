@@ -50,8 +50,8 @@ verified; see [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Requirements
 
-- Node.js 20.19+ or 22.12+ (the range Vite 8 requires; CI tests Node 20 and
-  22) and npm.
+- Node.js 22.13+ or 24 LTS and npm (CI tests both; the supported range
+  includes the requirements of Vite, ESLint and Vitest).
 - For the desktop shell: Rust 1.88 or later and the Tauri platform
   prerequisites listed in [src-tauri/README.md](src-tauri/README.md).
 
@@ -152,7 +152,8 @@ npm run test:e2e     # Playwright; install a browser first: npx playwright insta
 ```
 
 CI ([ci.yml](.github/workflows/ci.yml)) runs lint, unit tests and build on
-Node 20 and 22, plus `cargo check` and `cargo test` for `src-tauri/` on
+Node 22 and 24 (plus the protected legacy Node 20 compatibility lane),
+plus `cargo check` and `cargo test` for `src-tauri/` on
 Windows. [e2e.yml](.github/workflows/e2e.yml) runs the Playwright suite in
 Chromium. See [CONTRIBUTING.md](CONTRIBUTING.md) and
 [docs/integration/e2e.md](docs/integration/e2e.md).

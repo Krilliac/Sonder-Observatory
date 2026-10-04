@@ -56,7 +56,7 @@ export interface LiveIngestStatus {
     reconnects: number;
     /** Delay before the next attempt while `reconnecting`. */
     retryInMs: number | null;
-    /** Last event id seen; sent on reconnect to resume. */
+    /** Last completed producer cursor; sent on reconnect to resume. */
     lastEventId: string | null;
     /** True when the current/last connection asked the producer to resume. */
     resumeRequested: boolean;
@@ -384,9 +384,13 @@ export class LiveIngestClient {
                 });
             },
             onPayload: (text, id) => {
-                if (current()) {
-                    this.ingest(text, id);
+                if (!current()) {
+                    return;
                 }
+                if (this.kind !== "websocket" && this.options.httpBackpressure !== "drop") {
+                    return this.ingestHttp(text, id, current);
+                }
+                this.ingest(text, id);
             },
             onInvalidFrame: (reason) => {
                 if (current()) {
@@ -463,9 +467,7 @@ export class LiveIngestClient {
 
     // --- decoding --------------------------------------------------------------
 
-    private ingest(text: string, sseId: string | null): void {
-        let lastId: string | null = null;
-        let accepted = 0;
+    private *decode(text: string): Generator<{ event: ObservatoryEvent } | { cursor: string | null }> {
         let start = 0;
         const adapter = this.options.adapter;
         while (start <= text.length) {
@@ -486,6 +488,9 @@ export class LiveIngestClient {
                 this.reject({ line, reason: `invalid JSON: ${(error as Error).message}`, raw });
                 continue;
             }
+            // Capture producer identity before an adapter can rewrite or fan out the event.
+            const source = validateEvent(value);
+            const cursor = source.ok ? source.event.event_id : null;
             let values: unknown[];
             try {
                 values = adapter ? normalizeAdapted(adapter(value)) : [value];
@@ -494,30 +499,71 @@ export class LiveIngestClient {
                 continue;
             }
             for (const candidate of values) {
-                const result = validateEvent(candidate);
+                const result = !adapter && candidate === value ? source : validateEvent(candidate);
                 if (!result.ok) {
                     this.reject({ line, reason: formatIssues(result.issues), raw });
                     continue;
                 }
-                this.buffer.push(result.event);
-                lastId = result.event.event_id;
-                accepted += 1;
+                yield { event: result.event };
             }
+            // Reaching this marker means every output of this source line was consumed.
+            yield { cursor };
         }
-        if (accepted > 0) {
-            if (!this.gotDataSinceOpen) {
-                this.gotDataSinceOpen = true;
-                this.backoff.reset();
-            }
+    }
+
+    private accept(event: ObservatoryEvent, trackEventId = true): void {
+        this.buffer.push(event);
+        if (!this.gotDataSinceOpen) {
+            this.gotDataSinceOpen = true;
+            this.backoff.reset();
         }
-        const nextId = sseId ?? lastId;
-        this.statusValue.received += accepted;
+        this.statusValue.received += 1;
+        if (trackEventId) {
+            this.statusValue.lastEventId = event.event_id;
+        }
         this.statusValue.dropped = this.buffer.dropped;
         this.statusValue.buffered = this.buffer.size;
-        if (nextId !== null) {
-            this.statusValue.lastEventId = nextId;
+    }
+
+    private finishPayload(sseId: string | null): void {
+        if (sseId !== null) {
+            this.statusValue.lastEventId = sseId;
         }
         this.scheduleFlush();
+    }
+
+    private ingest(text: string, sseId: string | null): void {
+        for (const part of this.decode(text)) {
+            if ("event" in part) {
+                this.accept(part.event);
+            }
+        }
+        this.finishPayload(sseId);
+    }
+
+    /** A single HTTP chunk or adapter result can exceed the whole queue. */
+    private async ingestHttp(text: string, sseId: string | null, current: () => boolean): Promise<void> {
+        for (const part of this.decode(text)) {
+            if (!current()) {
+                return;
+            }
+            if ("cursor" in part) {
+                // SSE commits only at the message boundary; NDJSON at each full source line.
+                if (sseId === null && part.cursor !== null) {
+                    this.statusValue.lastEventId = part.cursor;
+                }
+                continue;
+            }
+            if (this.buffer.size >= this.highWater) {
+                this.scheduleFlush();
+                await this.waitForCapacity();
+                if (!current()) {
+                    return;
+                }
+            }
+            this.accept(part.event, false);
+        }
+        this.finishPayload(sseId);
     }
 
     private reject(line: RejectedLine): void {

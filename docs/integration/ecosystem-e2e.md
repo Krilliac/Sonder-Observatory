@@ -113,7 +113,7 @@ exits non-zero if any gate fails.
 | `negative.inference-down` | Negative control 3: with Inference stopped and no fallback, `/v1/chat/completions` answers 503 promptly, names the base URL, and makes no Ollama attempt (no Ollama route event). |
 | `runtime.stop` | The Runtime drains on SIGINT. |
 | `negative.fallback-fails-closed` | Negative control 4: a Runtime with `SONDER_INFERENCE_FALLBACK=ollama` and Ollama absent still fails closed, promptly, and its stream shows `route.changed` from `sonder_inference` to `ollama`. |
-| `processes.none-left` | Every process group the run started is gone. |
+| `processes.none-left` | No running or stopped members remain in the supervised groups. On Linux, two matching process-state observations distinguish zombie-only remnants awaiting an init reaper; missing, changing or unreadable membership remains unknown/alive. Other POSIX hosts use conservative signal-zero checks. This is cleanup evidence after supervised exit, not an atomic census during arbitrary concurrent spawning. |
 | `hygiene.git-status-unchanged`, `hygiene.guarded-paths-untouched` | `git status` of all three repositories is unchanged, and `~/.sonder` plus `E2E_GUARD_PATHS` are untouched. |
 
 ## Artifacts (in `E2E_WORKDIR`)
