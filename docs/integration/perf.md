@@ -116,6 +116,15 @@ Loading in Node (event-loop delay measured with `monitorEventLoopDelay`):
 
 ## Wiring needs for the integrator (outside this branch's files)
 
+Historical branch handoff, retained for its measurements. As of 2026-10-04,
+items 1–2, 7 and 8 are integrated; the hot paths in item 3 use caches.
+`SessionStore` uses loop-based insertion and incremental ordering; `applyLoaded` appends once; metrics, replay prefixes,
+policy and event lookup use indexes/caches; large-fixture scripts are wired;
+loading progress has its own status panel. Later sections describe these
+changes. Load-time work in other panels and worker parsing remain performance
+options, rather than prerequisites for live connection wiring. The stress
+checks below qualify the current renderer and HTTP transports.
+
 1. **`src/replay/session.ts`: remove the spread pushes.** `this.raw.push(...events)` and `this.rejected.push(...lines)` overflow the call stack somewhere above about 120k items in Chromium.
    - `app.ts#applyLoaded` works around this by appending in batches of 50k (`APPEND_BATCH`). Each batch re-runs `orderEvents` over the whole store, which costs about 8× a single sort at 1M.
    - Fix: replace both with a `for` loop. Then the batching in `applyLoaded` can be deleted, or `APPEND_BATCH` set to `Infinity`.
@@ -194,3 +203,43 @@ and a browser to measure; the paged findings list and capped topology side
 lists change DOM only (not measurable in the Node suite); the
 `producerInstance` fast path saves ~8 ms per 300k-event pass; caching
 `visibleEvents()` saves under 1 ms per render.
+
+
+## 2026-10-04 — ordinary transport and renderer stress qualification
+
+`tests/ingest/live/stress.test.ts` streams 60,000 unique synthetic events over
+each HTTP transport (SSE and NDJSON), with repeated disconnect/resume, a
+256-event transport queue and a 4,096-event retained session. It checks exact
+retained sequence values, no transport loss or invented gaps, complete
+retention accounting, and a closed, drained client after cleanup. Retention
+loss is kept separate from transport loss.
+
+`e2e/stress.spec.ts` loads a generated 100,000-event recording (about 58 MiB),
+selects its first and last events through virtual scrolling, scrubs repeatedly,
+and replaces it with a small recording. It asserts fewer than 100 mounted
+event rows and no uncaught page errors. Generated recordings and a small JSON
+measurement attachment stay in ignored Playwright output. Distinct ids exercise
+session size; repeating the small fixture would only exercise deduplication.
+
+Run these checks without real producers:
+
+```sh
+npx vitest run tests/ingest/live/stress.test.ts tests/replay.test.ts
+npx playwright test e2e/stress.spec.ts
+```
+
+The renderer check passed on Linux with Node 24.19 and system Chromium; its
+initial test body completed in 3.6 seconds. This is synthetic scale evidence,
+not real model throughput or a cross-platform latency guarantee. The full
+suite also passes on Node 22.13.1. Replay now retains one readonly visible
+prefix per cursor for marked immutable ordered snapshots and reuses their
+source array at the live edge. Unmarked owner arrays keep fresh-slice semantics.
+Moving to a
+new boundary replaces that one prefix rather than accumulating scrub history.
+
+HTTP pause-mode qualification exposed a real coalescing boundary: a network
+read can contain more events than the queue can hold. Capacity is now checked
+while consuming each decoded event, and the HTTP transport awaits consumption
+before reading again. Small deterministic coalesced-chunk checks complement
+the real-socket stress tests. WebSocket overflow and explicit HTTP drop mode
+keep their existing loss accounting.

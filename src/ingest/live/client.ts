@@ -384,9 +384,13 @@ export class LiveIngestClient {
                 });
             },
             onPayload: (text, id) => {
-                if (current()) {
-                    this.ingest(text, id);
+                if (!current()) {
+                    return;
                 }
+                if (this.kind !== "websocket" && this.options.httpBackpressure !== "drop") {
+                    return this.ingestHttp(text, id, current);
+                }
+                this.ingest(text, id);
             },
             onInvalidFrame: (reason) => {
                 if (current()) {
@@ -463,9 +467,7 @@ export class LiveIngestClient {
 
     // --- decoding --------------------------------------------------------------
 
-    private ingest(text: string, sseId: string | null): void {
-        let lastId: string | null = null;
-        let accepted = 0;
+    private *decode(text: string): Generator<ObservatoryEvent> {
         let start = 0;
         const adapter = this.options.adapter;
         while (start <= text.length) {
@@ -499,25 +501,53 @@ export class LiveIngestClient {
                     this.reject({ line, reason: formatIssues(result.issues), raw });
                     continue;
                 }
-                this.buffer.push(result.event);
-                lastId = result.event.event_id;
-                accepted += 1;
+                yield result.event;
             }
         }
-        if (accepted > 0) {
-            if (!this.gotDataSinceOpen) {
-                this.gotDataSinceOpen = true;
-                this.backoff.reset();
-            }
+    }
+
+    private accept(event: ObservatoryEvent): void {
+        this.buffer.push(event);
+        if (!this.gotDataSinceOpen) {
+            this.gotDataSinceOpen = true;
+            this.backoff.reset();
         }
-        const nextId = sseId ?? lastId;
-        this.statusValue.received += accepted;
+        this.statusValue.received += 1;
+        this.statusValue.lastEventId = event.event_id;
         this.statusValue.dropped = this.buffer.dropped;
         this.statusValue.buffered = this.buffer.size;
-        if (nextId !== null) {
-            this.statusValue.lastEventId = nextId;
+    }
+
+    private finishPayload(sseId: string | null): void {
+        if (sseId !== null) {
+            this.statusValue.lastEventId = sseId;
         }
         this.scheduleFlush();
+    }
+
+    private ingest(text: string, sseId: string | null): void {
+        for (const event of this.decode(text)) {
+            this.accept(event);
+        }
+        this.finishPayload(sseId);
+    }
+
+    /** A single HTTP chunk or adapter result can exceed the whole queue. */
+    private async ingestHttp(text: string, sseId: string | null, current: () => boolean): Promise<void> {
+        for (const event of this.decode(text)) {
+            if (!current()) {
+                return;
+            }
+            if (this.buffer.size >= this.highWater) {
+                this.scheduleFlush();
+                await this.waitForCapacity();
+                if (!current()) {
+                    return;
+                }
+            }
+            this.accept(event);
+        }
+        this.finishPayload(sseId);
     }
 
     private reject(line: RejectedLine): void {

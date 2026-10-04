@@ -9,8 +9,8 @@ import { LineSplitter, MAX_LINE_CHARS, SseParser } from "./sse";
 
 export interface TransportCallbacks {
     onOpen(kind: TransportKind): void;
-    /** A payload of one or more NDJSON lines; `id` is the SSE id, if any. */
-    onPayload(text: string, id: string | null): void;
+    /** One or more NDJSON lines; HTTP awaits consumption. `id` is the SSE id, if any. */
+    onPayload(text: string, id: string | null): void | Promise<void>;
     /** A frame that cannot carry NDJSON text (for example a binary frame). */
     onInvalidFrame(reason: string): void;
     /** Server-requested reconnection delay (SSE `retry:`). */
@@ -188,13 +188,24 @@ export function openHttpStream(
         callbacks.onOpen(kind);
 
         const decoder = new TextDecoder();
+        // Hold only this read's parsed payloads; consume them before another read.
+        const payloads: { text: string; id: string | null }[] = [];
+        const deliver = async () => {
+            for (const payload of payloads) {
+                if (closed) {
+                    break;
+                }
+                await callbacks.onPayload(payload.text, payload.id);
+            }
+            payloads.length = 0;
+        };
         let feed: (text: string) => void;
         let end: () => void;
         if (kind === "sse") {
             const parser = new SseParser({
                 onMessage: (m) => {
                     if (m.event === "message" || m.event === "event" || m.event === "events") {
-                        callbacks.onPayload(m.data, m.lastEventId || null);
+                        payloads.push({ text: m.data, id: m.lastEventId || null });
                     }
                 },
                 onRetry: (ms) => callbacks.onRetryHint(ms),
@@ -207,13 +218,13 @@ export function openHttpStream(
             feed = (text) => {
                 const lines = splitter.feed(text);
                 if (lines.length > 0) {
-                    callbacks.onPayload(lines.join("\n"), null);
+                    payloads.push({ text: lines.join("\n"), id: null });
                 }
             };
             end = () => {
                 const rest = splitter.flush();
                 if (rest.length > 0) {
-                    callbacks.onPayload(rest.join("\n"), null);
+                    payloads.push({ text: rest.join("\n"), id: null });
                 }
             };
         }
@@ -231,10 +242,12 @@ export function openHttpStream(
             if (done) {
                 feed(decoder.decode());
                 end();
+                await deliver();
                 finish("stream ended", false);
                 break;
             }
             feed(decoder.decode(value, { stream: true }));
+            await deliver();
         }
         reader.cancel().catch(() => undefined);
     };

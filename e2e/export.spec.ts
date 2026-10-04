@@ -123,6 +123,23 @@ test.describe("export", () => {
         await expect(warning).toBeVisible();
     });
 
+    test("Save with declared capture off and actual plaintext waits for explicit consent", async ({ page }) => {
+        const lines = fixtureText().trimEnd().split("\n").map((line) => JSON.parse(line) as { event_type: string; attributes: Record<string, unknown> });
+        const token = lines.find((event) => event.event_type === "inference.token.generated")!;
+        token.attributes.token_text = "synthetic plaintext";
+        await openRecording(page, "plaintext.ndjson", lines.map((event) => JSON.stringify(event)).join("\n") + "\n");
+        let downloads = 0;
+        page.on("download", () => { downloads += 1; });
+        await page.locator("#save-btn").click();
+        const warning = page.getByRole("dialog", { name: "This export may contain sensitive data" });
+        await expect(warning).toContainText('declares text capture "none", but events contain plaintext');
+        await expect(warning.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+        expect(downloads).toBe(0);
+        const { text } = await downloadText(page, () => warning.getByRole("button", { name: "Export anyway", exact: true }).click());
+        expect(text).toContain("synthetic plaintext");
+        expect(downloads).toBe(1);
+    });
+
     test("Save asks before writing a sensitive session too", async ({ page }) => {
         await openRecording(page, "full-capture.ndjson", fullCaptureText());
         await page.locator("#save-btn").click();

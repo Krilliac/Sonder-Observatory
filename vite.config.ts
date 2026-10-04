@@ -21,6 +21,8 @@ export default defineConfig({
         sourcemap: true,
     },
     test: {
+        // Keep performance tests reliable and memory bounded on large shared hosts.
+        maxWorkers: 2,
         include: ["tests/**/*.test.ts"],
         environment: "node",
     },

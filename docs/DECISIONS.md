@@ -315,6 +315,30 @@ viewer gets a "3D Inference" tab (docs/integration/inference3d.md).
   not bundled (no font download, CSP `font-src 'self' data:`); machines
   without it fall back to Segoe UI Variable / system-ui.
 
+## 2026-10-04 — supported Node toolchain
+
+Supersedes the Node and Vitest version choices in "Web toolchain". The
+installed Vitest 5 requires Node 22.12+, 24, or 26+, and ESLint 10 requires
+22.13+ on the Node 22 line. The package engine is their intersection:
+`^22.13.0 || ^24.0.0 || >=26.0.0`. CI tests the supported Node 22 and 24
+release lines. Node 20 is no longer a supported development toolchain;
+a passing individual test on it does not establish dependency support.
+
+## 2026-10-04 — protected legacy compatibility and bounded test concurrency
+
+Main's branch protection still requires `check (20)`, so CI retains a real
+Node 20 lane alongside Node 22 and 24. The development engine declaration
+remains unchanged: upstream Vitest 5 does not declare Node 20 support.
+Installation on Node 20 emits those engine warnings rather than concealing
+them. The legacy lane runs all normal lint, unit and build checks.
+
+Unit tests default to two concurrent workers. Starting many workers on a
+shared large host inflated existing timing checks; limiting concurrency keeps
+memory and CPU contention bounded. All tests and their original time/throughput
+budgets remain enabled. Ordinary HTTP stress also exposed coalesced reads
+larger than the event queue; payload consumption now awaits per-event capacity
+instead of relying only on capacity before the next network read.
+
 ## Open questions
 
 - Producer attribute names for memory/compute samples and tool call ids

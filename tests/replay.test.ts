@@ -66,6 +66,40 @@ describe("ReplayCursor", () => {
         expect(c.seek(1e15)).toBe(c.durationNs);
     });
 
+    it("reuses a stable visible prefix between renders and keeps prior snapshots intact", () => {
+        const c = new ReplayCursor(events);
+        const all = c.visibleEvents();
+        expect(all).toBe(events);
+        c.seek(100 * 1e6);
+        const prefix = c.visibleEvents();
+        expect(prefix.map((event) => event.event_type)).toEqual(["a", "b", "c"]);
+        c.seek(200 * 1e6); // the time changed but the visible event boundary did not
+        expect(c.visibleEvents()).toBe(prefix);
+        c.seek(250 * 1e6);
+        expect(c.visibleEvents().map((event) => event.event_type)).toEqual(["a", "b", "c", "d"]);
+        expect(prefix.map((event) => event.event_type)).toEqual(["a", "b", "c"]);
+        c.seek(0);
+        expect(c.visibleEvents().map((event) => event.event_type)).toEqual(["a"]);
+        c.seek(c.durationNs);
+        expect(c.visibleEvents()).toBe(all);
+        expect(events).toHaveLength(5);
+    });
+
+    it("observes owner replacements in an unmarked mutable source array", () => {
+        const source = [at(0, "a"), at(100, "b"), at(250, "c")];
+        const c = new ReplayCursor(source);
+        c.seek(100 * 1e6);
+        const previous = c.visibleEvents();
+        source[1] = at(100, "replacement");
+        expect(c.visibleEvents().map((event) => event.event_type)).toEqual(["a", "replacement"]);
+        expect(previous.map((event) => event.event_type)).toEqual(["a", "b"]);
+        c.seek(c.durationNs);
+        const all = c.visibleEvents();
+        source[2] = at(250, "updated-end");
+        expect(c.visibleEvents().map((event) => event.event_type)).toEqual(["a", "replacement", "updated-end"]);
+        expect(all.map((event) => event.event_type)).toEqual(["a", "replacement", "c"]);
+    });
+
     it("advances by elapsed wall time times speed", () => {
         const c = new ReplayCursor(events);
         c.seek(0);

@@ -85,13 +85,14 @@ document can point to yet); steps 3 and 4 are Observatory's
      an explanation: producer telemetry is loopback on the runtime host.
 3. For each URL, Observatory fetches `/.well-known/sonder-telemetry`,
    validates it (`sonder.telemetry.producer/1`), and opens the SSE stream
-   (then NDJSON, then WebSocket). Status in this repo:
-   `LiveConnectionManager` does this for every URL it is given, but the
-   renderer does not use the manager yet (producer cards and `connectAll`
-   wiring are the renderer/UX work, obs-ux-upgrade). Until that lands the
-   desktop shell's frontend opens only the first URL (`LaunchInfo.connect`)
-   through the single-URL path, which also resolves a base URL through
-   discovery but sends no token; further URLs and their tokens are ignored.
+   (then NDJSON, then WebSocket). The renderer owns a
+   `LiveConnectionManager` and exposes producer cards, local presets, and
+   repeatable `?connect=` parameters. The desktop bridge forwards every
+   `LaunchInfo.connectAll` URL with its matching `connectTokens` entry;
+   tokens stay bound to their producer. Legacy single-URL launch information
+   remains supported. Browser connection and desktop bridge tests cover this
+   wiring; a successful launch still depends on each producer being reachable
+   and allowing the Observatory origin.
 4. Each producer replays its retained window, then streams live. Observatory
    merges them in one session and correlates Runtime turns with Inference
    requests by `run_id` and `parent_request_id`.

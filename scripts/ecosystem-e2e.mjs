@@ -45,6 +45,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { groupAlive } from "./process-group.mjs";
 
 const OBS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const USAGE = `usage: node scripts/ecosystem-e2e.mjs [--skip-build] [--keep-running] [--no-flutter]
@@ -233,15 +234,6 @@ function startProcess(name, cmd, args, { cwd, env, logFile }) {
     procs.set(name, entry);
     log(`started ${name} (pid ${child.pid}): ${cmd} ${args.join(" ")}`);
     return entry;
-}
-
-function groupAlive(pgid) {
-    try {
-        process.kill(-pgid, 0);
-        return true;
-    } catch {
-        return false;
-    }
 }
 
 function signalGroup(pgid, signal) {
@@ -1072,7 +1064,7 @@ async function main() {
             if (pub.code !== 0) {
                 throw new Error(`flutter pub get --offline failed (exit ${pub.code}${pub.error ? `, ${pub.error}` : ""}); set FLUTTER_BIN or pass --no-flutter:\n${tail(logFile)}`);
             }
-            const r = await runLogged(FLUTTER, ["--no-version-check", "--suppress-analytics", "test", "test/ecosystem_status_test.dart", "--reporter", "expanded"], {
+            const r = await runLogged(FLUTTER, ["--no-version-check", "--suppress-analytics", "test", "--no-pub", "test/ecosystem_status_test.dart", "--reporter", "expanded"], {
                 cwd: appDir,
                 env,
                 logFile,

@@ -1,11 +1,12 @@
 # Live ingest
 
 Status: implemented in `src/ingest/live/`, tested against
-`scripts/fake-live-producer.mjs` and a fake fetch/WebSocket. The renderer's
-single-URL connect path uses `connectLiveSession`, which resolves a base URL
-through discovery. The multi-producer
-`LiveConnectionManager` below is implemented and tested; wiring it into the
-renderer (producer cards, presets, URL parameters) is the renderer/UX work.
+`scripts/fake-live-producer.mjs` and a fake fetch/WebSocket. The renderer
+uses the multi-producer `LiveConnectionManager` below, with producer cards,
+local presets, repeatable `?connect=` URLs and desktop launch URLs with
+per-producer tokens. `connectLiveSession` remains the single-stream adapter
+for consumers that need only one connection; it also resolves base URLs
+through discovery.
 
 The wire protocol (discovery, SSE/NDJSON framing, resume, backpressure, auth,
 CORS, correlation) is specified in docs/TELEMETRY_PROTOCOL.md, "Live producer
@@ -180,6 +181,9 @@ node scripts/fake-live-producer.mjs --role runtime --port 8767 --token-file ./to
   the last event, and the conformance checks passing on it and failing on
   broken producers (event name, id mismatch, sequence gap, wildcard CORS,
   wrong retry, a permissive origin policy).
+- `tests/ingest/live/stress.test.ts`: 60,000 unique events per HTTP transport,
+  repeated resume, a bounded queue and retained session, exact sequence and
+  loss accounting, and stopped-client cleanup (synthetic, normal telemetry).
 - `tests/conformance/live-producer.test.ts`: the conformance suite against
   running producers (`SONDER_CONFORMANCE_URLS`; skipped without it).
 

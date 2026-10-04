@@ -146,6 +146,25 @@ describe("finding 2: sensitive exports require an explicit acknowledgement", () 
         expect(blobs).toHaveLength(2);
     });
 
+    it("warns about actual plaintext even when sessions declare capture none/off", async () => {
+        const events = variant((event) => {
+            if (event.event_type === "session.started") {
+                event.attributes = { ...event.attributes, text_capture: "none,off" };
+            }
+            if (event.event_type === "inference.token.generated") {
+                event.attributes = { ...event.attributes, token_text: "synthetic output" };
+            }
+        });
+        const assessment = exp.assessExportSensitivity(events);
+        expect(assessment).toMatchObject({ fullText: true, sensitive: true, capturePolicy: "none,off" });
+        expect(exp.sensitiveExportWarning(assessment).items).toContain(
+            'The session declares text capture "none,off", but events contain plaintext prompt/output text.',
+        );
+        const { host, blobs } = fakeHost();
+        await expect(exp.exportSession("sobs", { events }, { host })).rejects.toThrow(/sensitive/i);
+        expect(blobs).toHaveLength(0);
+    });
+
     it("warning text names what is present", () => {
         const w = exp.sensitiveExportWarning(exp.assessExportSensitivity(toolPayload));
         expect(w.title).toMatch(/sensitive/i);

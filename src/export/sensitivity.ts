@@ -97,7 +97,9 @@ export function sensitiveExportWarning(a: ExportSensitivity): SensitiveExportWar
         items.push(
             a.capturePolicy === "unspecified"
                 ? "Events contain plaintext prompt/output text."
-                : `The session was recorded with text capture "${a.capturePolicy}": prompts and outputs may be included in full.`,
+                : a.capturePolicy.split(",").some((policy) => FULL_TEXT_POLICIES.has(policy.trim().toLowerCase()))
+                  ? `The session was recorded with text capture "${a.capturePolicy}": prompts and outputs may be included in full.`
+                  : `The session declares text capture "${a.capturePolicy}", but events contain plaintext prompt/output text.`,
         );
     }
     if (a.toolPayloads) {

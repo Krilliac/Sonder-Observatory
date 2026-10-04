@@ -1,6 +1,7 @@
 import type { ObservatoryEvent } from "../protocol/events";
 import type { Metrics } from "../query/metrics";
 import { metricsAt } from "../query/metricsIndex";
+import { isOrdered } from "./lookup";
 
 /**
  * Pure replay cursor over events that are already in replay order
@@ -12,6 +13,8 @@ export class ReplayCursor {
     readonly originNs: number;
     readonly durationNs: number;
     private positionNs = 0;
+    private prefixCount = -1;
+    private prefix: readonly ObservatoryEvent[] = [];
 
     constructor(events: readonly ObservatoryEvent[]) {
         this.events = events;
@@ -45,8 +48,17 @@ export class ReplayCursor {
         return upperBound(this.events, this.originNs + this.positionNs);
     }
 
+    /** Reuse one prefix only for immutable ordered snapshots; owner arrays retain fresh-slice semantics. */
     visibleEvents(): readonly ObservatoryEvent[] {
-        return this.events.slice(0, this.visibleCount());
+        const count = this.visibleCount();
+        if (!isOrdered(this.events)) {
+            return this.events.slice(0, count);
+        }
+        if (count !== this.prefixCount) {
+            this.prefix = count === this.events.length ? this.events : this.events.slice(0, count);
+            this.prefixCount = count;
+        }
+        return this.prefix;
     }
 
     /**
