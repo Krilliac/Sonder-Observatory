@@ -243,13 +243,11 @@ test.describe("Sonder ecosystem (live Runtime + Sonder-Inference)", () => {
         expect(total).toBeGreaterThan(0);
         const downloadReady = page.waitForEvent("download");
         await page.locator("#save-btn").click();
-        // The ordinary mock turn carries response text even when the producers
-        // declare capture off. Saving must still require explicit fixture consent.
+        // Capture-off producer telemetry carries structural chat message counts.
+        // Actual content gets a separate positive privacy control below.
         const warning = page.getByRole("dialog", { name: "This export may contain sensitive data" });
-        await expect(warning).toBeVisible();
-        await expect(warning.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
-        await warning.getByRole("button", { name: "Export anyway", exact: true }).click();
         const download = await downloadReady;
+        await expect(warning).toBeHidden();
         const saved = process.env.E2E_RECORDING_PATH?.trim() || testInfo.outputPath("ecosystem.sobs");
         await download.saveAs(saved);
         const lines = readFileSync(saved, "utf8").split("\n").filter((l) => l.trim() !== "");
@@ -265,6 +263,40 @@ test.describe("Sonder ecosystem (live Runtime + Sonder-Inference)", () => {
         await expect(page.locator("#cursor-label")).toContainText(`${total}/${total} events`);
         await expect(page.locator("#synthetic-banner")).toContainText("sonder-inference");
         await shot(page, testInfo, "e2e-replay");
+
+        // Modify only a recording copy of an explicitly synthetic Inference
+        // envelope. Capture remains off; genuine message content must still
+        // require acknowledgment. Never alter producer instrumentation/state.
+        const privacyLines = lines.map((line) => JSON.parse(line) as {
+            event_type?: string;
+            producer?: { name: string; synthetic?: boolean };
+            attributes?: Record<string, unknown>;
+        });
+        const queued = privacyLines.find((event) => event.event_type === "request.queued" &&
+            event.producer?.name === "sonder-inference" && event.attributes?.kind === "chat");
+        expect(queued?.producer?.synthetic).toBe(true);
+        expect(typeof queued?.attributes?.messages).toBe("number");
+        const canary = "ecosystem synthetic private chat canary";
+        queued!.attributes!.messages = [{ role: "user", content: canary }];
+        await page.locator("#file-input").setInputFiles({ name: "synthetic-privacy-control.sobs", mimeType: "application/x-ndjson",
+            buffer: Buffer.from(privacyLines.map((line) => JSON.stringify(line)).join("\n") + "\n") });
+        await expect(page.locator("#source-badge")).toContainText("synthetic-privacy-control.sobs");
+        await expect(page.locator("#cursor-label")).toContainText(`${total}/${total} events`);
+        let privacyDownloads = 0;
+        page.on("download", () => { privacyDownloads++; });
+        await page.locator("#save-btn").click();
+        await expect(warning).toBeVisible();
+        await expect(warning.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+        await warning.getByRole("button", { name: "Cancel", exact: true }).click();
+        await expect(warning).toBeHidden();
+        expect(privacyDownloads).toBe(0);
+        await page.locator("#save-btn").click();
+        await expect(warning).toBeVisible();
+        const privacyDownloadReady = page.waitForEvent("download");
+        await warning.getByRole("button", { name: "Export anyway", exact: true }).click();
+        const privacyDownload = await privacyDownloadReady;
+        expect(readFileSync((await privacyDownload.path())!, "utf8")).toContain(canary);
+        expect(privacyDownloads).toBe(1);
 
         expect(pageErrors, "uncaught page errors").toEqual([]);
     });

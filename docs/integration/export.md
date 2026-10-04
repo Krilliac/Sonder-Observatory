@@ -40,6 +40,12 @@ and described, Escape / Cancel = no export, Cancel focused first) only when
 needed. The Markdown summary clips producer-controlled strings and applies a
 final 65 536-character budget with a truncation marker.
 
+Inference's canonical `request.queued` / `kind: "chat"` envelope uses an
+integer `messages` count. Nonnegative safe-integer counts from
+`sonder-inference` are structural; actual message content and all other
+privacy guards remain conservative. See
+[the field contract and qualification](inference-chat-export-counts.md).
+
 Only public APIs are used: `deriveMetrics` (`src/query/metrics.ts`),
 `runDiagnostics` (`src/diagnostics/index.ts`), `deriveTopology` /
 `layoutTopology` / `buildScene` / `shapePath` (`src/topology/index.ts`),
