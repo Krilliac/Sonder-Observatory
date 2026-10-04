@@ -3,6 +3,7 @@ import { h, svg } from "../renderer/dom";
 import { allDiagnostics, evidenceFor, getTopologyTimeline, selectionValid, TopologyTimeline } from "./derive";
 import { layoutTopology, type TopologyLayout } from "./layout";
 import type { TopologyGraph, TopologySelection } from "./model";
+import { topologyPage } from "./pagination";
 import { buildScene, shapePath, type LegendEntry, type TopologyScene } from "./scene";
 
 export interface TopologyPanelCallbacks {
@@ -35,6 +36,7 @@ export class TopologyPanel {
     private readonly canvas: HTMLElement;
     private readonly side: HTMLElement;
     private readonly legend: HTMLElement;
+    private readonly pages = { evidence: 0, diagnostics: 0 };
 
     constructor(cb: TopologyPanelCallbacks) {
         this.cb = cb;
@@ -69,7 +71,12 @@ export class TopologyPanel {
      * bounded number of topology events instead of the whole session.
      */
     setEvents(events: readonly ObservatoryEvent[]): void {
-        this.timeline = getTopologyTimeline(events);
+        const timeline = getTopologyTimeline(events);
+        if (!timeline.continues(this.timeline)) {
+            this.pages.evidence = 0;
+            this.pages.diagnostics = 0;
+        }
+        this.timeline = timeline;
         this.layout = layoutTopology(this.timeline.graphAt(null));
         this.render();
     }
@@ -84,6 +91,9 @@ export class TopologyPanel {
     }
 
     select(selection: TopologySelection | null): void {
+        if (selection?.kind !== this.selection?.kind || selection?.id !== this.selection?.id) {
+            this.pages.evidence = 0;
+        }
         this.selection = selection;
         this.render();
         const evidence = selection && this.graph ? evidenceFor(this.graph, selection) : [];
@@ -107,7 +117,50 @@ export class TopologyPanel {
             this.restoreFocus(focused);
         }
         this.legend.replaceChildren(...scene.legend.map(legendItem));
-        this.side.replaceChildren(...this.sideContent(graph, activeSelection));
+        this.renderSide(graph, activeSelection);
+    }
+
+    private renderSide(graph: TopologyGraph, selection: TopologySelection | null): void {
+        const active = this.element.ownerDocument.activeElement;
+        const focused = active && this.side.contains(active) ? active.getAttribute("data-topology-focus") : null;
+        this.side.replaceChildren(...this.sideContent(graph, selection));
+        if (focused) {
+            const buttons = Array.from(this.side.querySelectorAll<HTMLButtonElement>("button[data-topology-focus]"));
+            const match = buttons.find((button) => button.getAttribute("data-topology-focus") === focused && !button.disabled);
+            const group = focused.split(":", 1)[0];
+            const fallback = buttons.find((button) => button.getAttribute("data-topology-focus")?.startsWith(`${group}:`) && !button.disabled);
+            (match ?? fallback ?? this.element).focus({ preventScroll: true });
+        }
+    }
+
+    private pagedList<T>(items: readonly T[], kind: "evidence" | "diagnostics", row: (item: T) => HTMLElement): HTMLElement {
+        const state = topologyPage(this.pages[kind], items.length);
+        this.pages[kind] = state.index;
+        const content = h("div");
+        if (state.pages > 1) {
+            const nav = h("nav", { class: "panel-head topology-pagination", "aria-label": `Topology ${kind} pages` });
+            const actions = [["First", 0], ["Previous", state.index - 1], ["Next", state.index + 1], ["Last", state.pages - 1]] as const;
+            for (const [label, index] of actions) {
+                const button = h("button", { type: "button", text: label, "aria-label": `${label} topology ${kind} page`,
+                    "data-topology-focus": `${kind}:page:${label}` });
+                button.disabled = index < 0 || index >= state.pages || index === state.index;
+                button.addEventListener("click", () => {
+                    this.pages[kind] = index;
+                    // Paging changes only the side list, preserving the graph and its focus.
+                    this.renderSide(this.graph!, selectionValid(this.graph!, this.selection) ? this.selection : null);
+                });
+                nav.append(button);
+            }
+            nav.append(h("span", { class: `muted topology-${kind}-page`, role: "status",
+                text: `${kind === "evidence" ? "Evidence" : "Diagnostics"} ${state.start + 1}–${state.end} of ${items.length} (page ${state.index + 1} of ${state.pages})` }));
+            content.append(nav);
+        }
+        const list = h("ul", { class: "related", "aria-label": `Topology ${kind}` });
+        for (const item of items.slice(state.start, state.end)) {
+            list.append(row(item));
+        }
+        content.append(list);
+        return content;
     }
 
     /** The node/edge (by selection identity) that currently has focus inside the graph, if any. */
@@ -254,7 +307,8 @@ export class TopologyPanel {
         if (!e) {
             return h("li", { class: "mono muted", text: `${id} (not in loaded events)` });
         }
-        const btn = h("button", { type: "button", class: "link", text: `${this.rel(e)}  ${e.event_type}  ${e.event_id}` });
+        const btn = h("button", { type: "button", class: "link", text: `${this.rel(e)}  ${e.event_type}  ${e.event_id}`,
+            "data-topology-focus": `evidence:event:${id}` });
         btn.addEventListener("click", () => this.cb.onSelectEvent(e));
         return h("li", {}, btn);
     }
@@ -274,7 +328,7 @@ export class TopologyPanel {
                     add("id", item.entityId);
                     add("role", item.role ?? "not reported");
                     add("status", item.status);
-                    add("diagnostics", item.diagnostics.map((d) => d.kind).join(", ") || "none");
+                    add("diagnostics", [...new Set(item.diagnostics.map((d) => d.kind))].join(", ") || "none");
                 } else if ("source" in item) {
                     add("kind", item.kind);
                     add("from", item.source);
@@ -288,29 +342,29 @@ export class TopologyPanel {
                     h("h3", { text: `Selected ${selection.kind}: ${selection.id}` }),
                     facts,
                     h("h3", { text: `Evidence (${item.evidence.length} events)` }),
-                    h("ul", { class: "related" }, ...item.evidence.map((id) => this.eventButton(id))),
+                    this.pagedList(item.evidence, "evidence", (id) => this.eventButton(id)),
                 );
             }
         } else {
+            this.pages.evidence = 0;
             out.push(h("p", { class: "muted", text: "Select a node or edge (click, or Tab + Enter) to list its evidence events. Esc clears." }));
         }
         const diags = allDiagnostics(graph);
         if (diags.length > 0) {
             out.push(
                 h("h3", { text: `Retry / recovery / guard diagnostics (${diags.length})` }),
-                h(
-                    "ul",
-                    { class: "related" },
-                    ...diags.map((d) => {
-                        const e = this.timeline.byId.get(d.eventId);
-                        const btn = h("button", { type: "button", class: "link", text: `${e ? this.rel(e) : ""}  ${d.kind}  ${d.nodeId ?? "(no agent)"}` });
-                        if (e) {
-                            btn.addEventListener("click", () => this.cb.onSelectEvent(e));
-                        }
-                        return h("li", {}, btn);
-                    }),
-                ),
+                this.pagedList(diags, "diagnostics", (d) => {
+                    const e = this.timeline.byId.get(d.eventId);
+                    const btn = h("button", { type: "button", class: "link", text: `${e ? this.rel(e) : ""}  ${d.kind}  ${d.nodeId ?? "(no agent)"}`,
+                        "data-topology-focus": `diagnostics:event:${d.eventId}:${d.nodeId ?? ""}` });
+                    if (e) {
+                        btn.addEventListener("click", () => this.cb.onSelectEvent(e));
+                    }
+                    return h("li", {}, btn);
+                }),
             );
+        } else {
+            this.pages.diagnostics = 0;
         }
         if (graph.unmappedEventIds.length > 0) {
             out.push(
