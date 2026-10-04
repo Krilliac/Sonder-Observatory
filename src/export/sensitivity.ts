@@ -32,8 +32,15 @@ const TOOL_PAYLOAD_KEYS = ["args", "arguments", "input", "result", "output", "pa
  */
 const TEXT_KEYS = ["token_text", "prompt", "response", "completion", "messages"] as const;
 
+/** Inference TELEMETRY.md defines this one field as a chat message count. */
+function isInferenceChatMessageCount(e: ObservatoryEvent): boolean {
+    const value = e.attributes.messages;
+    return e.producer.name === "sonder-inference" && e.event_type === "request.queued" &&
+        e.attributes.kind === "chat" && typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
 function carriesText(e: ObservatoryEvent): boolean {
-    if (TEXT_KEYS.some((k) => !isRedacted(e.attributes[k]))) {
+    if (TEXT_KEYS.some((k) => !(k === "messages" && isInferenceChatMessageCount(e)) && !isRedacted(e.attributes[k]))) {
         return true;
     }
     return e.event_type === "inference.token.generated" && !isRedacted(e.attributes.text);

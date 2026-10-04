@@ -18,6 +18,19 @@ function fullCaptureText(): string {
     return out;
 }
 
+/** Synthetic fixture with one canonical Inference chat queue envelope. */
+function inferenceMessagesText(messages: unknown): string {
+    const events = fixtureText().trim().split("\n").map((line) => JSON.parse(line) as {
+        event_type: string; producer: Record<string, unknown>; attributes: Record<string, unknown>;
+    });
+    const queued = events.find((event) => event.event_type === "request.started");
+    if (!queued) throw new Error("fixture needs a request event");
+    queued.event_type = "request.queued";
+    queued.producer = { name: "sonder-inference", version: "0.1.0", node_id: "mock-node", role: "inference", synthetic: true };
+    queued.attributes = { kind: "chat", messages };
+    return `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
+}
+
 async function openRecording(page: Page, name: string, text: string): Promise<void> {
     await page.goto("./?fixture=0");
     await page.locator("#file-input").setInputFiles({ name, mimeType: "application/x-ndjson", buffer: Buffer.from(text) });
@@ -32,6 +45,36 @@ async function downloadText(page: Page, action: () => Promise<void>): Promise<{ 
 }
 
 test.describe("export", () => {
+    test("Inference chat counters export without a plaintext warning", async ({ page }) => {
+        await openRecording(page, "inference-count.ndjson", inferenceMessagesText(1));
+        await expect(page.locator("#synthetic-badge")).toBeVisible();
+        await page.locator("#export-btn").click();
+        await page.getByRole("radio", { name: "Observatory recording (.sobs)" }).check();
+        const { text } = await downloadText(page, () => page.getByRole("button", { name: "Export", exact: true }).click());
+        await expect(page.getByRole("dialog", { name: "This export may contain sensitive data" })).toBeHidden();
+        const queued = text.trim().split("\n").map((line) => JSON.parse(line) as { event_type?: string; attributes?: Record<string, unknown> })
+            .find((event) => event.event_type === "request.queued" && event.attributes?.kind === "chat");
+        expect(queued?.attributes?.messages).toBe(1);
+    });
+
+    test("Inference chat payloads still require explicit sensitive export acknowledgement", async ({ page }) => {
+        const canary = "synthetic private chat canary";
+        await openRecording(page, "inference-payload.ndjson", inferenceMessagesText([{ role: "user", content: canary }]));
+        let downloads = 0;
+        page.on("download", () => { downloads += 1; });
+        await page.locator("#export-btn").click();
+        await page.getByRole("radio", { name: "Observatory recording (.sobs)" }).check();
+        await page.getByRole("button", { name: "Export", exact: true }).click();
+        const warning = page.getByRole("dialog", { name: "This export may contain sensitive data" });
+        await expect(warning).toBeVisible();
+        await warning.getByRole("button", { name: "Cancel" }).click();
+        expect(downloads).toBe(0);
+        await page.locator("#export-btn").click();
+        await page.getByRole("button", { name: "Export", exact: true }).click();
+        const { text } = await downloadText(page, () => warning.getByRole("button", { name: "Export anyway" }).click());
+        expect(text).toContain(canary);
+    });
+
     test("the dialog is keyboard operable and returns focus", async ({ page }) => {
         await openFixture(page);
         const button = page.locator("#export-btn");
