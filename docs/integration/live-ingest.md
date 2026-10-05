@@ -82,9 +82,8 @@ await manager.disconnectAll();
   leaves a loaded recording or fixture untouched. Each producer gets its own `LiveIngestClient`.
   `store.sourceLabel` lists the open stream URLs.
 - `ProducerConnection` carries `id`, `url`, `label`, `hasToken`, `streamUrl`,
-  `discovery`, `identity` (from discovery, or from the first events of a direct
-  stream; it follows a producer restart to the new `instance_id`) and
-  `status`.
+  `discovery`, `identity` (discovery initially, then the latest wire-observed
+  event identity) and `status`. See the instance provenance rules below.
 - Discovery documents are fetched without following redirects and refused
   above 64 KiB.
 - `probeProducer(url, { token })` checks a URL without ingesting events and
@@ -103,6 +102,40 @@ await manager.disconnectAll();
 - `LOCAL_PRESETS`: Sonder Runtime `http://127.0.0.1:11435`, Sonder-Inference
   `http://127.0.0.1:11437`, fake producer `http://127.0.0.1:8766/sse`
   (synthetic).
+
+### Wire-observed identity and synthetic provenance
+
+The producer card follows the final event in each original incoming batch,
+including duplicate replay and events later evicted from retention. Its name,
+version and node are refreshed from that event; this is wire-observed identity,
+not a guarantee about which backend is currently running. Discovery and optional
+health remain their original snapshots; this observation does not refresh them.
+
+Positive synthetic evidence is scoped to the exact producer name, node and
+resolved non-null instance ID. The card combines positive flags for that key in
+the bounded current batch, the previous card when its key matches, and the
+original discovery when its key matches. A later absent, null or false flag for
+the same key does not erase earlier positive evidence. Another instance, name
+or node cannot inherit it. Matching discovery is checked again on each batch,
+so discovery A-positive → B-unknown → A-unknown restores A's discovery evidence.
+Final-event role metadata takes precedence; a missing role falls back to the
+previous card or discovery only when that exact resolved key matches.
+
+Instance resolution uses `producer.instance_id` first, then an event ID ending
+in the exact canonical decimal sequence (`<instance>-<sequence>`). An unresolved
+final event is classified solely from its own positive flag and role, with no
+previous/discovery carry or anonymous batch aggregation. This conservative
+boundary can hide earlier anonymous positive evidence. No instance history map
+or retained-store rescan is used: without matching discovery, A-positive →
+B-unknown → A-unknown across separate batches cannot recover A's old evidence.
+
+The historical session banner independently reflects retained event flags or a
+recording manifest. It can remain positive after a new unclassified instance
+appears, or lose its positive event to retention while the same-instance card
+remains positive. Neither an absent badge nor an unknown/false flag proves real
+provider execution or model quality; synthetic throughput is not provider or
+model quality evidence. Original event fields, producer resume cursors, bounded
+batching, capture consent and recording/export behavior are unchanged.
 
 ### Tokens
 

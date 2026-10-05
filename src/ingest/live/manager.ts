@@ -59,7 +59,7 @@ export interface ProducerConnection {
     /** The stream actually opened, once known. */
     streamUrl: string | null;
     discovery: ProducerDiscovery | null;
-    /** From discovery, or from the first events of a direct stream. */
+    /** Discovery initially; then the latest wire-observed event's identity. */
     identity: ProducerIdentity | null;
     /**
      * Backends and capabilities from the discovery `links.health` document
@@ -172,6 +172,12 @@ function identityFromEvent(event: ObservatoryEvent): ProducerIdentity {
         role: typeof p.role === "string" ? p.role : null,
         synthetic: p.synthetic === true,
     };
+}
+
+/** Only a resolved instance with matching producer and node proves continuity. */
+function sameInstance(a: ProducerIdentity | null, b: ProducerIdentity): boolean {
+    return a !== null && b.instance_id !== null && a.instance_id === b.instance_id
+        && a.name === b.name && a.node_id === b.node_id;
 }
 
 /**
@@ -501,7 +507,7 @@ export class LiveConnectionManager {
         }
     }
 
-    /** Fills identity for direct streams and follows producer restarts (new instance id). */
+    /** Observe original wire order, independently of store sorting, dedup and retention. */
     private observeIdentity(entry: Entry, events: readonly ObservatoryEvent[]): void {
         const last = events[events.length - 1];
         if (!last) {
@@ -509,16 +515,18 @@ export class LiveConnectionManager {
         }
         const seen = identityFromEvent(last);
         const current = entry.connection.identity;
-        if (current === null) {
-            entry.connection.identity = seen;
-        } else {
-            if (seen.instance_id !== null && seen.instance_id !== current.instance_id) {
-                current.instance_id = seen.instance_id;
-            }
-            if (seen.synthetic) {
-                current.synthetic = true;
-            }
+        const discovery = entry.connection.discovery === null ? null : identityFromDiscovery(entry.connection.discovery);
+        const previous = sameInstance(current, seen) ? current : null;
+        const matchingDiscovery = sameInstance(discovery, seen) ? discovery : null;
+        if (seen.instance_id !== null) {
+            seen.synthetic ||= previous?.synthetic === true || matchingDiscovery?.synthetic === true
+                || events.some((event) => event.producer.synthetic === true
+                    && event.producer.name === seen.name && event.producer.node_id === seen.node_id
+                    && producerInstance(event) === seen.instance_id);
+            // A missing role is not a new role declaration; carry it only within a proven key.
+            seen.role ??= previous?.role ?? matchingDiscovery?.role ?? null;
         }
+        entry.connection.identity = seen;
     }
 
     private notify(): void {
