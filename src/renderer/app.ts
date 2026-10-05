@@ -806,6 +806,7 @@ export class ObservatoryApp {
         this.store.append(loaded.events);
         this.store.addRejected(loaded.rejected);
         this.rebuildCursor();
+        this.cursor.seek(this.cursor.durationNs);
         this.selectedId = null;
         this.setFollow(true);
         this.render();
