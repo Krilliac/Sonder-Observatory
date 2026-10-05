@@ -66,10 +66,10 @@ function runsAgree(a: ObservatoryEvent, b: ObservatoryEvent): boolean {
  *
  * - Same tool call: attributes.tool_call_id.
  * - Same request: the same request_id in the same producer stream.
- * - Parent request: the request named by the event's
- *   attributes.parent_request_id, in any producer (the attribute states the
- *   cross-producer link); when the event has a run_id, a candidate from a
- *   different run is not the parent.
+ * - Parent request: the unique parent named by this producer-scoped request's
+ *   events, in any producer. Output events need not repeat lifecycle parent
+ *   attributes. Conflicting observed parents or runs withhold this group;
+ *   known request runs exclude parent events from a different run.
  * - Child requests: requests (keyed per producer stream) whose events name
  *   this request in attributes.parent_request_id, from a compatible run.
  * - Same run: run_id, across producers.
@@ -79,14 +79,13 @@ function runsAgree(a: ObservatoryEvent, b: ObservatoryEvent): boolean {
  *
  * For the session store's arrays (immutable, replay order) a cached
  * correlation index supplies, per check, only the events that share the
- * checked value, in replay order; the checks themselves are unchanged, so the
- * result equals a full scan (docs/integration/perf.md).
+ * checked value, in replay order; indexed and scan paths apply the same
+ * lineage checks (docs/integration/perf.md).
  */
 export function relatedGroups(event: ObservatoryEvent, events: readonly ObservatoryEvent[], limit = 25): RelatedGroup[] {
     const toolCall = typeof event.attributes.tool_call_id === "string" && event.attributes.tool_call_id !== "" ? event.attributes.tool_call_id : null;
     const requestId = event.request_id ?? null;
     const ownRequest = requestKey(event);
-    const parent = parentRequestId(event);
     const runId = event.run_id ?? null;
     const agentId = event.agent_id ?? null;
 
@@ -94,6 +93,38 @@ export function relatedGroups(event: ObservatoryEvent, events: readonly Observat
     /** Every event of `events` that may have one of `values` in `map` (all events without an index), in order. */
     const candidates = (map: keyof IndexMaps, values: Iterable<string | null>): Iterable<ObservatoryEvent> =>
         index ? index.lookup(events, map, values) : events;
+    const ownCandidates = ownRequest === null ? [] : candidates("requestKey", [ownRequest]);
+
+    // Derive lineage only from this request's original evidence. Include the
+    // selected event even when it is outside the supplied session/prefix.
+    const parents = new Set<string>();
+    const requestRuns = new Set<string>();
+    const observeLineage = (e: ObservatoryEvent): void => {
+        const p = parentRequestId(e);
+        // Two distinct values suffice to prove ambiguity; cap transient facts.
+        if (p && parents.size < 2) {
+            parents.add(p);
+        }
+        if (e.run_id && requestRuns.size < 2) {
+            requestRuns.add(e.run_id);
+        }
+    };
+    observeLineage(event);
+    if (ownRequest !== null) {
+        for (const e of ownCandidates) {
+            if (index !== null || requestKey(e) === ownRequest) {
+                observeLineage(e);
+                // Ambiguity cannot be undone by later evidence. Keep the full
+                // candidate list for Same request rows and totals below.
+                if (parents.size > 1 || requestRuns.size > 1) {
+                    break;
+                }
+            }
+        }
+    }
+    const parent = parents.size === 1 && requestRuns.size <= 1 ? [...parents][0]! : null;
+    const requestRun = requestRuns.size === 1 ? [...requestRuns][0]! : null;
+    const parentRunAgrees = (e: ObservatoryEvent): boolean => !requestRun || !e.run_id || e.run_id === requestRun;
 
     const childRequests = new Set<string>();
     const childIds = new Set<string>();
@@ -107,7 +138,7 @@ export function relatedGroups(event: ObservatoryEvent, events: readonly Observat
     };
     const parentCheck = (e: ObservatoryEvent): void => {
         const key = requestKey(e);
-        if (key && key !== ownRequest && parent && e.request_id === parent && runsAgree(e, event)) {
+        if (key && key !== ownRequest && parent && e.request_id === parent && parentRunAgrees(e)) {
             parentRequests.add(key);
         }
     };
@@ -123,6 +154,7 @@ export function relatedGroups(event: ObservatoryEvent, events: readonly Observat
         const key = requestKey(e);
         return key !== null && set.has(key);
     };
+    const inParentRequests = inRequests(parentRequests);
     const specs: {
         kind: RelatedGroupKind;
         title: string;
@@ -141,14 +173,14 @@ export function relatedGroups(event: ObservatoryEvent, events: readonly Observat
             kind: "request",
             title: "Same request",
             value: requestId,
-            match: (e) => ownRequest !== null && requestKey(e) === ownRequest,
-            candidates: () => candidates("requestKey", [ownRequest]),
+            match: (e) => ownRequest !== null && (index !== null || requestKey(e) === ownRequest),
+            candidates: () => ownCandidates,
         },
         {
             kind: "parent",
             title: "Parent request",
             value: parentRequests.size > 0 ? parent : null,
-            match: inRequests(parentRequests),
+            match: (e) => parentRunAgrees(e) && inParentRequests(e),
             candidates: () => candidates("requestKey", parentRequests),
         },
         {

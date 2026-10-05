@@ -130,6 +130,10 @@ interface RequestWork {
     sessionId: string;
     modelInstanceId: string | null;
     deviceId: string | null;
+    /** Original request-pipeline evidence; conflicts withhold derived links. */
+    parentConflict: boolean;
+    runId: string | null;
+    runConflict: boolean;
 }
 
 function modelFor(
@@ -408,6 +412,9 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
                     sessionId: e.session_id,
                     modelInstanceId: e.model_instance_id ?? null,
                     deviceId: e.device_id ?? null,
+                    parentConflict: false,
+                    runId: null,
+                    runConflict: false,
                 };
                 requests.set(key, w);
             }
@@ -421,7 +428,21 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
             pushEvidence(r.evidence, e.event_id);
             w.modelInstanceId ??= e.model_instance_id ?? null;
             w.deviceId ??= e.device_id ?? null;
-            r.parentRequestId ??= str(e.attributes.parent_request_id);
+            const parentId = str(e.attributes.parent_request_id);
+            if (parentId && !w.parentConflict) {
+                if (r.parentRequestId && r.parentRequestId !== parentId) {
+                    w.parentConflict = true;
+                    r.parentRequestId = null;
+                } else {
+                    r.parentRequestId = parentId;
+                }
+            }
+            if (e.run_id) {
+                if (w.runId && w.runId !== e.run_id) {
+                    w.runConflict = true;
+                }
+                w.runId ??= e.run_id;
+            }
             r.kind ??= str(e.attributes.kind);
             if (t === "route.selected") {
                 w.routeModel = str(e.attributes.model) ?? w.routeModel;
@@ -564,16 +585,27 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
     }
 
     // ----- Runtime turn -> Inference request (parent_request_id = Runtime request_id)
-    const runtimeByRequestId = new Map<string, RequestEntity>();
+    const runtimeByRequestId = new Map<string, RequestEntity[]>();
     for (const r of requestList) {
         if (isRuntime(r.role, r.producer)) {
-            runtimeByRequestId.set(r.requestId, r);
+            const candidates = runtimeByRequestId.get(r.requestId) ?? [];
+            candidates.push(r);
+            runtimeByRequestId.set(r.requestId, candidates);
         }
     }
     const links: RequestLink[] = [];
     for (const r of requestList) {
-        const parent = r.parentRequestId ? runtimeByRequestId.get(r.parentRequestId) : undefined;
-        if (parent && parent !== r) {
+        const child = requests.get(r.id)!;
+        const candidates = r.parentRequestId && !child.runConflict
+            ? (runtimeByRequestId.get(r.parentRequestId) ?? []).filter((p) => {
+                const parent = requests.get(p.id)!;
+                return p !== r && !parent.runConflict && (!child.runId || !parent.runId || child.runId === parent.runId);
+            })
+            : [];
+        // A bare parent id cannot distinguish compatible Runtime instances.
+        // Keep ambiguous evidence inspectable instead of picking the last one.
+        const parent = candidates.length === 1 ? candidates[0] : undefined;
+        if (parent) {
             links.push({ from: parent.id, to: r.id });
         }
     }

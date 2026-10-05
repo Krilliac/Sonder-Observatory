@@ -38,6 +38,21 @@ moves a request backwards (to Queue).
 
 Every mapping is in the visible legend (UX.md "3D semantics").
 
+Parent lines use the parent ID observed on a producer-scoped request's
+lifecycle and pipeline evidence at the cursor. Known conflicting run IDs exclude a Runtime candidate; an absent run
+ID is unknown. If a request reports different parent IDs or different known
+run IDs, or several compatible Runtime instances share the parent ID, the
+scene withholds the line instead of choosing an arbitrary instance. The
+original evidence stays inspectable. The Inspector's Parent request group
+can list multiple compatible evidence candidates; a drawn line requires one
+unambiguous retained target. These are consumer derivations and change no
+producer fields or protocol schema.
+As with the existing pipeline derivation, only stage-moving events create a
+request. Earlier nonmoving facts do not retroactively set lineage, and event
+classes outside request lifecycle, stages, KV and scheduler do not contribute
+parent/run facts to this view. Inference's supported parent metadata is on
+the five request lifecycle types.
+
 ## Availability ("Capabilities")
 
 Each producer stream gets a row with one chip per concept panel (Stage

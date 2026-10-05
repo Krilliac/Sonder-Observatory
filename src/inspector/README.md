@@ -25,6 +25,17 @@ Responsibility: Resolve displayed values to source events and measurement proven
   themselves; producers are joined only where `parent_request_id` or
   `run_id` states the link (a parent or child from a different run is
   refused). `relatedEvents` keeps the single most specific group.
+  Selecting an output, scheduler or KV event also resolves parent evidence
+  reported on another event of the same producer-scoped request; the raw
+  selected event is never changed. Conflicting observed parent IDs or run
+  IDs withhold the Parent request group, leaving the evidence in Same request.
+  Known request runs exclude parent events from other runs; absent runs do
+  not prove a conflict. Multiple compatible parent instances are shown as
+  evidence candidates rather than silently picking one. Ordered store arrays
+  use the existing correlation index; unmarked arrays use the same scan rules.
+  Compatible per-event parent evidence can still be listed when another event
+  of that parent reports a conflicting run; the 3D view withholds a line to
+  such a conflicted entity.
 
 DOM hooks: `[data-testid=related-events]` with items
 `[data-testid=related-event][data-producer=<producer.name>]`,
