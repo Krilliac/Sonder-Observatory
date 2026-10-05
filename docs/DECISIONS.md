@@ -365,3 +365,19 @@ selection highlights all evidence, and keyboard navigation crosses pages.
 The renderer cache tracks the controller's presentation revision. This bounds
 these DOM lists only; detector evaluation and recording retention are unchanged.
 See [the integration contract](integration/diagnostics-pagination.md).
+
+## 2026-10-05 — Derived request parent lineage
+
+The Inspector resolves parent evidence across events of the same producer
+stream and request ID, because Inference reports `parent_request_id` on
+request lifecycle events while output events retain only the request ID.
+Conflicting observed parents or runs withhold the derived parent group;
+original fields remain unchanged. Known request runs exclude conflicting
+parent runs, and absent run metadata remains unknown. Compatible parent
+instances can appear as multiple evidence candidates in the Inspector.
+
+The 3D request join preserves distinct Runtime instances instead of indexing
+one last parent by bare request ID. It draws a parent line only for one
+compatible retained Runtime entity, and withholds conflicting or ambiguous
+lineage. This changes consumer derivations only, with no producer contract,
+schema, session/run override, consent or execution-state changes.
