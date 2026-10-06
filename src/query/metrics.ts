@@ -19,6 +19,7 @@ import {
     type SpeculationReport,
 } from "./attributes";
 import { isErrorEvent } from "./classify";
+import { scopedRequestKey, scopedSessionKey } from "./identity";
 
 export type Provenance = "measured" | "backend-reported" | "derived" | "estimated" | "unavailable";
 
@@ -58,7 +59,8 @@ export interface LatencyStats {
 export interface RequestSpan {
     requestId: string;
     /**
-     * Producer stream the span belongs to (see replay/order streamKey).
+     * Opaque canonical producer stream identity (see replay/order streamKey).
+     * Exported in report JSON; its representation is not a producer ID or label.
      * Spans are keyed by (streamKey, request_id), so two producers that
      * share a request_id yield two spans.
      */
@@ -783,7 +785,7 @@ export function noteSpanReports(e: ObservatoryEvent): { model: string | null; ca
 
 /** Key of the first `session.created` model of a stream and session. */
 export function sessionModelKey(stream: string, sessionId: string): string {
-    return `${stream}\u0001${sessionId}`;
+    return scopedSessionKey(stream, sessionId);
 }
 
 /** The `model` of a `session.created` event, or null. */
@@ -819,7 +821,7 @@ export function deriveMetrics(events: readonly ObservatoryEvent[]): Metrics {
         const t = e.event_type;
         const rid = e.request_id ?? null;
         const stream = rid ? streamKey(e) : "";
-        const spanKey = rid ? `${stream}\u0001${rid}` : "";
+        const spanKey = rid ? scopedRequestKey(stream, rid) : "";
 
         if (t === "request.started" && rid) {
             const span: RequestSpan = {

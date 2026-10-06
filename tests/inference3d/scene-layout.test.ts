@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { derivePipeline } from "../../src/inference3d/derive";
+import { producerStreamKey, tupleKey } from "../../src/query/identity";
+import { makeEvent } from "../helpers";
 import { deepSyntheticFixture, ollamaPoolFixture } from "../../src/inference3d/fixtures";
 import type { RequestEntity } from "../../src/inference3d/model";
 import { ageOpacity, layoutScene, pulseHz, requestRadius } from "../../src/inference3d/scene";
@@ -31,8 +33,8 @@ describe("3D scene layout (pure)", () => {
 
     it("keeps one layer plane per producer stream when streams report the same layer indices", () => {
         const m = derivePipeline(deepSyntheticFixture(3, 1));
-        const other = "other-producer\u0000node2\u0000#inf-2";
-        const layers = [...m.layers, ...m.layers.map((l) => ({ ...l, id: `layer:${other}|${l.layer}`, stream: other }))];
+        const other = producerStreamKey(makeEvent({ producer: { name: "other-producer", version: "test", node_id: "node2", instance_id: "inf-2" } }));
+        const layers = [...m.layers, ...m.layers.map((l) => ({ ...l, id: tupleKey("layer", other, String(l.layer)), stream: other }))];
         const layout = layoutScene({ ...m, layers });
         const layerPlanes = layout.planes.filter((p) => p.stage === "layers");
         // Every LayerEntity keeps its own pickable plane (its evidence stays reachable).

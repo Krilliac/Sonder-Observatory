@@ -56,7 +56,8 @@ describe("derivePipeline: live-like Ollama pool (qwen3:14b + deepseek-r1:14b on 
     });
 
     it("links Runtime turns to Inference requests through parent_request_id", () => {
-        const pairs = m.links.map((l) => `${l.from.split("|")[1]}->${l.to.split("|")[1]}`).sort();
+        const requests = new Map(m.requests.map((r) => [r.id, r.requestId]));
+        const pairs = m.links.map((l) => `${requests.get(l.from)}->${requests.get(l.to)}`).sort();
         expect(pairs).toEqual(["turn-1->req-ws-1", "turn-2->req-ws-2", "turn-3->req-ws-3"]);
     });
 

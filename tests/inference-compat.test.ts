@@ -56,7 +56,13 @@ describe("Sonder-Inference fixture", () => {
         const { gaps } = orderEvents(events);
         expect(gaps).toHaveLength(1);
         expect(gaps[0]).toMatchObject({ from: 9, to: 9 });
-        expect(gaps[0]!.stream).toContain("#tel-3f9c2a7b1d4e5f60");
+        const source = events.find((e) => e.sequence === 10)!;
+        expect(source).toBeDefined();
+        const instance = producerInstance(source);
+        expect(instance).toBe("tel-3f9c2a7b1d4e5f60");
+        expect(gaps[0]!.stream).toBe("obs-key/1:" + JSON.stringify([
+            "stream-instance", source.producer.name, source.producer.node_id, instance,
+        ]));
     });
 
     it("derives request latency, TTFT, outcomes and errors", () => {

@@ -13,6 +13,7 @@
 import type { ObservatoryEvent } from "../protocol/events";
 import { outputTokenCount, producerInstance } from "../query/attributes";
 import { streamKey } from "../replay/order";
+import { scopedRequestKey, scopedSessionKey, streamNameAndNode, tupleKey } from "../query/identity";
 import { captureAllowsText, emptyFacts, higherLevel, isRuntime, producerCapabilities, type StreamFacts } from "./capabilities";
 import {
     STAGE_ORDER,
@@ -183,7 +184,12 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
     const tokenByKey = new Map<string, TokenCandidates>();
     const tokenFor = (e: ObservatoryEvent, reqKey: string | null, requestEntityId: string | null): TokenCandidates => {
         const index = int(e.attributes.index);
-        const key = `${reqKey ?? e.session_id}|${index ?? e.event_id}`;
+        // Keep legacy requestless session/suffix equivalence, in a disjoint
+        // domain. A request-present tuple can never capture that evidence.
+        const suffix = String(index ?? e.event_id);
+        const key = reqKey !== null
+            ? tupleKey("token-request", reqKey, suffix)
+            : tupleKey("token-legacy", `${e.session_id}|${suffix}`);
         let token = tokenByKey.get(key);
         if (!token) {
             token = {
@@ -247,7 +253,7 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
 
         const policy = str(e.attributes.text_capture);
         if (policy && (t === "session.created" || t === "session.started" || t === "engine.started")) {
-            streamPolicy.set(`${stream}|${e.session_id}`, policy);
+            streamPolicy.set(scopedSessionKey(stream, e.session_id), policy);
             f.textCapture = f.textCapture && f.textCapture !== policy ? `${f.textCapture},${policy}` : policy;
         }
         if (t === "session.created") {
@@ -309,7 +315,7 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
             f.layerEvents += 1;
             const index = int(e.attributes.layer);
             if (index !== null && index >= 0) {
-                const id = `layer:${stream}|${index}`;
+                const id = tupleKey("layer", stream, String(index));
                 let l = layers.get(id);
                 if (!l) {
                     l = {
@@ -346,7 +352,7 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
             const name = str(e.attributes.operator);
             if (name) {
                 const layer = int(e.attributes.layer);
-                const id = `op:${stream}|${name}|${layer ?? "-"}`;
+                const id = tupleKey("operator", stream, name, String(layer ?? "-"));
                 let o = operators.get(id);
                 if (!o) {
                     o = { id, stream, operator: name, layer, events: 0, totalDurationMs: 0, ratePerSec: 0, evidence: [] };
@@ -376,7 +382,7 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
         const rid = e.request_id ?? null;
         const relevant = rid !== null && (staged !== null || t.startsWith("request.") || t.startsWith("kv.") || t.startsWith("scheduler."));
         if (relevant) {
-            const key = `req:${stream}|${rid}`;
+            const key = scopedRequestKey(stream, rid);
             let w = requests.get(key);
             // A request is born by a stage-moving event; facts and KV events alone do not create one.
             if (!w && staged?.move) {
@@ -419,7 +425,7 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
                 requests.set(key, w);
             }
         }
-        const rw = relevant ? requests.get(`req:${stream}|${rid}`) : undefined;
+        const rw = relevant ? requests.get(scopedRequestKey(stream, rid!)) : undefined;
         if (rw) {
             const w = rw;
             const r = w.entity;
@@ -485,13 +491,13 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
             } else {
                 f.tokenUnitEvents += 1;
             }
-            const reqKey = rid ? `req:${stream}|${rid}` : null;
+            const reqKey = rid ? scopedRequestKey(stream, rid!) : null;
             const req = reqKey ? requests.get(reqKey) : undefined;
             if (req) {
                 req.entity.outputEvents += 1;
             }
             const rawText = typeof e.attributes.text === "string" ? e.attributes.text : null;
-            const policy = streamPolicy.get(`${stream}|${e.session_id}`) ?? f.textCapture;
+            const policy = streamPolicy.get(scopedSessionKey(stream, e.session_id)) ?? f.textCapture;
             const allowed = rawText !== null && captureAllowsText(policy);
             if (allowed) {
                 f.textEvents += 1;
@@ -527,11 +533,11 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
             }
         } else if (t === "inference.sampling.candidates") {
             // Reserved in the Observatory taxonomy; attribute shape proposed in docs/TELEMETRY_PROTOCOL.md.
-            const policy = streamPolicy.get(`${stream}|${e.session_id}`) ?? f.textCapture;
+            const policy = streamPolicy.get(scopedSessionKey(stream, e.session_id)) ?? f.textCapture;
             const alternatives = readAlternatives(e.attributes.candidates, captureAllowsText(policy));
             if (alternatives !== null) {
                 f.alternativeEvents += 1;
-                const reqKey = rid ? `req:${stream}|${rid}` : null;
+                const reqKey = rid ? scopedRequestKey(stream, rid!) : null;
                 const token = tokenFor(e, reqKey, (reqKey ? requests.get(reqKey)?.entity.id : undefined) ?? null);
                 token.alternatives = alternatives;
                 token.candidatesEventId = e.event_id;
@@ -664,7 +670,7 @@ function kvFor(kv: Map<string, KvPool>, stream: string, e: ObservatoryEvent): Kv
     let pool = kv.get(stream);
     if (!pool) {
         pool = {
-            id: `kv:${stream}`,
+            id: tupleKey("kv", stream),
             stream,
             producer: e.producer.name,
             nodeId: e.producer.node_id,
@@ -702,9 +708,6 @@ function readAlternatives(value: unknown, textAllowed: boolean): Alternative[] |
 
 /** Human label of a producer stream key (name @ node). */
 export function streamLabel(stream: string): string {
-    const parts = stream.split("\u0000");
-    if (parts[2]?.startsWith("#")) {
-        return `${parts[0]} @ ${parts[1]}`;
-    }
-    return `${parts[1] ?? stream} @ ${parts[2] ?? ""}`;
+    const source = streamNameAndNode(stream);
+    return source ? `${source.name} @ ${source.nodeId}` : "unknown producer stream";
 }

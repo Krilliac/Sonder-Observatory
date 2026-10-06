@@ -53,6 +53,48 @@ number equals `sequence`. Anything else falls back to
 `session_id + producer name + node`. Inference numbers engine, session and
 `tel-` events from one counter, so keying by session would show false gaps.
 
+
+**Derived identity representation.** Producer streams and their scoped request,
+session, layer, operator and KV identities are opaque `obs-key/1:` tagged string
+tuples. Fields are kept literally, including embedded control characters; an
+instance-scoped tuple and a session fallback have different tags. Equal explicit
+and event-id-inferred instances still share one stream across sessions. Consumers
+must use source fields for labels and joins, never split opaque 3D entity IDs
+to reconstruct them. A dedicated reader may parse the canonical producer-stream
+tuple for display names and nodes; this does not decode 3D entity IDs.
+
+Historical metric parity tests assert each canonical stream against its original
+request-start evidence, then project only that stream representation to the prior
+string format for the unchanged metric digests. Inspector lineage scans reject
+unrelated raw request IDs and absent facts before canonical encoding; surviving
+scan matches still require the scoped canonical identity. These checks preserve
+complete input order, ambiguity withholding and request totals without allocating
+a filtered request array. The bounded synthetic qualification reports the measured
+costs and compatibility limits in
+[Canonical identity qualification](integration/canonical-identity-qualification.md).
+
+This deliberately changes derived `SequenceGap.stream`, `RequestSpan.streamKey`
+(including metrics JSON under `sonder.observatory.export/1`) and scoped 3D IDs.
+Their field types and export/event schemas are unchanged. Chunk and token entity
+IDs remain `chunk:<event_id>` and `tok:<event_id>`; their internal pairing keys are
+separate tagged domains for request-present and legacy requestless evidence.
+Within the requestless domain the prior raw-session/suffix pairing is preserved,
+without producer scoping or index-versus-event-ID distinctions. Raw envelopes,
+NDJSON/SOBS event values, event-id deduplication and producer resume cursors are
+unchanged. Text consent checks and synthetic labels still apply to the original
+telemetry evidence. Detail labels for output of an omitted finished request use
+its original evidence at the current cursor. An attached request without available
+source evidence says `request evidence unavailable`; only a null request attachment
+says `no request`.
+
+This fixes tuple-boundary ambiguity in the grouped Inspector lineage, metrics,
+dropped-event and scoped 3D consumers. It does not change legacy
+`relatedEvents()` bare-ID correlation, Compare's request/run/turn alignment,
+series' current explicit-instance-or-session grouping, recording manifest
+producer grouping, node/model lanes, raw session/model maps or global event-id
+deduplication. Those independent identities retain their existing limitations;
+this is not a guarantee that every attribution across producers is isolated.
+
 **Clock.** Inference 912503a documents `mono_ns` as comparable only within
 one producer and says to order by `sequence`. The live producer protocol v1
 (docs/TELEMETRY_PROTOCOL.md) declares it host-monotonic

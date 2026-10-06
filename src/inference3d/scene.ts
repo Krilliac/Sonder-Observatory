@@ -34,6 +34,7 @@ import {
 } from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { streamLabel } from "./derive";
+import { tupleKey } from "../query/identity";
 import type { PipelineModel, RequestEntity, StageId } from "./model";
 
 // ------------------------------------------------------------------ layout
@@ -444,14 +445,14 @@ export class InferenceScene {
         }
 
         // Operators: small boxes above their layer plane (only when reported).
-        const planeX = new Map(layout.planes.map((pl) => [`${pl.stream ?? ""}|${pl.layer ?? -1}`, pl.x]));
+        const planeX = new Map(layout.planes.map((pl) => [tupleKey("stream-layer", pl.stream ?? "", String(pl.layer ?? -1)), pl.x]));
         const opsByLayer = new Map<string, number>();
         for (const op of model.operators) {
-            const x = op.layer !== null ? planeX.get(`${op.stream}|${op.layer}`) : layout.stageX.layers;
+            const x = op.layer !== null ? planeX.get(tupleKey("stream-layer", op.stream, String(op.layer))) : layout.stageX.layers;
             if (x === undefined) {
                 continue;
             }
-            const opKey = `${op.stream}|${op.layer ?? -1}`;
+            const opKey = tupleKey("stream-layer", op.stream, String(op.layer ?? -1));
             const k = opsByLayer.get(opKey) ?? 0;
             opsByLayer.set(opKey, k + 1);
             const color = /attention/i.test(op.operator) ? p.purple : /mlp|ffn|feed/i.test(op.operator) ? p.cyan : p.muted;

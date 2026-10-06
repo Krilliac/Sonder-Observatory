@@ -21,6 +21,7 @@ import { isOrdered, onPrefixExtended } from "../replay/lookup";
 import { streamKey } from "../replay/order";
 import { backendEvalMs, backendTokenCount, outputTokenCount } from "./attributes";
 import { isErrorEvent } from "./classify";
+import { scopedRequestKey } from "./identity";
 import {
     assembleMetrics,
     cloneCounters,
@@ -213,7 +214,7 @@ export class MetricsIndex {
         const t = e.event_type;
         const rid = e.request_id ?? null;
         const stream = rid ? streamKey(e) : "";
-        const spanKey = rid ? `${stream}\u0001${rid}` : "";
+        const spanKey = rid ? scopedRequestKey(stream, rid) : "";
         const entry = rid ? this.keys.get(spanKey) : undefined;
         const current = entry?.instances[entry.instances.length - 1];
 
