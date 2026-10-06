@@ -381,8 +381,10 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
         // ----- requests
         const rid = e.request_id ?? null;
         const relevant = rid !== null && (staged !== null || t.startsWith("request.") || t.startsWith("kv.") || t.startsWith("scheduler."));
+        let requestKey: string | null = null;
         if (relevant) {
             const key = scopedRequestKey(stream, rid);
+            requestKey = key;
             let w = requests.get(key);
             // A request is born by a stage-moving event; facts and KV events alone do not create one.
             if (!w && staged?.move) {
@@ -425,7 +427,7 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
                 requests.set(key, w);
             }
         }
-        const rw = relevant ? requests.get(scopedRequestKey(stream, rid!)) : undefined;
+        const rw = requestKey !== null ? requests.get(requestKey) : undefined;
         if (rw) {
             const w = rw;
             const r = w.entity;

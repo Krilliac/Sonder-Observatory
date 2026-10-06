@@ -159,3 +159,83 @@ and no failed product run was retried.
 
 Qualification of hosted checks and merging must use the exact published head.
 This local report alone is not a hosted-CI or merge receipt.
+
+## D1: reuse the native request key within each 3D event
+
+This subsequent qualification uses a fresh baseline at main
+`7694327917232810519689e9018a2371e57ace98`, including the Inspector changes
+above. Its timings must not be compared to the earlier I1 epoch as a paired
+measurement. The candidate composes the native scoped request key once for
+each relevant event and reuses that string for the second request lookup.
+Both map lookups remain, including the lookup after creating a new request.
+The variable resets on every event; no cross-event cache or retained event
+reference is introduced. Relevance, empty-ID lifecycle behavior, output and
+sampling predicates, producer inference, ambiguity, consent and scene bounds
+retain their existing behavior.
+
+Fresh baseline and candidate graphs each contain 14 source modules and 15
+emitted files. Only the emitted `src/inference3d/derive.js` differs. Node
+24.19.0 and TypeScript 6.0.3 were used with the same 1024 MiB old-space setting.
+Four immutable synthetic fixtures contain 100,000 events each. Each cell has
+three excluded warmups and 20 measured calls per version, with alternating
+version order: 160 observations in one paired process. Preparation, explicit
+GC, serialization and correctness checks are outside the timed derive call.
+Every measured complete native output matched by deep equality and SHA-256;
+untimed indexed/scan Inspector and negative controls also passed.
+
+| Fixture | Baseline median ms | Candidate median ms | Baseline p95 ms | Candidate p95 ms |
+| --- | ---: | ---: | ---: | ---: |
+| `many_short` | 364.720 | 298.630 | 385.589 | 318.223 |
+| `long_matching` | 375.584 | 311.567 | 407.457 | 326.173 |
+| `long_absent` | 371.660 | 310.180 | 379.564 | 314.395 |
+| `long_ambiguous` | 368.395 | 306.683 | 379.062 | 317.565 |
+
+Median time was 16.5–18.1% lower and p95 time 16.2–19.9% lower in these
+fixtures. These are local synthetic telemetry-consumer measurements, not
+provider throughput, model quality, production latency bounds or a statistical
+significance claim. Whole-process memory samples include fixtures, modules,
+outputs and correctness oracles; they do not prove exclusive allocation or
+absence of leaks.
+
+Separate baseline and candidate stress processes each ran five cycles through
+four fixtures and six transitions: initial input, append, shared prefix,
+out-of-order input, retention and reset. All 120 corresponding complete-model
+hashes, input hashes, retained counts, native counts and clock values matched.
+Twenty cursor comparisons per version also matched, representing 40 extra
+derive calls per version. The 256-event cursor control bounds visible events;
+filtering the full input array can still traverse all 100,000 events. Existing
+request/chunk/evidence bounds passed. No live producer or provider ran.
+
+The focused suite passed 34 tests. The full suite passed 788 tests, including
+three added preservation cases; the existing URL-dependent live-producer
+conformance case was skipped (789 total). Lint/typecheck, build and both diff
+checks passed. Four unit workers and native per-case timeouts were retained.
+The three added cases test fact-only events before request creation, newborn
+request evidence and unrelated events across repeated cursor calls; they are
+preservation controls, not red defect reproductions.
+
+The paired driver took 83.849 seconds within its 300-second command budget;
+baseline and candidate stress drivers took 69.581 and 63.256 seconds within
+separate 90-second budgets. Compile, focus, pair, stress, lint, units and build
+commands all exited zero, with recorded source preservation, final ECHILD,
+no owned process leftovers and no cleanup signals. An initial empty patch
+hunk was rejected before writes, and a root build-receipt bookkeeping lease
+assertion was corrected after the successful build; neither caused a product
+retry. Independent source and completed measurement/stress DATA reviews
+passed. Hosted qualification and merge remain separate exact-revision gates.
+
+| D1 source/result | SHA-256 |
+| --- | --- |
+| `src/inference3d/derive.ts` | `c1027b8003bb1ddff68b4ffc0acc59ae859fa7df8d55c50407980ffd7b806428` |
+| `tests/inference3d/identity-isolation.test.ts` | `19a04f3f2152be90bc21deae9ac4fe2df53d1a462b3a900bf25fd57cfa1ff211` |
+| `benchmark-results.json` | `991ce2ccfdddd478fa257c9278ddf05dde3aae0f671d8b5c5a2240a28db1d7c2` |
+| `derive-stress-baseline.json` | `748fd57215f56c853696d6f99c1c43623c7a57d3f59a8a70521a697a97f889e5` |
+| `derive-stress-candidate.json` | `ee8faf19ecec0e70f97ab34d2b7e48862fd8ea5c6b3375336ff8262bf4d2a32a` |
+| `full-units-D1.json` | `be6e3209fcdadff4b5c95b86c62377cbf3a93a0cf3afc2b8bbbc85b41162b2a6` |
+| Independent completed measurement DATA review | `f193f15a6e5f1d1eb4d15ffd88f55726dfb786846ffe7df5cd75b39d1d78ca03` |
+
+The implementation/test bytes were fixed throughout all D1 executions. This
+later report append does not restamp the earlier source-input, compile or test
+receipts as executions on a published head or merge. Raw observations,
+source-bound manifests, guards, process ledgers and logs are retained outside
+Git. This section records local results only.
