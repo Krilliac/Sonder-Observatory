@@ -137,6 +137,36 @@ describe("scoped 3D identities and original source labels", () => {
         expect(m.tokens[0]?.requestEntityId !== null).toBe(hasOutput);
     });
 
+    it.each(["", "r|literal"])("keeps facts from creating requests and observes new request evidence for %j", requestId => {
+        const factsBefore = event(1, "scheduler.configured", a, { request_id: requestId, attributes: { kv_num_blocks: 12 } });
+        const started = event(2, "request.started", a, { request_id: requestId, attributes: { prompt_tokens: 3 } });
+        const factsAfter = event(3, "scheduler.configured", a, { request_id: requestId, attributes: { prompt_tokens: 7 } });
+        expect(derivePipeline([factsBefore]).requests).toEqual([]);
+        const m = derivePipeline([factsBefore, started, factsAfter]);
+        expect(m.requests).toHaveLength(1);
+        expect(m.requests[0]).toMatchObject({
+            requestId, startNs: started.mono_ns, lastNs: factsAfter.mono_ns,
+            lastEventId: factsAfter.event_id, promptTokens: 7,
+            evidence: [started.event_id, factsAfter.event_id],
+        });
+        expect(m.kvPools[0]?.totalBlocks).toBe(12);
+    });
+
+    it("keeps unrelated events out of request evidence across repeated cursor calls", () => {
+        const started = event(1, "request.started", a, { attributes: { prompt_tokens: 3 } });
+        const unrelated = event(2, "engine.metrics", a, { attributes: { prompt_tokens: 999 } });
+        const events = [started, unrelated];
+        const before = JSON.stringify(events);
+        const early = derivePipeline(events, { nowNs: started.mono_ns });
+        const later = derivePipeline(events);
+        expect(later.requests[0]).toMatchObject({
+            lastNs: started.mono_ns, lastEventId: started.event_id,
+            promptTokens: 3, evidence: [started.event_id],
+        });
+        expect(derivePipeline(events, { nowNs: started.mono_ns })).toEqual(early);
+        expect(JSON.stringify(events)).toBe(before);
+    });
+
     it("distinguishes an unattached output from attached-but-unavailable source evidence", () => {
         const source = event(1, "inference.token.generated", a, { request_id: "original|source" });
         const key = scopedRequestKey(streamKey(source), source.request_id!);
