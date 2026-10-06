@@ -256,3 +256,105 @@ with 50,001 findings retained that row/node count. See
 [Diagnostics pagination](diagnostics-pagination.md) for attributed measurements,
 reproducible stress controls and the exact scope. This does not bound complete
 recording memory or topology DOM, or move detector evaluation off the main thread.
+
+
+## 2026-10-06 — complete latency-series metric-strip rendering (native stability evidence and local browser failures)
+
+At baseline main `296a2cda09011d7121eb36809749ae678790ad2e`, a content-free
+synthetic recording with 262,144 validated events and 131,072 completed requests
+parsed and produced both complete 131,072-point latency series, then the public
+`renderMetricStrip` failed with `RangeError: Maximum call stack size exceeded`
+at `Math.max(...points)`. That failed large render is not a timing denominator.
+The scalar extrema iteration preserves every point and the original
+`Math.max`/`Math.min` behavior, including signed-zero and NaN semantics in direct
+renderer controls; it does not downsample the latency series or relax schema
+admission for nonfinite telemetry.
+
+The changed native implementation completed five fresh full-pipeline trials.
+Each retained all 131,072 requests and both complete latency series, matched
+every node/attribute and full SVG path against an independent bounded-chunk
+extrema oracle, and preserved the entire input digest. Fresh whole native
+preprocessing and render-model hashes joined each trial to complete canonical
+raw copies. Rendering took **101.775428–122.427356 ms**, median
+**110.554313 ms**; the entire five-trial driver took **41.108 seconds**, including
+fixture generation, parsing, metrics/series, validation, hashing and serialization.
+
+For the two modest sizes below, each version had three excluded warmups.
+Twenty alternating pairs per size produced **80 timed observations / 40 pairs**,
+with ten baseline-first and ten candidate-first pairs at each size. Four extra
+untimed reference render calls retained actual complete models; 26 native
+small/numeric controls covered both versions. Timing covers only the public
+renderer using a bounded document adapter. GC, preparation, full native output
+oracles/parity, input hashes and serialization are outside that operation clock.
+The table shows milliseconds rounded to seven decimal places; median is the
+arithmetic median and p95 is nearest rank. Every observation and tail is retained.
+
+| Completed requests | Baseline median / p95 / max (ms) | Candidate median / p95 / max (ms) | Candidate median / p95 cost increase |
+| --- | --- | --- | --- |
+| 2,048 | 1.7098055 / 1.8357610 / 1.8449180 | 2.1095905 / 2.1752230 / 2.2884130 | +23.38% / +18.49% |
+| 32,768 | 18.9657785 / 22.1587770 / 27.3106870 | 23.1679325 / 25.9515390 / 26.1991120 | +22.16% / +17.12% |
+
+This is a stability fix with a measured cost increase, not a speed improvement.
+The native adapter does not measure browser layout or paint, physical disk or
+model/provider throughput, production quality, allocation bounds or memory
+leaks. Node's 1,024 MiB old-space setting is not a process-RSS cap: the large
+workflow recorded a process-lifetime maximum of 1,624,296 KiB (about 1.55 GiB),
+including fixtures, parsed events, native objects, oracles and serialization.
+No exclusive renderer memory or retained-heap bound follows from that value.
+
+The producer declares `synthetic: true` and contains numeric, content-free
+request metadata. This says nothing about unspecified metadata in real sessions;
+recording/export privacy and capture-policy behavior are unchanged. Generated
+recordings and measurement artifacts remain ignored rather than product inputs.
+
+The native production graph uses SHA256 `3dc075606b27…`; the accompanying
+unit-source after-image `9f9bd753e618…` is a source binding, not an execution
+by the native driver. A browser-test reporting-only correction
+(`8e507558ab1b…`, root application `2bcc2eb1c3d7…`) preserved that native graph.
+The recorded native measurements were not re-executed to relabel the browser
+test successor. Native evidence is pinned by completed freeze `69e020bbb642…`,
+large result `477f357ec442…` and paired result `93ba628675cf…`; the baseline
+expected failure remains separately retained.
+
+Standard validation completed: lint and build exited 0, and the full unit run
+reported **808 passing / 1 existing conditional live-producer URL skip out of
+809 cases across 87 files**. The skip does not provide a live-producer claim.
+Two focused Chromium executions passed in **8.834 and 9.118 seconds**, with
+30-second test and 5-second assertion defaults, two workers and no retries.
+The coordinator subsequently stopped on report-validator semantics with
+exit 1; the accepted focused child 0 results are preserved for reuse without
+repeating them. Listing 127 tests is discovery evidence, not 127 passes.
+
+The focused browser measurement attachments retain expected SVG path hashes
+and counts; their pinned passing in-page assertions enforce actual DOM equality.
+They do not retain a raw whole-DOM snapshot or measure paint time.
+
+The subsequent full Chromium run **failed: 125 passing / 2 failing / 0 skipped
+out of 127 tests, with no retries**, in 152.528 seconds. The existing Compare
+large-recording case reported a page crash while waiting for `131072 events`
+(18.572 seconds total). The new metric-strip case failed while loading its
+large recording: `#source-badge` was empty instead of containing
+`metric-strip-131072.ndjson` (4.844 seconds total). These were recorded with
+the existing 5-second assertion limit; the new case retained the 30-second
+test default. Its prior focused passes remain separate evidence and do not
+turn this full-run failure into a pass. No timeout increase or core-code
+change is attributed to this result.
+
+A post-stop resource observation recorded a 16 GiB cgroup limit,
+14,641,770,496 bytes current usage, 2,538,098,688 bytes headroom (below the
+effective 3 GiB budget), and 13,478,805,504 bytes of shared memory. The original
+guard checked host `MemAvailable`; it did not record pre-run cgroup headroom.
+Post-stop host `MemAvailable` was 3,872,640 KiB. Cumulative counters showed 50 OOM events
+and 3 OOM kills, but no pre-run counter baseline was recorded. These readings
+do **not** establish the cause of either failure or prove that this run caused
+an OOM kill; they do not exonerate either failed check.
+
+Independent DATA reviews accept the recorded native, standard and focused
+scopes and the accuracy of the stopped full-run evidence. Acceptance of that
+failure evidence is not full-browser qualification. Native DATA acceptance
+is pinned by `a8bd9dee511c…`, standard acceptance by `02ea821740af…`, focused
+review by `d5df4ff94a10…`, and full-run stopped review by `cdc859fc15f4…`
+against frozen full evidence `8b68a13311b2…`. **Local full-browser and overall
+local qualification were not accepted for this run. Hosted results must be
+assessed separately on the actual published revision; these local receipts
+establish no hosted-pass or merge-readiness claim.**
