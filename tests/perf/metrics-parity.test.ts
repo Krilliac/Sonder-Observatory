@@ -2,7 +2,8 @@
  * Parity of every pre-existing metric on the existing fixtures (M1
  * synthetic, regressed, Sonder-Inference, 3D-view and fixture:large
  * sessions) across the prompt-cache / speculation change: deriveMetrics and
- * metricsAt, with the additive fields removed, hash to the values recorded on
+ * metricsAt, with the additive fields removed and only opaque stream keys
+ * projected to their original source-derived representation, hash to the values recorded on
  * main 0da5916 before the change. None of these streams carry the new
  * attributes, so their new aggregates are empty.
  *
@@ -16,21 +17,53 @@ import { generateEvents } from "../../scripts/gen-large-fixture.mjs";
 import { regressFixtureEvents } from "../../scripts/generate-fixture-regressed.mjs";
 import { deepSyntheticFixture, ollamaPoolFixture } from "../../src/inference3d/fixtures";
 import type { ObservatoryEvent } from "../../src/protocol/events";
+import { producerInstance } from "../../src/query/attributes";
 import { deriveMetrics, type Metrics } from "../../src/query/metrics";
 import { MetricsIndex } from "../../src/query/metricsIndex";
 import { parseNdjson } from "../../src/recording/ndjson";
 import { orderEvents } from "../../src/replay/order";
 
-/** Metrics without the fields added for prompt-cache and speculation reports. */
-function preexisting(m: Metrics): unknown {
+/** Independent expected identity from original producer fields, without decoding a derived key. */
+function sourceStream(e: ObservatoryEvent): { canonical: string; legacy: string } {
+    const instance = producerInstance(e);
+    return instance !== null
+        ? {
+            canonical: "obs-key/1:" + JSON.stringify(["stream-instance", e.producer.name, e.producer.node_id, instance]),
+            legacy: `${e.producer.name}\0${e.producer.node_id}\0#${instance}`,
+        }
+        : {
+            canonical: "obs-key/1:" + JSON.stringify(["stream-session", e.session_id, e.producer.name, e.producer.node_id]),
+            legacy: `${e.session_id}\0${e.producer.name}\0${e.producer.node_id}`,
+        };
+}
+
+/** Keep every historical value and its order; project only the deliberate opaque stream representation. */
+function preexisting(m: Metrics, events: readonly ObservatoryEvent[]): unknown {
+    const starts = new Map<string, ObservatoryEvent>();
+    const startKey = (stream: string, request: string, ns: number, session: string) => JSON.stringify([stream, request, ns, session]);
+    for (const e of events) {
+        if (e.event_type === "request.started" && e.request_id) {
+            const key = startKey(sourceStream(e).canonical, e.request_id, e.mono_ns, e.session_id);
+            if (starts.has(key)) {
+                throw new Error("Ambiguous original start evidence for historical metric parity");
+            }
+            starts.set(key, e);
+        }
+    }
     const omit = (o: object, keys: readonly string[]) => Object.fromEntries(Object.entries(o).filter(([k]) => !keys.includes(k)));
     return {
         ...omit(m, ["promptCache", "speculation"]),
-        requests: m.requests.map((span) => omit(span, ["sessionId", "model", "promptCache", "speculation"])),
+        requests: m.requests.map((span) => {
+            const source = starts.get(startKey(span.streamKey, span.requestId, span.startNs, span.sessionId));
+            expect(source).toBeDefined();
+            const stream = sourceStream(source!);
+            expect(span.streamKey).toBe(stream.canonical);
+            return { ...omit(span, ["sessionId", "model", "promptCache", "speculation"]), streamKey: stream.legacy };
+        }),
     };
 }
 
-const digest = (m: Metrics) => createHash("sha256").update(JSON.stringify(preexisting(m))).digest("hex").slice(0, 16);
+const digest = (m: Metrics, events: readonly ObservatoryEvent[]) => createHash("sha256").update(JSON.stringify(preexisting(m, events))).digest("hex").slice(0, 16);
 const root = new URL("../../", import.meta.url);
 const read = (p: string) => orderEvents(parseNdjson(readFileSync(new URL(p, root), "utf8")).events).events;
 
@@ -56,10 +89,13 @@ describe("existing metrics are unchanged on streams without the new fields", () 
         it(name, () => {
             const events = load();
             const m = deriveMetrics(events);
-            expect(digest(m)).toBe(full);
+            expect(digest(m, events)).toBe(full);
             const index = new MetricsIndex(events);
-            expect(digest(index.at(events.length))).toBe(full);
-            expect([0.1, 0.33, 0.5, 0.77].map((f) => digest(index.at(Math.floor(events.length * f))))).toEqual(prefixes);
+            expect(digest(index.at(events.length), events)).toBe(full);
+            expect([0.1, 0.33, 0.5, 0.77].map((f) => {
+                const n = Math.floor(events.length * f);
+                return digest(index.at(n), events.slice(0, n));
+            })).toEqual(prefixes);
             expect(m.promptCache.requests).toBe(0);
             expect(m.speculation.requests).toBe(0);
             expect(m.requests.every((r) => r.promptCache === null && r.speculation === null)).toBe(true);

@@ -62,7 +62,7 @@ export interface Lane {
 }
 
 export interface RequestEntity {
-    /** Entity id: `req:<stream>|<request_id>`. */
+    /** Opaque canonical identity of (producer stream, request_id). */
     id: string;
     requestId: string;
     stream: string;
@@ -111,7 +111,7 @@ export interface ChunkEntity {
 }
 
 export interface KvPool {
-    /** Entity id: `kv:<stream>`. */
+    /** Opaque canonical producer-scoped KV identity. */
     id: string;
     stream: string;
     producer: string;
@@ -128,7 +128,7 @@ export interface KvPool {
 }
 
 export interface LayerEntity {
-    /** Entity id: `layer:<stream>|<index>`. */
+    /** Opaque canonical identity of (producer stream, layer index). */
     id: string;
     stream: string;
     layer: number;
@@ -143,7 +143,7 @@ export interface LayerEntity {
 }
 
 export interface OperatorEntity {
-    /** Entity id: `op:<stream>|<name>|<layer>`. */
+    /** Opaque canonical identity of (producer stream, operator name, layer). */
     id: string;
     stream: string;
     operator: string;

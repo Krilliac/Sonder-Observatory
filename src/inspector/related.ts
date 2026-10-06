@@ -1,4 +1,5 @@
 import type { ObservatoryEvent } from "../protocol/events";
+import { scopedRequestKey } from "../query/identity";
 import { isOrdered, onPrefixExtended } from "../replay/lookup";
 import { streamKey } from "../replay/order";
 
@@ -53,7 +54,7 @@ function parentRequestId(e: ObservatoryEvent): string | null {
  * producer instance, and two producers replaying the same ids are unrelated.
  */
 function requestKey(e: ObservatoryEvent): string | null {
-    return e.request_id ? `${streamKey(e)}\u0000${e.request_id}` : null;
+    return e.request_id ? scopedRequestKey(streamKey(e), e.request_id) : null;
 }
 
 /** Two run ids conflict only when both are known and differ. */
@@ -112,7 +113,9 @@ export function relatedGroups(event: ObservatoryEvent, events: readonly Observat
     observeLineage(event);
     if (ownRequest !== null) {
         for (const e of ownCandidates) {
-            if (index !== null || requestKey(e) === ownRequest) {
+            // A different raw request id, or no lineage fact, cannot add
+            // evidence. Canonical equality still scopes every scan candidate.
+            if (e.request_id === requestId && (parentRequestId(e) || e.run_id) && (index !== null || requestKey(e) === ownRequest)) {
                 observeLineage(e);
                 // Ambiguity cannot be undone by later evidence. Keep the full
                 // candidate list for Same request rows and totals below.
@@ -130,15 +133,21 @@ export function relatedGroups(event: ObservatoryEvent, events: readonly Observat
     const childIds = new Set<string>();
     const parentRequests = new Set<string>();
     const childCheck = (e: ObservatoryEvent): void => {
+        if (!requestId || !e.request_id || parentRequestId(e) !== requestId || !runsAgree(e, event)) {
+            return;
+        }
         const key = requestKey(e);
-        if (key && key !== ownRequest && requestId && parentRequestId(e) === requestId && runsAgree(e, event)) {
+        if (key && key !== ownRequest) {
             childRequests.add(key);
             childIds.add(e.request_id!);
         }
     };
     const parentCheck = (e: ObservatoryEvent): void => {
+        if (!parent || e.request_id !== parent || !parentRunAgrees(e)) {
+            return;
+        }
         const key = requestKey(e);
-        if (key && key !== ownRequest && parent && e.request_id === parent && parentRunAgrees(e)) {
+        if (key && key !== ownRequest) {
             parentRequests.add(key);
         }
     };
@@ -150,11 +159,14 @@ export function relatedGroups(event: ObservatoryEvent, events: readonly Observat
         parentCheck(e);
     }
 
-    const inRequests = (set: ReadonlySet<string>) => (e: ObservatoryEvent) => {
+    const inRequests = (set: ReadonlySet<string>, hasId: (id: string) => boolean) => (e: ObservatoryEvent) => {
+        if (!e.request_id || !hasId(e.request_id)) {
+            return false;
+        }
         const key = requestKey(e);
         return key !== null && set.has(key);
     };
-    const inParentRequests = inRequests(parentRequests);
+    const inParentRequests = inRequests(parentRequests, (id) => id === parent);
     const specs: {
         kind: RelatedGroupKind;
         title: string;
@@ -173,7 +185,7 @@ export function relatedGroups(event: ObservatoryEvent, events: readonly Observat
             kind: "request",
             title: "Same request",
             value: requestId,
-            match: (e) => ownRequest !== null && (index !== null || requestKey(e) === ownRequest),
+            match: (e) => ownRequest !== null && e.request_id === requestId && (index !== null || requestKey(e) === ownRequest),
             candidates: () => ownCandidates,
         },
         {
@@ -187,7 +199,7 @@ export function relatedGroups(event: ObservatoryEvent, events: readonly Observat
             kind: "children",
             title: "Child requests",
             value: childIds.size > 0 ? [...childIds].join(", ") : null,
-            match: inRequests(childRequests),
+            match: inRequests(childRequests, (id) => childIds.has(id)),
             candidates: () => candidates("requestKey", childRequests),
         },
         { kind: "run", title: "Same run", value: runId, match: (e) => e.run_id === runId, candidates: () => candidates("run", [runId || null]) },

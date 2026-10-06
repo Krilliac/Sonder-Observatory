@@ -131,7 +131,7 @@ test.describe("3D Inference", () => {
 
     test("the entity table is a keyboard path to the same evidence", async ({ page }) => {
         await openRecording(page, "ollama-pool.ndjson", toNdjson(ollamaPoolFixture({ synthetic: true })));
-        const button = page.locator('.i3d-table button[data-entity^="kv:"]').first();
+        const button = page.locator(".i3d-table tbody tr").filter({ has: page.getByRole("cell", { name: "KV pool", exact: true }) }).first().getByRole("button");
         await button.focus();
         await page.keyboard.press("Enter");
         await expect(button).toHaveAttribute("aria-pressed", "true");

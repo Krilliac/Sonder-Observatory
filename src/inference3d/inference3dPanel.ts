@@ -10,6 +10,7 @@
 import type { ObservatoryEvent } from "../protocol/events";
 import { h } from "../renderer/dom";
 import { derivePipeline, streamLabel } from "./derive";
+import { requestLabel, requestLabelsAt } from "./labels";
 import type { HealthBackend, PanelAvailability, PipelineModel, ProducerCapabilities, StageId } from "./model";
 import { STAGES } from "./model";
 import { createRenderer, InferenceScene, readPalette, type ProjectedLabel } from "./scene";
@@ -719,24 +720,26 @@ export class Inference3DPanel {
                 evidence: k.evidence,
             });
         }
-        for (const c of model.chunks.slice(-MAX_CHUNK_ROWS)) {
+        const latest = model.tokens.at(-1);
+        const chunks = model.chunks.slice(-MAX_CHUNK_ROWS);
+        const requestLabels = requestLabelsAt(input.visible, latest ? [...chunks, latest] : chunks, model.nowNs);
+        for (const c of chunks) {
             add({
                 id: c.id,
                 kind: "output",
                 label: `#${c.index ?? "?"}`,
-                where: c.requestEntityId?.split("|").pop() ?? "no request",
+                where: requestLabel(c.requestEntityId, requestLabels),
                 state: c.unit,
                 measures: `${fmtBytes(c.bytes)} · ${fmtMs(c.elapsedMs)}`,
                 evidence: [c.eventId],
             });
         }
-        const latest = model.tokens.at(-1);
         if (latest) {
             add({
                 id: latest.id,
                 kind: "token",
                 label: `#${latest.index ?? "?"}`,
-                where: latest.requestEntityId?.split("|").pop() ?? "no request",
+                where: requestLabel(latest.requestEntityId, requestLabels),
                 state: latest.probability !== null ? `p ${latest.probability.toFixed(3)}` : "no probability",
                 measures: latest.alternatives ? `${latest.alternatives.length} alternatives` : "no alternatives",
                 evidence: latest.candidatesEventId ? [latest.eventId, latest.candidatesEventId] : [latest.eventId],

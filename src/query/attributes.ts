@@ -7,6 +7,9 @@
  * present the result is null. See docs/telemetry-schema.md.
  */
 import type { ObservatoryEvent } from "../protocol/events";
+import { producerStreamKey } from "./identity";
+
+export { producerInstance } from "./identity";
 
 function finite(value: unknown): number | null {
     return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -117,27 +120,6 @@ export function isRequestScopedLoadReport(event: ObservatoryEvent): boolean {
     return event.event_type === "model.load.completed" && typeof event.request_id === "string" && event.request_id !== "";
 }
 
-const INSTANCE_EVENT_ID = /^(.+)-(\d+)$/;
-
-/**
- * Identity of the producer instance whose counter assigned `sequence`, if the
- * event reveals it: `producer.instance_id` when present, otherwise the prefix
- * of an event id shaped `<instance>-<sequence>` (Sonder-Inference uses
- * `tel-<hex>-<sequence>` from one counter shared by all of its sessions).
- * Returns null when neither applies.
- */
-export function producerInstance(event: ObservatoryEvent): string | null {
-    const explicit = event.producer.instance_id;
-    if (typeof explicit === "string" && explicit !== "") {
-        return explicit;
-    }
-    const match = INSTANCE_EVENT_ID.exec(event.event_id);
-    if (match && Number(match[2]) === event.sequence && String(event.sequence) === match[2]) {
-        return match[1]!;
-    }
-    return null;
-}
-
 /**
  * Producer-reported dropped events across a session: for each producer
  * instance, the latest cumulative `dropped_events` / `dropped_count` of its
@@ -165,12 +147,7 @@ export function noteDroppedReport(latest: Map<string, number>, e: ObservatoryEve
     if (n === null) {
         return;
     }
-    const instance = producerInstance(e);
-    const key =
-        instance !== null
-            ? `${e.producer.name}\u0000${e.producer.node_id}\u0000#${instance}`
-            : `${e.session_id}\u0000${e.producer.name}\u0000${e.producer.node_id}`;
-    latest.set(key, n);
+    latest.set(producerStreamKey(e), n);
 }
 
 /** The total of the latest reports noted by noteDroppedReport. */

@@ -1,5 +1,5 @@
 import type { ObservatoryEvent } from "../protocol/events";
-import { producerInstance } from "../query/attributes";
+import { producerStreamKey } from "../query/identity";
 import { markOrdered } from "./lookup";
 
 /**
@@ -10,11 +10,7 @@ import { markOrdered } from "./lookup";
  * Otherwise the stream is session + producer name + node.
  */
 export function streamKey(event: ObservatoryEvent): string {
-    const instance = producerInstance(event);
-    if (instance !== null) {
-        return `${event.producer.name}\u0000${event.producer.node_id}\u0000#${instance}`;
-    }
-    return `${event.session_id}\u0000${event.producer.name}\u0000${event.producer.node_id}`;
+    return producerStreamKey(event);
 }
 
 /**
@@ -36,6 +32,7 @@ export function compareEvents(a: ObservatoryEvent, b: ObservatoryEvent): number 
 }
 
 export interface SequenceGap {
+    /** Opaque canonical producer stream identity; not a delimiter-separated label. */
     stream: string;
     /** First missing sequence number. */
     from: number;
