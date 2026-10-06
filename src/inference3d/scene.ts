@@ -35,7 +35,7 @@ import {
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { streamLabel } from "./derive";
 import { tupleKey } from "../query/identity";
-import type { PipelineModel, RequestEntity, StageId } from "./model";
+import type { LayerEntity, PipelineModel, RequestEntity, StageId } from "./model";
 
 // ------------------------------------------------------------------ layout
 
@@ -141,8 +141,22 @@ export function layoutScene(model: PipelineModel): SceneLayout {
         b.yMin += shift;
         b.yMax += shift;
     }
-    const xs = planes.map((p) => p.x);
-    return { planes, stageX, lanes, bands, height, xMin: Math.min(0, ...xs), xMax: Math.max(0, ...xs) };
+    let xMin = 0;
+    let xMax = 0;
+    for (const plane of planes) {
+        xMin = Math.min(xMin, plane.x);
+        xMax = Math.max(xMax, plane.x);
+    }
+    return { planes, stageX, lanes, bands, height, xMin, xMax };
+}
+
+/** Zero-seeded maximum of every reported layer RMS; null retains the existing zero fallback. */
+export function maxLayerActivationRms(layers: readonly LayerEntity[]): number {
+    let maximum = 0;
+    for (const layer of layers) {
+        maximum = Math.max(maximum, layer.activationRms ?? 0);
+    }
+    return maximum;
 }
 
 /** Particle radius from backend-reported tokens (completion, else prompt); base size when none reported. */
@@ -418,7 +432,7 @@ export class InferenceScene {
         // Stage and layer planes: fill + outline; the outline pulses at the stage event rate.
         const stageRate = new Map(model.stages.map((s) => [`stage:${s.id}`, s.ratePerSec]));
         const layerById = new Map(model.layers.map((l) => [l.id, l]));
-        const maxRms = Math.max(0, ...model.layers.map((l) => l.activationRms ?? 0));
+        const maxRms = maxLayerActivationRms(model.layers);
         for (const plane of layout.planes) {
             const layer = layerById.get(plane.id);
             const isLayer = plane.stage === "layers";
