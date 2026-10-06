@@ -110,8 +110,14 @@ function sparkline(points: readonly number[]): SVGElement | null {
     if (points.length < 2) {
         return null;
     }
-    const max = Math.max(...points);
-    const min = Math.min(0, ...points);
+    let max = -Infinity;
+    for (const p of points) {
+        max = Math.max(max, p);
+    }
+    let min = +0;
+    for (const p of points) {
+        min = Math.min(min, p);
+    }
     const range = max - min || 1;
     const step = W / (points.length - 1);
     const coords = points.map((p, i) => `${(i * step).toFixed(1)},${(H - 2 - ((p - min) / range) * (H - 4)).toFixed(1)}`);
