@@ -70,3 +70,29 @@ guard, kv lookups and `cost_usd`, and `synthetic.search` → `synthetic.search_v
   session growing, an unreadable file) and an axe WCAG A/AA scan. The **app** test drives the
   real Compare tab (wired, so it runs). `e2e/a11y.spec.ts` scans the tab in
   both themes.
+
+
+## Complete request-fact minimum (2026-10-06)
+
+Compare reduces request start timestamps with a scalar `Math.min` loop. This
+retains complete request facts and native signed-zero behavior without spreading
+an unbounded request array into function arguments. Protocol validation, unknown
+metrics, group attribution, cursor behavior and the existing 200-row display
+bound are unchanged.
+
+At baseline `15b26eaffe6de936a34705d86451acfafd9fb384`, a deterministic
+synthetic recording with 131,072 distinct `request.started` events reproduced
+`RangeError: Maximum call stack size exceeded` in `statsFor`. The candidate
+completed five full analyses of that same recording, preserving every request,
+request order, unknown metrics and complete output across cycles. Individual
+analysis times were 1,292.58–1,487.66 ms in the local Node 24.19.0 experiment;
+these are synthetic processing measurements, not provider/model quality or a
+speed ratio against the failed baseline. Whole-process memory includes fixtures,
+parsing and serialization; these cycles are not a leak proof.
+
+The recording SHA256 is
+`e868b3500f157c1c18c22f516572212fa881efc0aa3f82bc1c822e760f865cab`.
+`tests/compare/summary-minimum.test.ts` covers complete retention, empty input,
+validator-admitted native signed zero and source replacement.
+`e2e/compare-minimum.spec.ts` drives the real file input and Compare tab, including
+complete totals, bounded rendered rows, run/turn alignment and source replacement.
