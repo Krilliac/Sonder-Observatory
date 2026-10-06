@@ -162,10 +162,10 @@ function statsFor(key: string, label: string, requests: readonly RequestFacts[],
         }
         budget.push(budgetPressureFraction(e));
     }
-    const firstNs = Math.min(
-        events.length > 0 ? events[0]!.mono_ns : Number.POSITIVE_INFINITY,
-        ...requests.map((r) => r.startNs),
-    );
+    let firstNs = events.length > 0 ? events[0]!.mono_ns : Number.POSITIVE_INFINITY;
+    for (const request of requests) {
+        firstNs = Math.min(firstNs, request.startNs);
+    }
     return {
         key,
         label,
