@@ -46,6 +46,48 @@ export function scopedSessionKey(stream: string, sessionId: string): string {
     return tupleKey("stream-session-scope", stream, sessionId);
 }
 
+/**
+ * Reuses only the most recent literal tuple of each kind during one consumer
+ * pass. Create a fresh composer for every pass; never store it on an event or
+ * retain it across index extensions/replay calls. Native composers remain the
+ * miss oracle, including inferred instances and all JSON escaping rules.
+ *
+ * Each entry admits at most 16,384 summed UTF-16 code units of fields + result.
+ * Larger tuples use the stateless composer and clear that entry. This bounds
+ * retained string data, not mandatory output allocation or V8 object overhead.
+ */
+export function createIdentityKeys() {
+    const maxUnits = 16_384;
+    let previous: { known: boolean; name: string; node: string; scope: string; key: string } | null = null;
+    const pair = (compose: (stream: string, id: string) => string) => {
+        let last: { stream: string; id: string; key: string } | null = null;
+        return (stream: string, id: string): string => {
+            if (last !== null && last.stream === stream && last.id === id) {
+                return last.key;
+            }
+            const key = compose(stream, id);
+            last = stream.length + id.length + key.length <= maxUnits ? { stream, id, key } : null;
+            return key;
+        };
+    };
+    return {
+        stream(event: ObservatoryEvent): string {
+            const instance = producerInstance(event);
+            const known = instance !== null;
+            const scope = instance ?? event.session_id;
+            const { name, node_id: node } = event.producer;
+            if (previous !== null && previous.known === known && previous.name === name && previous.node === node && previous.scope === scope) {
+                return previous.key;
+            }
+            const key = producerStreamKey(event);
+            previous = name.length + node.length + scope.length + key.length <= maxUnits ? { known, name, node, scope, key } : null;
+            return key;
+        },
+        request: pair(scopedRequestKey),
+        session: pair(scopedSessionKey),
+    };
+}
+
 /** Source name/node of a canonical stream key, for labels only. */
 export function streamNameAndNode(stream: string): { name: string; nodeId: string } | null {
     if (!stream.startsWith(KEY_PREFIX)) {

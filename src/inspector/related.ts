@@ -1,5 +1,5 @@
 import type { ObservatoryEvent } from "../protocol/events";
-import { scopedRequestKey } from "../query/identity";
+import { createIdentityKeys, scopedRequestKey } from "../query/identity";
 import { isOrdered, onPrefixExtended } from "../replay/lookup";
 import { streamKey } from "../replay/order";
 
@@ -249,12 +249,16 @@ class CorrelationIndex {
     };
 
     private build(events: readonly ObservatoryEvent[]): void {
+        if (this.built >= events.length) {
+            return;
+        }
         const m = this.maps;
+        const keys = createIdentityKeys();
         for (let i = this.built; i < events.length; i += 1) {
             const e = events[i]!;
             const tool = e.attributes.tool_call_id;
             add(m.toolCall, typeof tool === "string" && tool !== "" ? tool : null, i);
-            add(m.requestKey, requestKey(e), i);
+            add(m.requestKey, e.request_id ? keys.request(keys.stream(e), e.request_id) : null, i);
             add(m.requestId, typeof e.request_id === "string" && e.request_id !== "" ? e.request_id : null, i);
             add(m.parentRequest, parentRequestId(e), i);
             add(m.run, typeof e.run_id === "string" && e.run_id !== "" ? e.run_id : null, i);
