@@ -2,9 +2,10 @@ import { describe, expect, it } from "vitest";
 import { derivePipeline } from "../../src/inference3d/derive";
 import { producerStreamKey, tupleKey } from "../../src/query/identity";
 import { makeEvent } from "../helpers";
+import { validateEvent } from "../../src/protocol/validate";
 import { deepSyntheticFixture, ollamaPoolFixture } from "../../src/inference3d/fixtures";
-import type { RequestEntity } from "../../src/inference3d/model";
-import { ageOpacity, layoutScene, pulseHz, requestRadius } from "../../src/inference3d/scene";
+import type { LayerEntity, RequestEntity } from "../../src/inference3d/model";
+import { ageOpacity, layoutScene, maxLayerActivationRms, pulseHz, requestRadius } from "../../src/inference3d/scene";
 
 describe("3D scene layout (pure)", () => {
     it("puts stage planes along x in pipeline order and groups lanes into node bands", () => {
@@ -60,5 +61,89 @@ describe("3D scene layout (pure)", () => {
         expect(pulseHz(0)).toBe(0);
         expect(pulseHz(10)).toBeGreaterThan(pulseHz(1));
         expect(pulseHz(1e6)).toBe(2.5);
+    });
+});
+
+
+/** Native spread over small independent chunks: the oracle never fans out all layers. */
+function nativeChunkBounds(values: readonly number[]): { min: number; max: number } {
+    let min = 0;
+    let max = 0;
+    for (let start = 0; start < values.length; start += 1024) {
+        const chunk = values.slice(start, start + 1024);
+        min = Math.min(min, ...chunk);
+        max = Math.max(max, ...chunk);
+    }
+    return { min, max };
+}
+
+describe("complete layer bounds without argument fan-out", () => {
+    it("keeps every derived synthetic layer plane, evidence identity and endpoint at 131072 layers", () => {
+        const count = 131072;
+        const producer = { name: "scene-layer-scale", version: "test", node_id: "synthetic-node", instance_id: "scene-layer-scale-1", synthetic: true };
+        const events = Array.from({ length: count }, (_, layer) => makeEvent({
+            event_id: `synthetic-layer-${layer}`,
+            sequence: layer,
+            mono_ns: 1000 + layer,
+            event_type: "backend.layer.completed",
+            producer,
+            attributes: { layer, layer_count: count, activation_rms: layer, duration_ms: 1 },
+        }));
+        expect(validateEvent(events[0]).ok).toBe(true);
+        expect(validateEvent(events.at(-1)).ok).toBe(true);
+        const model = derivePipeline(events);
+        expect(model.synthetic).toBe(true);
+        expect(model.layers).toHaveLength(count);
+        expect(model.stages.find((stage) => stage.id === "layers")!.events).toBe(count);
+        const layout = layoutScene(model);
+        expect(layout.planes).toHaveLength(count + 5);
+        const planes = layout.planes.filter((plane) => plane.stage === "layers");
+        expect(planes).toHaveLength(count);
+        expect(planes.every((plane, index) => plane.id === model.layers[index]!.id
+            && plane.layer === index && plane.label === `L${index}`
+            && plane.stream === model.layers[index]!.stream && plane.x === 15 + index * 0.9)).toBe(true);
+        expect(model.layers.every((layer, index) => layer.layer === index && layer.events === 1
+            && layer.evidence.length === 1 && layer.evidence[0] === events[index]!.event_id
+            && layer.activationRms === index && layer.totalDurationMs === 1)).toBe(true);
+        expect(events.every((event, index) => event.sequence === index && event.mono_ns === 1000 + index
+            && event.attributes.layer === index && event.attributes.layer_count === count
+            && event.attributes.activation_rms === index && event.producer === producer)).toBe(true);
+        expect(layout.stageX.decode).toBe(15 + (count - 1) * 0.9 + 5);
+        expect(layout.stageX.output).toBe(layout.stageX.decode! + 5);
+        const expected = nativeChunkBounds(layout.planes.map((plane) => plane.x));
+        expect(Object.is(layout.xMin, expected.min)).toBe(true);
+        expect(Object.is(layout.xMax, expected.max)).toBe(true);
+        expect(layout.xMin).toBe(0);
+        expect(layout.xMax).toBe(layout.stageX.output);
+        expect(maxLayerActivationRms(model.layers)).toBe(count - 1);
+        expect(maxLayerActivationRms(model.layers)).toBe(nativeChunkBounds(model.layers.map((layer) => layer.activationRms ?? 0)).max);
+    });
+
+    it("matches the native zero-seeded RMS maximum for null, signed zero and direct nonfinite values", () => {
+        const seed = derivePipeline(deepSyntheticFixture(1, 1)).layers[0]!;
+        const cells: (number | null)[][] = [[], [null], [-0], [+0, -0], [-0, +0], [-4, -1],
+            [null, 3, null, 2], [Infinity, 1], [-Infinity], [NaN, 2], [2, NaN], [Infinity, NaN, -Infinity]];
+        for (const values of cells) {
+            const layers: LayerEntity[] = values.map((activationRms, index) => ({ ...seed, id: `numeric-${index}`, activationRms }));
+            const expected = Math.max(0, ...values.map((value) => value ?? 0));
+            expect(Object.is(maxLayerActivationRms(layers), expected), String(values)).toBe(true);
+            expect(layers.map((layer) => layer.activationRms)).toEqual(values);
+        }
+    });
+
+    it("retains empty and ordinary multi-producer plane bounds against the native oracle", () => {
+        const model = derivePipeline(deepSyntheticFixture(4, 1));
+        const other = producerStreamKey(makeEvent({ producer: { name: "other", version: "test", node_id: "other-node", instance_id: "other-instance" } }));
+        const second = model.layers.map((layer) => ({ ...layer, id: tupleKey("layer", other, String(layer.layer)), stream: other }));
+        for (const input of [derivePipeline([]), { ...model, layers: [...model.layers, ...second] }]) {
+            const layout = layoutScene(input);
+            const xs = layout.planes.map((plane) => plane.x);
+            expect(Object.is(layout.xMin, Math.min(0, ...xs))).toBe(true);
+            expect(Object.is(layout.xMax, Math.max(0, ...xs))).toBe(true);
+        }
+        const empty = layoutScene({ ...derivePipeline([]), stages: [] });
+        expect(empty.planes).toEqual([]);
+        expect(Object.is(empty.xMin, +0)).toBe(true);
+        expect(Object.is(empty.xMax, +0)).toBe(true);
     });
 });
