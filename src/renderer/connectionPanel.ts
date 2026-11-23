@@ -18,6 +18,30 @@ import { redactUrlSecrets } from "./params";
 export const RECENT_ENDPOINTS_KEY = "sonder-observatory.recent-endpoints";
 export const MAX_RECENT_ENDPOINTS = 8;
 
+export interface EndpointPreset {
+    label: string;
+    url: string;
+    role: "runtime" | "inference" | "fixture";
+}
+
+/**
+ * Optional local loopback telemetry-bridge presets:
+ * - :5174 proxies authenticated local Sonder Runtime telemetry
+ * - :5175 proxies remote/Node1 Sonder-Inference telemetry over server-side TLS
+ * Both stay on 127.0.0.1 so bearer tokens never enter the browser.
+ */
+export const BRIDGED_PRESETS: readonly EndpointPreset[] = [
+    { label: "Sonder Runtime (bridged)", url: "http://127.0.0.1:5174", role: "runtime" },
+    { label: "Node1 Inference (bridged)", url: "http://127.0.0.1:5175", role: "inference" },
+];
+
+/** Full dual-node stack endpoints: bridged Runtime + local Inference + bridged Node1 Inference. */
+export const FULL_STACK_ENDPOINTS: readonly string[] = [
+    "http://127.0.0.1:5174",
+    "http://127.0.0.1:11437",
+    "http://127.0.0.1:5175",
+];
+
 export const TRANSPORT_OPTIONS: readonly { value: TransportPreference; label: string }[] = [
     { value: "auto", label: "Auto (discovery or URL)" },
     { value: "sse", label: "SSE" },
@@ -236,6 +260,30 @@ export class ConnectionPanel {
                 return h("li", {}, btn);
             }),
         );
+        const bridgePresets = h(
+            "ul",
+            { id: "bridge-preset-list", class: "endpoint-list" },
+            ...BRIDGED_PRESETS.map((p) => {
+                const btn = h("button", { type: "button", class: "endpoint-btn", "data-url": p.url });
+                btn.append(h("span", { class: "endpoint-label", text: p.label }), h("span", { class: "endpoint-url mono", text: p.url }));
+                btn.addEventListener("click", () => this.fill({ url: p.url, transport: "auto" }));
+                return h("li", {}, btn);
+            }),
+        );
+        const connectStack = h("button", {
+            id: "connect-stack-btn",
+            type: "button",
+            class: "small",
+            text: "Connect stack",
+            title: "Connect Runtime bridge (:5174), local Inference (:11437), and Node1 Inference (:5175)",
+        });
+        connectStack.addEventListener("click", () => this.connectStack());
+        const bridgeSection = h(
+            "div",
+            { class: "preset-group" },
+            h("div", { class: "subhead" }, h("h3", { text: "Bridged telemetry" }), connectStack),
+            bridgePresets,
+        );
         this.recentList = h("ul", { id: "recent-endpoints", class: "endpoint-list" });
         const clear = h("button", { id: "recent-clear", type: "button", class: "small", text: "Clear recent" });
         clear.addEventListener("click", () => {
@@ -252,6 +300,7 @@ export class ConnectionPanel {
             form,
             h("h3", { text: "Local presets" }),
             presets,
+            bridgeSection,
             this.recentSection,
         );
         this.renderRecent();
@@ -286,6 +335,13 @@ export class ConnectionPanel {
     private readToken(): string | undefined {
         const token = this.token.value.trim();
         return token === "" ? undefined : token;
+    }
+
+    private connectStack(): void {
+        this.setResult(null);
+        for (const url of FULL_STACK_ENDPOINTS) {
+            this.callbacks.onConnect({ url, transport: "auto" });
+        }
     }
 
     private connect(): void {

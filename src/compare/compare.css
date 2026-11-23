@@ -7,19 +7,20 @@
 }
 
 .compare-side {
-    border: 1px solid var(--color-border, #24334a);
-    border-radius: var(--radius, 6px);
-    padding: 6px 10px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    background: color-mix(in srgb, var(--color-background) 70%, var(--color-surface));
+    padding: var(--space-4) var(--space-5);
     min-width: 0;
 }
 
 .compare-side h3,
 .compare-heading {
-    font-size: 12px;
+    font-size: var(--font-size-xs);
     color: var(--muted);
-    margin: 10px 0 4px;
+    margin: var(--space-4) 0 var(--space-2);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.06em;
 }
 
 .compare-side h3 {
@@ -27,13 +28,13 @@
 }
 
 .compare-source {
-    margin: 4px 0;
+    margin: var(--space-2) 0;
     overflow-wrap: anywhere;
 }
 
 .compare-error {
-    margin: 4px 0;
-    color: #fca5a5;
+    margin: var(--space-2) 0;
+    color: var(--color-textError);
 }
 
 .compare-side-actions {
@@ -75,40 +76,42 @@
 .compare-table th,
 .compare-table td {
     text-align: left;
-    padding: 3px 8px;
-    border-bottom: 1px solid var(--color-border, #24334a);
+    padding: var(--space-2) var(--space-4);
+    border-bottom: 1px solid color-mix(in srgb, var(--color-border) 55%, transparent);
     vertical-align: top;
 }
 
 .compare-table thead th {
     position: sticky;
     top: 0;
-    background: var(--color-surface, #0f1726);
+    background: color-mix(in srgb, var(--color-surface) 94%, var(--color-elevated));
     color: var(--muted);
-    font-weight: 600;
+    font-size: var(--font-size-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: var(--font-weight-bold);
 }
 
 .compare-table .num {
     font-variant-numeric: tabular-nums;
 }
 
-/* Verdicts are always spelled out; colour only reinforces the text.
-   Light tints keep >= 7:1 contrast on the dark surfaces. */
-.verdict-worse { color: #fca5a5; }
-.verdict-better { color: #6ee7b7; }
-.verdict-changed { color: #93c5fd; }
+/* Verdicts are always spelled out; colour only reinforces the text. */
+.verdict-worse { color: var(--color-textError); }
+.verdict-better { color: var(--color-textSuccess); }
+.verdict-changed { color: var(--color-link); }
 .verdict-same,
 .verdict-n\/a { color: var(--muted); }
 .verdict-only-a,
-.verdict-only-b { color: #fcd34d; }
+.verdict-only-b { color: var(--color-textWarning); }
 
 .compare-delta {
-    font-size: 11px;
+    font-size: var(--font-size-xs);
 }
 
 .compare-status.status-only-a,
 .compare-status.status-only-b {
-    color: #fcd34d;
+    color: var(--color-textWarning);
 }
 
 .compare-groups {
