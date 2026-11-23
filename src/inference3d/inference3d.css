@@ -43,10 +43,16 @@
     justify-content: flex-end;
     gap: var(--space-2);
     max-width: calc(100% - 2 * var(--space-4));
+    padding: var(--space-2);
+    border-radius: var(--radius-lg);
+    background: color-mix(in srgb, var(--color-surface) 76%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-border) 85%, transparent);
+    backdrop-filter: blur(12px);
+    box-shadow: 0 4px 18px color-mix(in srgb, var(--neutral-n900) 32%, transparent);
 }
 
 .i3d-camera button {
-    background: color-mix(in srgb, var(--color-surface) 88%, transparent);
+    background: color-mix(in srgb, var(--color-elevated) 84%, transparent);
 }
 
 .i3d-cam-btn {
@@ -57,10 +63,17 @@
 /* ------------------------------------------------------------ capabilities */
 
 .i3d-caps {
-    background: var(--color-surface);
+    background: linear-gradient(
+        180deg,
+        color-mix(in srgb, var(--color-surface) 96%, var(--color-elevated)),
+        var(--color-surface)
+    );
     border: 1px solid var(--color-border);
     border-radius: var(--radius-lg);
     padding: var(--space-4) var(--space-5);
+    box-shadow:
+        inset 0 1px 0 color-mix(in srgb, var(--color-text) 5%, transparent),
+        0 4px 16px color-mix(in srgb, var(--neutral-n900) 20%, transparent);
 }
 
 .i3d-caps h3,
@@ -116,7 +129,8 @@
 }
 
 .i3d-chip[data-status="available"] {
-    border-color: var(--semantic-healthy);
+    border-color: color-mix(in srgb, var(--semantic-healthy) 65%, var(--color-border));
+    background: color-mix(in srgb, var(--semantic-healthy) 10%, var(--color-background));
 }
 
 .i3d-chip[data-status="available"]::before {
@@ -214,10 +228,17 @@
 }
 
 .i3d-block {
-    background: var(--color-surface);
+    background: linear-gradient(
+        180deg,
+        color-mix(in srgb, var(--color-surface) 96%, var(--color-elevated)),
+        var(--color-surface)
+    );
     border: 1px solid var(--color-border);
     border-radius: var(--radius-lg);
     padding: var(--space-4) var(--space-5);
+    box-shadow:
+        inset 0 1px 0 color-mix(in srgb, var(--color-text) 5%, transparent),
+        0 4px 16px color-mix(in srgb, var(--neutral-n900) 20%, transparent);
 }
 
 .i3d-block h4 {
@@ -259,14 +280,17 @@
     border-radius: 50%;
     background: var(--color-background);
     border: 2px solid var(--semantic-token);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--semantic-token) 22%, transparent);
 }
 
 .i3d-stages > li[data-stage="route"]::after {
     border-color: var(--semantic-attention);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--semantic-attention) 22%, transparent);
 }
 
 .i3d-stages > li[data-stage="layers"]::after {
     border-color: var(--semantic-activation);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--semantic-activation) 22%, transparent);
 }
 
 .i3d-stages > li:first-child::before {
@@ -433,13 +457,17 @@
 
 .i3d-canvas-wrap {
     position: relative;
-    height: clamp(360px, 56vh, 680px);
-    border: 1px solid var(--color-border);
+    height: clamp(380px, 58vh, 700px);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, var(--color-border));
     border-radius: var(--radius-lg);
     overflow: hidden;
     background:
-        radial-gradient(ellipse at 55% 45%, color-mix(in srgb, var(--semantic-token) 10%, transparent), transparent 65%),
+        radial-gradient(ellipse at 52% 44%, color-mix(in srgb, var(--semantic-activation) 12%, transparent), transparent 62%),
+        radial-gradient(ellipse at 18% 82%, color-mix(in srgb, var(--semantic-attention) 9%, transparent), transparent 55%),
         var(--color-background);
+    box-shadow:
+        inset 0 0 42px color-mix(in srgb, var(--neutral-n900) 55%, transparent),
+        0 8px 28px color-mix(in srgb, var(--neutral-n900) 34%, transparent);
 }
 
 .i3d-canvas {
