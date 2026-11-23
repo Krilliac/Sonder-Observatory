@@ -852,6 +852,69 @@ kbd {
     justify-content: flex-end;
 }
 
+.producer-node {
+    display: inline-flex;
+    align-items: center;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-transform: none;
+    letter-spacing: 0.01em;
+    font-size: var(--font-size-xs);
+    font-weight: var(--font-weight-medium);
+    line-height: 1.4;
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-sm);
+    color: var(--color-text);
+    border: 1px solid color-mix(in srgb, var(--semantic-activation) 45%, var(--color-border));
+    background: color-mix(in srgb, var(--semantic-activation) 12%, var(--color-elevated));
+}
+
+.producer-node[hidden],
+.producer-rate-row[hidden] {
+    display: none;
+}
+
+.producer-counter-value {
+    font-variant-numeric: tabular-nums;
+}
+
+.producer-rate-row {
+    grid-column: 1 / -1;
+    align-items: center;
+    padding-top: var(--space-1);
+    margin-top: var(--space-1);
+    border-top: 1px solid color-mix(in srgb, var(--color-border) 55%, transparent);
+}
+
+.producer-rate {
+    display: inline-flex;
+    align-items: center;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    font-size: var(--font-size-xs);
+    line-height: 1.4;
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-pill);
+    color: var(--color-muted);
+    border: 1px solid var(--color-border);
+    background: color-mix(in srgb, var(--color-elevated) 65%, transparent);
+}
+
+.producer-rate[data-active="true"] {
+    color: var(--color-textSuccess);
+    border-color: color-mix(in srgb, var(--semantic-healthy) 50%, var(--color-border));
+    background: color-mix(in srgb, var(--semantic-healthy) 10%, var(--color-surface));
+    font-weight: var(--font-weight-medium);
+}
+
+.preset-group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+}
+
 /* ------------------------------------------------------------- onboarding */
 
 .onboarding {

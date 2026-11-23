@@ -5,11 +5,14 @@ import { relatedGroups } from "../../src/inspector/related";
 import { isErrorEvent } from "../../src/query/classify";
 import { brandSvgMarkup } from "../../src/renderer/brand";
 import {
+    BRIDGED_PRESETS,
     connectionAdvice,
     CORS_ADVICE,
     describeProbe,
+    FULL_STACK_ENDPOINTS,
     MAX_RECENT_ENDPOINTS,
     parseRecentEndpoints,
+    rememberable,
     rememberEndpoint,
     type RecentEndpoint,
 } from "../../src/renderer/connectionPanel";
@@ -17,7 +20,14 @@ import { dragHasFiles, recordingFileProblem } from "../../src/renderer/dropZone"
 import { errorSearchStart, findMatching, listText, producersInSession, syntheticBannerText, timelineSummaryText } from "../../src/renderer/navigation";
 import { presetLine, probePresets } from "../../src/renderer/onboarding";
 import { parseLaunchParams, redactUrlSecrets, secretParamWarning, urlWithoutSecrets } from "../../src/renderer/params";
-import { producerCardModel, shortInstance } from "../../src/renderer/producersPanel";
+import {
+    formatEventRate,
+    formatRateNumber,
+    formatRelativeAge,
+    producerCardModel,
+    ProducerRateTracker,
+    shortInstance,
+} from "../../src/renderer/producersPanel";
 import {
     isTypingTarget,
     readShortcutsEnabled,
@@ -385,8 +395,88 @@ describe("producer cards", () => {
             }),
         );
         expect(refused.url).toBe("http://127.0.0.1:9/");
+        expect(refused.nodeId).toBeNull();
         expect(JSON.stringify(refused)).not.toMatch(/SECRET/);
         expect(refused.advice).toMatch(/Remove the credentials/);
+    });
+
+    it("surfaces distinct node_id badges for multi-node producers and omits blank node ids", () => {
+        const localInf = producerCardModel(
+            connection({
+                id: "producer-1",
+                identity: { name: "sonder-inference", version: "0.3.0", node_id: "workstation-1", instance_id: "tel-a", role: "inference", synthetic: false },
+            }),
+        );
+        const remoteInf = producerCardModel(
+            connection({
+                id: "producer-2",
+                url: "http://127.0.0.1:5175",
+                streamUrl: "http://127.0.0.1:5175/v1/telemetry/sse",
+                identity: { name: "sonder-inference", version: "0.3.0", node_id: "NODE1", instance_id: "tel-b", role: "inference", synthetic: false },
+            }),
+        );
+        const blankNode = producerCardModel(
+            connection({
+                id: "producer-3",
+                identity: { name: "sonder-inference", version: "0.3.0", node_id: "   ", instance_id: "tel-c", role: "inference", synthetic: false },
+            }),
+        );
+        expect(localInf).toMatchObject({ producer: "sonder-inference", title: "sonder-inference", nodeId: "workstation-1", received: 12 });
+        expect(remoteInf).toMatchObject({ producer: "sonder-inference", title: "sonder-inference", nodeId: "NODE1", received: 12 });
+        expect(blankNode.nodeId).toBeNull();
+    });
+
+    it("tracks rolling live event rate and decays cleanly when idle or reconnecting", () => {
+        const tracker = new ProducerRateTracker(5_000);
+        // Non-live states produce no live rate readout.
+        expect(tracker.observe("p1", 0, "connecting", 0)).toBeNull();
+        // Opening live with 0 events starts idle at 0.0 events/s.
+        const opened = tracker.observe("p1", 0, "live", 1_000)!;
+        expect(opened).toEqual({ eventsPerSec: 0, lastEventAgeMs: null, active: false });
+        expect(formatEventRate(opened)).toBe("0.0 events/s");
+
+        // Steady 20 events/s (10 events every 500 ms) over 6 seconds settles to 20.0 events/s.
+        let received = 0;
+        let last = opened;
+        for (let t = 1_500; t <= 7_000; t += 500) {
+            received += 10;
+            last = tracker.observe("p1", received, "live", t)!;
+        }
+        expect(last.active).toBe(true);
+        expect(last.eventsPerSec).toBeCloseTo(20, 5);
+        expect(formatEventRate(last)).toBe("20.0 events/s");
+
+        // Once the 5s window elapses without new events, rate decays to 0.0 and shows relative age.
+        const idle = tracker.snapshot("p1", 12_000)!;
+        expect(idle).toEqual({ eventsPerSec: 0, lastEventAgeMs: 5_000, active: false });
+        expect(formatEventRate(idle)).toBe("0.0 events/s · 5s ago");
+
+        // Reconnecting clears the window and does not recount previous events as a burst.
+        expect(tracker.observe("p1", received, "reconnecting", 13_000)).toBeNull();
+        const resumed = tracker.observe("p1", received, "live", 14_000)!;
+        expect(resumed).toEqual({ eventsPerSec: 0, lastEventAgeMs: 7_000, active: false });
+
+        // Bursting >= 100 events/s rounds cleanly to integer events/s.
+        const burst = tracker.observe("p1", received + 150, "live", 14_500)!;
+        expect(burst.active).toBe(true);
+        expect(formatRateNumber(burst.eventsPerSec)).toBe("150");
+        expect(formatEventRate(burst)).toBe("150 events/s");
+
+        expect(formatRelativeAge(500)).toBe("just now");
+        expect(formatRelativeAge(12_400)).toBe("12s ago");
+        expect(formatRelativeAge(125_000)).toBe("2m ago");
+        expect(formatRelativeAge(7_200_000)).toBe("2h ago");
+    });
+
+    it("exposes loopback-only bridged presets and full-stack endpoints", () => {
+        expect(BRIDGED_PRESETS.map((p) => [p.url, p.role])).toEqual([
+            ["http://127.0.0.1:5174", "runtime"],
+            ["http://127.0.0.1:5175", "inference"],
+        ]);
+        expect(FULL_STACK_ENDPOINTS).toEqual(["http://127.0.0.1:5174", "http://127.0.0.1:11437", "http://127.0.0.1:5175"]);
+        for (const url of [...BRIDGED_PRESETS.map((p) => p.url), ...FULL_STACK_ENDPOINTS]) {
+            expect(rememberable(url), url).toBe(true);
+        }
     });
 });
 
