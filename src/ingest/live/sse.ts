@@ -13,10 +13,11 @@ export interface SseMessage {
 
 /**
  * Largest line (and, for SSE, event: all its data lines together) the live
- * parsers buffer, in UTF-16 code units. A producer controls line length, so
- * an unterminated line must not grow the viewer's memory without bound.
+ * parsers buffer, in UTF-16 code units (512 Ki chars). A producer controls
+ * line length, so an oversized or unterminated line must not grow the
+ * viewer's memory without bound.
  */
-export const MAX_LINE_CHARS = 16 * 1024 * 1024;
+export const MAX_LINE_CHARS = 512 * 1024;
 
 export interface SseHandlers {
     onMessage(message: SseMessage): void;

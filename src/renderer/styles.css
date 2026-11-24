@@ -372,6 +372,39 @@ kbd {
     padding: var(--space-3) var(--space-5);
 }
 
+.connect-confirm[hidden] {
+    display: none;
+}
+
+.connect-confirm {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    font-size: var(--font-size-sm);
+}
+
+.connect-confirm-text {
+    margin: 0;
+}
+
+.connect-confirm-list {
+    margin: 0;
+    padding-left: var(--space-6);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+}
+
+.connect-confirm-list li {
+    overflow-wrap: anywhere;
+}
+
+.connect-confirm-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+}
+
 .warnings:empty {
     display: none;
 }

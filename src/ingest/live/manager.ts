@@ -29,7 +29,7 @@ import { LiveIngestClient, type LiveIngestStatus } from "./client";
 import { DEFAULT_DISCOVERY_TIMEOUT_MS, classifyProducerUrl, corsHint, fetchDiscovery, selectStream } from "./discovery";
 import { isLoopbackHost, resolveEndpoint, type TransportPreference } from "./endpoint";
 import { fetchProducerHealth, healthUrl, type ProducerHealth } from "./health";
-import { NO_REDIRECTS, describeHttpFailure, isRedirect, type FetchLike } from "./transports";
+import { NO_CREDENTIALS, NO_REDIRECTS, describeHttpFailure, isRedirect, type FetchLike } from "./transports";
 
 export type { FetchLike } from "./transports";
 
@@ -203,7 +203,13 @@ async function probeHttpStream(
         headers.Authorization = `Bearer ${token}`;
     }
     try {
-        const response = await fetchImpl(url, { headers, signal: controller.signal, cache: "no-store", redirect: NO_REDIRECTS });
+        const response = await fetchImpl(url, {
+            headers,
+            signal: controller.signal,
+            cache: "no-store",
+            credentials: NO_CREDENTIALS,
+            redirect: NO_REDIRECTS,
+        });
         if (isRedirect(response)) {
             return { error: describeHttpFailure(response.type === "opaqueredirect" ? 0 : response.status), corsSuspected: false };
         }

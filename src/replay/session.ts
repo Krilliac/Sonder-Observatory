@@ -1,4 +1,11 @@
 import type { ObservatoryEvent } from "../protocol/events";
+import { boundRejectedLine, estimateEventBytes, formatByteBudget } from "../protocol/size";
+import {
+    MAX_RECORDING_EVENTS,
+    MAX_RECORDING_HEAP_BYTES,
+    describeRecordingTruncation,
+    type RecordingTruncation,
+} from "../recording/limits";
 import type { RejectedLine } from "../recording/ndjson";
 import { isSyntheticProducer, type RecordingManifest } from "../recording/sobs";
 import { markOrdered, notifyPrefixExtended } from "./lookup";
@@ -8,17 +15,27 @@ export type SourceKind = "none" | "fixture" | "file" | "live";
 
 /**
  * Most events a live session keeps. A live connection has no end, so the
- * oldest events are dropped past this count; the store counts every one it
- * drops (`droppedByRetention`) and the viewer says so.
+ * oldest events are dropped past this count or past `DEFAULT_MAX_LIVE_BYTES`;
+ * the store counts every one it drops (`droppedByRetention`) and the viewer
+ * says so.
  */
 export const DEFAULT_MAX_LIVE_EVENTS = 250_000;
+
+/** Estimated JS heap byte ceiling retained for a live session (256 MiB). */
+export const DEFAULT_MAX_LIVE_BYTES = 256 * 1024 * 1024;
 
 /** Rejected lines kept for display in a live session (all are counted). */
 export const MAX_LIVE_REJECTED_KEPT = 1000;
 
 export interface SessionStoreOptions {
-    /** Retention limit for live sessions. Default DEFAULT_MAX_LIVE_EVENTS. */
+    /** Event-count retention limit for live sessions. Default DEFAULT_MAX_LIVE_EVENTS. */
     maxLiveEvents?: number;
+    /** Estimated-byte retention limit for live sessions. Default DEFAULT_MAX_LIVE_BYTES. */
+    maxLiveBytes?: number;
+    /** Event-count ceiling for loaded recording/fixture sessions. Default MAX_RECORDING_EVENTS. */
+    maxRecordingEvents?: number;
+    /** Estimated-byte ceiling for loaded recording/fixture sessions. Default MAX_RECORDING_HEAP_BYTES. */
+    maxRecordingBytes?: number;
 }
 
 /** Per-stream sequence coverage, maintained incrementally for gap reports. */
@@ -83,7 +100,14 @@ export class SessionStore {
      * evicted, plus late arrivals older than what is still retained.
      */
     droppedByRetention = 0;
+    /** Present when a loaded recording/fixture was truncated to stay within memory budgets. */
+    truncatedRecording: RecordingTruncation | null = null;
     readonly maxLiveEvents: number;
+    readonly maxLiveBytes: number;
+    readonly maxRecordingEvents: number;
+    readonly maxRecordingBytes: number;
+    private eventSizes: number[] = [];
+    private retainedBytesCount = 0;
     private seen = new Set<string>();
     private streams = new Map<string, StreamSequences>();
     private gapsCache: SequenceGap[] | null = [];
@@ -92,16 +116,32 @@ export class SessionStore {
 
     constructor(options: SessionStoreOptions = {}) {
         this.maxLiveEvents = Math.max(1, Math.floor(options.maxLiveEvents ?? DEFAULT_MAX_LIVE_EVENTS));
+        this.maxLiveBytes = Math.max(1, Math.floor(options.maxLiveBytes ?? DEFAULT_MAX_LIVE_BYTES));
+        this.maxRecordingEvents = Math.max(1, Math.floor(options.maxRecordingEvents ?? MAX_RECORDING_EVENTS));
+        this.maxRecordingBytes = Math.max(1, Math.floor(options.maxRecordingBytes ?? MAX_RECORDING_HEAP_BYTES));
         markOrdered(this.events);
     }
 
-    reset(source: SourceKind, label: string, manifest: RecordingManifest | null = null): void {
+    /** Estimated JS heap bytes retained by `events`. */
+    get retainedBytes(): number {
+        return this.retainedBytesCount;
+    }
+
+    reset(
+        source: SourceKind,
+        label: string,
+        manifest: RecordingManifest | null = null,
+        truncated: RecordingTruncation | null = null,
+    ): void {
         this.source = source;
         this.sourceLabel = label;
         this.manifest = manifest;
+        this.truncatedRecording = truncated;
         this.rejected = [];
         this.rejectedCount = 0;
         this.events = [];
+        this.eventSizes = [];
+        this.retainedBytesCount = 0;
         markOrdered(this.events);
         this.duplicates = 0;
         this.droppedByRetention = 0;
@@ -126,7 +166,10 @@ export class SessionStore {
     }
 
     append(events: readonly ObservatoryEvent[]): void {
-        const fresh: ObservatoryEvent[] = [];
+        let fresh: ObservatoryEvent[] = [];
+        let freshSizes: number[] = [];
+        let freshBytes = 0;
+        const enforceRecordingBudget = this.source === "file" || this.source === "fixture";
         // A loop, not push(...events): spreading overflows the call stack for
         // very large recordings (~120k+ items in Chromium).
         for (const e of events) {
@@ -140,46 +183,109 @@ export class SessionStore {
                 this.droppedByRetention += 1;
                 continue;
             }
+            const size = estimateEventBytes(e);
+            if (enforceRecordingBudget) {
+                const countNow = this.events.length + fresh.length;
+                const bytesNow = this.retainedBytesCount + freshBytes;
+                if (countNow >= this.maxRecordingEvents) {
+                    this.truncatedRecording ??= describeRecordingTruncation(
+                        "event-limit",
+                        this.maxRecordingEvents,
+                        countNow,
+                        bytesNow,
+                    );
+                    break;
+                }
+                if (bytesNow + size > this.maxRecordingBytes) {
+                    this.truncatedRecording ??= describeRecordingTruncation(
+                        "heap-budget",
+                        this.maxRecordingBytes,
+                        countNow,
+                        bytesNow,
+                    );
+                    break;
+                }
+            }
             this.seen.add(e.event_id);
             fresh.push(e);
+            freshSizes.push(size);
+            freshBytes += size;
         }
         if (fresh.length === 0) {
             return;
         }
-        fresh.sort(compareEvents);
+        let freshOrdered = true;
+        for (let k = 1; k < fresh.length; k += 1) {
+            if (compareEvents(fresh[k - 1]!, fresh[k]!) > 0) {
+                freshOrdered = false;
+                break;
+            }
+        }
+        if (!freshOrdered) {
+            const order = Array.from({ length: fresh.length }, (_, idx) => idx);
+            order.sort((a, b) => compareEvents(fresh[a]!, fresh[b]!));
+            const sortedEvents: ObservatoryEvent[] = new Array<ObservatoryEvent>(fresh.length);
+            const sortedSizes: number[] = new Array<number>(fresh.length);
+            for (let k = 0; k < order.length; k += 1) {
+                const idx = order[k]!;
+                sortedEvents[k] = fresh[idx]!;
+                sortedSizes[k] = freshSizes[idx]!;
+            }
+            fresh = sortedEvents;
+            freshSizes = sortedSizes;
+        }
         // `events` is replaced, never mutated: views cache derived data per
         // array identity (navigation, timelineModel, the replay cursor). The
         // copy is linear; only the new batch is sorted.
         const old = this.events;
-        const drop = this.retentionDrop(old.length + fresh.length);
-        const next: ObservatoryEvent[] = [];
+        const oldSizes = this.eventSizes;
         const last = old[old.length - 1];
         const at = last === undefined || compareEvents(last, fresh[0]!) <= 0 ? old.length : upperBound(old, fresh[0]!);
-        // Merge the sorted batch into the tail it overlaps (an in-order batch has no overlap).
-        let i = 0;
-        let j = 0;
-        while (i < at) {
-            next.push(old[i++]!);
-        }
-        while (i < old.length && j < fresh.length) {
-            if (compareEvents(old[i]!, fresh[j]!) <= 0) {
-                next.push(old[i++]!);
-            } else {
-                next.push(fresh[j++]!);
+        let next: ObservatoryEvent[];
+        let nextSizes: number[];
+        if (at === old.length) {
+            // Fast path for in-order appends: let V8 bulk-copy both backing stores.
+            next = old.concat(fresh);
+            nextSizes = oldSizes.concat(freshSizes);
+        } else {
+            next = old.slice(0, at);
+            nextSizes = oldSizes.slice(0, at);
+            // Merge the sorted batch into the tail it overlaps.
+            let i = at;
+            let j = 0;
+            while (i < old.length && j < fresh.length) {
+                if (compareEvents(old[i]!, fresh[j]!) <= 0) {
+                    next.push(old[i]!);
+                    nextSizes.push(oldSizes[i]!);
+                    i += 1;
+                } else {
+                    next.push(fresh[j]!);
+                    nextSizes.push(freshSizes[j]!);
+                    j += 1;
+                }
+            }
+            while (i < old.length) {
+                next.push(old[i]!);
+                nextSizes.push(oldSizes[i]!);
+                i += 1;
+            }
+            while (j < fresh.length) {
+                next.push(fresh[j]!);
+                nextSizes.push(freshSizes[j]!);
+                j += 1;
             }
         }
-        while (i < old.length) {
-            next.push(old[i++]!);
-        }
-        while (j < fresh.length) {
-            next.push(fresh[j++]!);
-        }
+        const totalBytes = this.retainedBytesCount + freshBytes;
+        const drop = this.retentionDrop(nextSizes, totalBytes);
         // The store's arrays are deduplicated, in replay order and never
         // mutated: derived views may skip re-sorting and cache per array
         // (replay/lookup.ts).
         markOrdered(next);
         if (drop > 0) {
-            this.events = this.evict(next, drop);
+            const evicted = this.evict(next, nextSizes, totalBytes, drop);
+            this.events = evicted.events;
+            this.eventSizes = evicted.sizes;
+            this.retainedBytesCount = evicted.bytes;
             markOrdered(this.events);
             // Live sequence history must follow the retained window, including
             // streams whose last event was evicted.
@@ -190,6 +296,8 @@ export class SessionStore {
             }
         } else {
             this.events = next;
+            this.eventSizes = nextSizes;
+            this.retainedBytesCount = totalBytes;
             for (const e of fresh) {
                 this.trackSequence(e);
             }
@@ -202,11 +310,12 @@ export class SessionStore {
     }
 
     addRejected(lines: readonly RejectedLine[]): void {
-        const cap = this.source === "live" ? MAX_LIVE_REJECTED_KEPT : Number.POSITIVE_INFINITY;
+        const live = this.source === "live";
+        const cap = live ? MAX_LIVE_REJECTED_KEPT : Number.POSITIVE_INFINITY;
         for (const line of lines) {
             this.rejectedCount += 1;
             if (this.rejected.length < cap) {
-                this.rejected.push(line);
+                this.rejected.push(live ? boundRejectedLine(line) : line);
             }
         }
     }
@@ -216,7 +325,12 @@ export class SessionStore {
         if (this.droppedByRetention === 0) {
             return null;
         }
-        return `${this.droppedByRetention} older live event(s) dropped to stay within ${this.maxLiveEvents} retained events: metrics, diagnostics and a saved recording cover only the retained events`;
+        return `${this.droppedByRetention} older live event(s) dropped to stay within ${this.maxLiveEvents} retained events (${formatByteBudget(this.maxLiveBytes)}): metrics, diagnostics and a saved recording cover only the retained events`;
+    }
+
+    /** Viewer warning when a loaded recording stopped early due to event or heap limits, else null. */
+    get partialRecordingNotice(): string | null {
+        return this.truncatedRecording?.message ?? null;
     }
 
     get synthetic(): boolean {
@@ -246,22 +360,50 @@ export class SessionStore {
         return cached;
     }
 
-    /** Live sessions only: how many of `total` events to evict (down to 90% of the limit, amortised). */
-    private retentionDrop(total: number): number {
-        if (this.source !== "live" || total <= this.maxLiveEvents) {
+    /** Live sessions only: how many oldest events to evict (down to 90% of count/byte limits, amortised). */
+    private retentionDrop(nextSizes: readonly number[], totalBytes: number): number {
+        if (this.source !== "live") {
             return 0;
         }
-        return total - Math.max(1, Math.floor(this.maxLiveEvents * 0.9));
+        const total = nextSizes.length;
+        let drop = 0;
+        if (total > this.maxLiveEvents) {
+            drop = total - Math.max(1, Math.floor(this.maxLiveEvents * 0.9));
+        }
+        if (totalBytes > this.maxLiveBytes) {
+            const targetBytes = Math.max(1, Math.floor(this.maxLiveBytes * 0.9));
+            let remaining = totalBytes;
+            let k = 0;
+            while (k < total && (remaining > this.maxLiveBytes || (k < total - 1 && remaining > targetBytes))) {
+                remaining -= nextSizes[k]!;
+                k += 1;
+            }
+            if (k > drop) {
+                drop = k;
+            }
+        }
+        return drop;
     }
 
     /** Drops the `drop` oldest of `events` and records them as dropped by retention. */
-    private evict(events: ObservatoryEvent[], drop: number): ObservatoryEvent[] {
+    private evict(
+        events: ObservatoryEvent[],
+        sizes: number[],
+        totalBytes: number,
+        drop: number,
+    ): { events: ObservatoryEvent[]; sizes: number[]; bytes: number } {
+        let removedBytes = 0;
         for (let k = 0; k < drop; k += 1) {
             this.seen.delete(events[k]!.event_id);
+            removedBytes += sizes[k]!;
         }
         this.evictedUpTo = events[drop - 1]!;
         this.droppedByRetention += drop;
-        return events.slice(drop);
+        return {
+            events: events.slice(drop),
+            sizes: sizes.slice(drop),
+            bytes: Math.max(0, totalBytes - removedBytes),
+        };
     }
 
     /**

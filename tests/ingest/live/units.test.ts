@@ -3,7 +3,14 @@ import { composeAdapters } from "../../../src/ingest/live/adapter";
 import { Backoff } from "../../../src/ingest/live/backoff";
 import { BoundedBuffer } from "../../../src/ingest/live/buffer";
 import type { LiveIngestStatus } from "../../../src/ingest/live/client";
-import { resolveEndpoint, withQueryParam } from "../../../src/ingest/live/endpoint";
+import {
+    AUTO_CONNECT_LOOPBACK_PORTS,
+    findSecretQueryParams,
+    isAutoConnectAllowedUrl,
+    resolveEndpoint,
+    stripSecretQueryParams,
+    withQueryParam,
+} from "../../../src/ingest/live/endpoint";
 import { LineSplitter, SseParser, type SseMessage } from "../../../src/ingest/live/sse";
 import { describeStatus } from "../../../src/ingest/live/status";
 
@@ -143,6 +150,43 @@ describe("resolveEndpoint", () => {
 
     it("sets a resume query parameter", () => {
         expect(withQueryParam("ws://h:1/ws?a=1", "last_event_id", "e 1")).toBe("ws://h:1/ws?a=1&last_event_id=e+1");
+    });
+
+    it("rejects semicolon-delimited secret parameters in URLs (F6)", () => {
+        expect(findSecretQueryParams("?format=ndjson;token=SECRET")).toEqual(["token"]);
+        expect(findSecretQueryParams("?format=ndjson;api_key=SECRET&x=1")).toEqual(["api_key"]);
+        expect(findSecretQueryParams("?a=1;Access_Token=SECRET")).toEqual(["Access_Token"]);
+        expect(stripSecretQueryParams("?format=ndjson;token=SECRET&x=1")).toEqual({
+            search: "?format=ndjson&x=1",
+            changed: true,
+        });
+        expect(stripSecretQueryParams("?format=ndjson;api_key=SECRET")).toEqual({
+            search: "?format=ndjson",
+            changed: true,
+        });
+        expect(resolveEndpoint("http://127.0.0.1:11435/sse?format=ndjson;token=SECRET").ok).toBe(false);
+        expect(resolveEndpoint("http://127.0.0.1:11435/sse?format=ndjson;api_key=SECRET").ok).toBe(false);
+        expect(resolveEndpoint("https://node.example/sse?x=1;access_token=SECRET").ok).toBe(false);
+        expect(resolveEndpoint("http://127.0.0.1:11435/sse?format=ndjson;token=SECRET").message).toMatch(/tokens never go in URLs/);
+    });
+
+    it("only allows explicitly allowlisted local Sonder loopback ports to auto-connect (F1)", () => {
+        for (const port of AUTO_CONNECT_LOOPBACK_PORTS) {
+            expect(isAutoConnectAllowedUrl(`http://127.0.0.1:${port}`), `port ${port}`).toBe(true);
+        }
+        expect(isAutoConnectAllowedUrl("http://localhost:11437/v1/telemetry/sse")).toBe(true);
+        expect(isAutoConnectAllowedUrl("http://[::1]:11435")).toBe(true);
+        expect(isAutoConnectAllowedUrl("ws://127.0.0.1:8765/ws")).toBe(true);
+        // Arbitrary loopback ports, implicit ports, non-canonical loopback, and remote hosts must be gated.
+        expect(isAutoConnectAllowedUrl("http://127.0.0.1:5173")).toBe(false);
+        expect(isAutoConnectAllowedUrl("http://127.0.0.1:6379")).toBe(false);
+        expect(isAutoConnectAllowedUrl("ws://127.0.0.1:9222/devtools/browser")).toBe(false);
+        expect(isAutoConnectAllowedUrl("http://127.0.0.1/")).toBe(false);
+        expect(isAutoConnectAllowedUrl("http://127.0.0.2:11435")).toBe(false);
+        expect(isAutoConnectAllowedUrl("https://attacker.example/sse")).toBe(false);
+        expect(isAutoConnectAllowedUrl("wss://attacker.example:11437/ws")).toBe(false);
+        expect(isAutoConnectAllowedUrl("https://169.254.169.254/latest/meta-data")).toBe(false);
+        expect(isAutoConnectAllowedUrl("http://127.0.0.1:11435/?format=ndjson;token=SECRET")).toBe(false);
     });
 });
 

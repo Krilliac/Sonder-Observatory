@@ -9,6 +9,15 @@
 
 export const SCHEMA_ID = "sonder.observatory.event/1";
 
+/**
+ * Recursive structural bounds on `event.attributes`, mirrored from
+ * `protocol/observatory-events.schema.json` (`properties.attributes.x-limits`).
+ */
+export const MAX_ATTRIBUTE_DEPTH = 8;
+export const MAX_ATTRIBUTE_NODES = 256;
+export const MAX_ATTRIBUTE_ARRAY_LENGTH = 128;
+export const MAX_ATTRIBUTE_STRING_LENGTH = 16_384;
+
 export const SAMPLING_LEVELS = ["off", "metrics", "standard", "deep"] as const;
 export type SamplingLevel = (typeof SAMPLING_LEVELS)[number];
 

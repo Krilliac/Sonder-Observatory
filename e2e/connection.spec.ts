@@ -1,6 +1,6 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { loadEvents, startFakeLiveProducer, type FakeLiveProducer } from "../scripts/fake-live-producer.mjs";
-import { FIXTURE_EVENTS, showView, shot } from "./helpers";
+import { FIXTURE_EVENTS, confirmQueryConnects, showView, shot } from "./helpers";
 
 /**
  * Multi-producer connection flow against two fake live producers started
@@ -75,6 +75,9 @@ test.describe("live producers", () => {
         const errors: string[] = [];
         page.on("pageerror", (err) => errors.push(err.message));
         await page.goto(`./?fixture=0&connect=${encodeURIComponent(inference.urls.base)}&connect=${encodeURIComponent(runtime.urls.base)}`);
+        // Ephemeral test ports are outside the allowlist and require explicit confirmation first.
+        await expect(page.locator("[data-testid=producer-card]")).toHaveCount(0);
+        await confirmQueryConnects(page);
 
         for (const name of ["sonder-inference", "sonder-runtime"]) {
             await expect(card(page, name)).toBeVisible();
@@ -174,8 +177,20 @@ test.describe("live producers", () => {
         expect(page.url()).not.toContain(TOKEN);
     });
 
+    test("unallowlisted ?connect= can be dismissed without contacting the endpoint", async ({ page }) => {
+        const before = runtime.stats.connections;
+        await page.goto(`./?fixture=0&connect=${encodeURIComponent(runtime.urls.base)}`);
+        await expect(page.locator("#connect-confirm")).toBeVisible();
+        await expect(page.locator("[data-testid=producer-card]")).toHaveCount(0);
+        await page.locator("#dismiss-connect-btn").click();
+        await expect(page.locator("#connect-confirm")).toBeHidden();
+        await expect(page.locator("[data-testid=producer-card]")).toHaveCount(0);
+        expect(runtime.stats.connections).toBe(before);
+    });
+
     test("the token warning stays visible when ?connect= adds producers", async ({ page }) => {
         await page.goto(`./?fixture=0&connect=${encodeURIComponent(runtime.urls.base)}&token=${TOKEN}`);
+        await confirmQueryConnects(page);
         await expect(card(page, "sonder-runtime").locator("[data-testid=producer-state]")).toHaveText("live");
         await expect(page.locator("#warnings")).toContainText('Ignored the "token" URL parameter');
         expect(page.url()).not.toContain(TOKEN);
@@ -189,6 +204,8 @@ test.describe("live producers", () => {
         withUser.username = "u";
         withUser.password = "SECRETY";
         await page.goto(`./?fixture=0&connect=${encodeURIComponent(withToken.toString())}&connect=${encodeURIComponent(withUser.toString())}`);
+        await expect(page.locator("#connect-confirm")).toBeVisible();
+        await confirmQueryConnects(page);
         // Connected without the secrets (they are ignored, like ?token=).
         await expect(card(page, "sonder-runtime").locator("[data-testid=producer-state]")).toHaveText("live");
         await expect(card(page, "sonder-inference").locator("[data-testid=producer-state]")).toHaveText("live");
@@ -204,6 +221,7 @@ test.describe("live producers", () => {
 
     test("cards and rows take human-speed clicks while a producer streams", async ({ page }) => {
         await page.goto(`./?fixture=0&view=events&connect=${encodeURIComponent(streaming.urls.base)}`);
+        await confirmQueryConnects(page);
         const live = card(page, "sonder-inference");
         await expect(live.locator("[data-testid=producer-state]")).toHaveText("live");
 
@@ -302,6 +320,7 @@ test.describe("live producers", () => {
                 await page.goto(
                     `./?fixture=0&theme=${theme}&connect=${encodeURIComponent(inference.urls.base)}&connect=${encodeURIComponent(runtime.urls.base)}`,
                 );
+                await confirmQueryConnects(page);
                 await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
                 await expect(card(page, "sonder-runtime").locator("[data-testid=producer-state]")).toHaveText("live");
                 await expect(card(page, "sonder-inference").locator("[data-testid=producer-state]")).toHaveText("live");

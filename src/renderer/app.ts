@@ -4,7 +4,7 @@ import type { Inference3DPanel } from "../inference3d/inference3dPanel";
 import { FindingsController, renderFindingsPanel, runDiagnostics } from "../diagnostics";
 import { renderInspector } from "../inspector/inspector";
 import { LiveConnectionManager, type ProducerConnection, type ProducerEndpointInput } from "../ingest/live/manager";
-import type { TransportPreference } from "../ingest/live/endpoint";
+import { isLoopbackHost, type TransportPreference } from "../ingest/live/endpoint";
 import type { HealthBackend } from "../ingest/live/health";
 import type { ObservatoryEvent } from "../protocol/events";
 import { describeRange, isFullRange, type ExportRange } from "../export/filter";
@@ -110,6 +110,9 @@ export class ObservatoryApp {
      * launch clear `notices`, and the warning must still be seen.
      */
     private readonly launchNotices: string[] = [];
+    /** Query-supplied ?connect= / ?ws= URLs outside the local Sonder allowlist awaiting confirmation. */
+    private pendingQueryConnects: string[] = [];
+    private pendingConnectStamp = "";
     /** Result of the last error jump ("no later error"), cleared by the next selection. */
     private navNotice: string | null = null;
     private follow = true;
@@ -254,9 +257,13 @@ export class ObservatoryApp {
             },
         });
         window.addEventListener("resize", () => this.queueRender());
-        if (params.connect.length > 0) {
-            this.connectProducers(params.connect.map((url) => ({ url })));
-        } else if (params.fixture) {
+        if (params.autoConnect.length > 0) {
+            this.connectProducers(params.autoConnect.map((url) => ({ url })));
+        }
+        if (params.pendingConnect.length > 0) {
+            this.pendingQueryConnects = [...params.pendingConnect];
+        }
+        if (params.connect.length === 0 && params.fixture) {
             this.loadText(fixtureText, "fixture", FIXTURE_LABEL);
         }
         this.render();
@@ -277,11 +284,25 @@ export class ObservatoryApp {
         this.addProducer({ url });
     }
 
-    /** Connects every producer (desktop `--connect` list with per-URL tokens, `?connect=`). */
+    /** Connects every producer (desktop `--connect` list with per-URL tokens, confirmed `?connect=`). */
     connectProducers(inputs: readonly ProducerEndpointInput[]): void {
         for (const input of inputs) {
             this.addProducer(input);
         }
+    }
+
+    private confirmPendingQueryConnects(): void {
+        const urls = this.pendingQueryConnects;
+        this.pendingQueryConnects = [];
+        if (urls.length > 0) {
+            this.connectProducers(urls.map((url) => ({ url })));
+        }
+        this.render();
+    }
+
+    private dismissPendingQueryConnects(): void {
+        this.pendingQueryConnects = [];
+        this.render();
     }
 
     // ---------------------------------------------------------------- layout
@@ -346,6 +367,7 @@ export class ObservatoryApp {
             h(
                 "div",
                 { class: "notices" },
+                h("div", { id: "connect-confirm", class: "banner connect-confirm", hidden: true, role: "region", "aria-label": "Confirm requested live connections" }),
                 h("div", { id: "synthetic-banner", class: "banner", hidden: true, role: "note" }),
                 h("div", { id: "warnings", class: "warnings", role: "status", "aria-live": "polite" }),
                 h(
@@ -801,7 +823,7 @@ export class ObservatoryApp {
     private applyLoaded(loaded: LoadedRecording, source: "fixture" | "file", label: string): void {
         this.notices = [];
         this.exportNotice = null;
-        this.store.reset(source, label, loaded.manifest);
+        this.store.reset(source, label, loaded.manifest, loaded.truncated ?? null);
         // One append = one ordering pass; SessionStore no longer spreads into push().
         this.store.append(loaded.events);
         this.store.addRejected(loaded.rejected);
@@ -1004,6 +1026,7 @@ export class ObservatoryApp {
         const metrics = this.cursor.metrics();
         this.renderHeader();
         this.renderSources();
+        this.renderConnectConfirm();
         this.renderWarnings();
         this.renderStrip(visible, metrics);
         this.renderViews();
@@ -1240,7 +1263,7 @@ export class ObservatoryApp {
                     : "no data"
                 : s.source === "live"
                   ? `live · ${liveCount} producer${liveCount === 1 ? "" : "s"}`
-                  : `${s.source === "file" ? "recording" : "fixture"} · ${s.sourceLabel}`;
+                  : `${s.source === "file" ? "recording" : "fixture"}${s.truncatedRecording ? " (partial)" : ""} · ${s.sourceLabel}`;
         byId("source-badge").textContent = sourceText;
         const producers = producersInSession(s.events);
         const syntheticNames = producers.filter((p) => p.synthetic).map((p) => p.name);
@@ -1310,6 +1333,65 @@ export class ObservatoryApp {
         }
     }
 
+    /** Confirmation banner for query-supplied ?connect= / ?ws= endpoints outside the local Sonder allowlist. */
+    private renderConnectConfirm(): void {
+        const stamp = this.pendingQueryConnects.join("\n");
+        if (stamp === this.pendingConnectStamp) {
+            return;
+        }
+        this.pendingConnectStamp = stamp;
+        const box = byId("connect-confirm");
+        const urls = this.pendingQueryConnects;
+        if (urls.length === 0) {
+            box.hidden = true;
+            box.replaceChildren();
+            return;
+        }
+        box.hidden = false;
+        const n = urls.length;
+        const describeScope = (rawUrl: string): string => {
+            try {
+                const parsed = new URL(rawUrl);
+                return isLoopbackHost(parsed.hostname) ? "non-standard local port" : "remote host";
+            } catch {
+                return "unparsed URL";
+            }
+        };
+        const confirmBtn = h("button", {
+            id: "confirm-connect-btn",
+            type: "button",
+            class: "primary small",
+            text: n === 1 ? "Connect endpoint" : `Connect ${n} endpoints`,
+        });
+        confirmBtn.addEventListener("click", () => this.confirmPendingQueryConnects());
+        const dismissBtn = h("button", {
+            id: "dismiss-connect-btn",
+            type: "button",
+            class: "small",
+            text: "Dismiss",
+        });
+        dismissBtn.addEventListener("click", () => this.dismissPendingQueryConnects());
+        box.replaceChildren(
+            h("p", {
+                class: "connect-confirm-text",
+                text: `This link requests connecting to ${n} unallowlisted endpoint${n === 1 ? "" : "s"}. No network request has been sent yet:`,
+            }),
+            h(
+                "ul",
+                { class: "connect-confirm-list" },
+                ...urls.map((url) =>
+                    h(
+                        "li",
+                        {},
+                        h("code", { class: "mono", text: redactUrlSecrets(url) }),
+                        h("span", { text: ` (${describeScope(url)})` }),
+                    ),
+                ),
+            ),
+            h("div", { class: "connect-confirm-actions" }, confirmBtn, dismissBtn),
+        );
+    }
+
     /** #warnings is a polite live region: it is rewritten only when its text changes. */
     private renderWarnings(): void {
         const s = this.store;
@@ -1317,6 +1399,10 @@ export class ObservatoryApp {
         const retention = s.retentionNotice;
         if (retention !== null) {
             items.push(retention);
+        }
+        const partial = s.partialRecordingNotice;
+        if (partial !== null) {
+            items.push(partial);
         }
         if (s.rejectedCount > 0) {
             const first = s.rejected[0]!;

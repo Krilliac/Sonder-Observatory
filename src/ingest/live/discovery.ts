@@ -15,7 +15,7 @@ import {
 } from "../../protocol/discovery";
 import { formatIssues } from "../../protocol/validate";
 import { endpointPolicyViolation, type TransportPreference } from "./endpoint";
-import { NO_REDIRECTS, REDIRECT_REFUSED, isRedirect, type FetchLike } from "./transports";
+import { NO_CREDENTIALS, NO_REDIRECTS, REDIRECT_REFUSED, isRedirect, type FetchLike } from "./transports";
 
 export type ProducerUrlKind = "base" | "discovery" | "stream";
 
@@ -164,7 +164,13 @@ export async function fetchDiscovery(url: string, options: DiscoveryFetchOptions
     try {
         let response: Response;
         try {
-            response = await fetchImpl(url, { headers, signal: controller.signal, cache: "no-store", redirect: NO_REDIRECTS });
+            response = await fetchImpl(url, {
+                headers,
+                signal: controller.signal,
+                cache: "no-store",
+                credentials: NO_CREDENTIALS,
+                redirect: NO_REDIRECTS,
+            });
         } catch (error) {
             if ((error as { name?: string })?.name === "AbortError") {
                 return fail(`discovery timed out after ${timeoutMs} ms at ${url}`);

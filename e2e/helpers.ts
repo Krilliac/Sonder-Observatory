@@ -47,6 +47,23 @@ export async function scrubTo(page: Page, value: number): Promise<void> {
     await page.locator("#scrubber").fill(String(value));
 }
 
+/** Confirms the F1 query-connect banner when non-allowlisted ?connect= URLs are requested. */
+export async function confirmQueryConnects(page: Page): Promise<void> {
+    const btn = page.locator("#confirm-connect-btn");
+    await expect(btn).toBeVisible();
+    await btn.click();
+    await expect(page.locator("#connect-confirm")).toBeHidden();
+}
+
+/** Confirms the F1 query-connect banner if present (for configurable ports that may or may not be allowlisted). */
+export async function confirmQueryConnectsIfPrompted(page: Page): Promise<void> {
+    const btn = page.locator("#confirm-connect-btn");
+    if (await btn.isVisible()) {
+        await btn.click();
+        await expect(page.locator("#connect-confirm")).toBeHidden();
+    }
+}
+
 /** Inspector's event_id row value. */
 export function inspectorEventId(page: Page): Locator {
     return page.locator("#inspector dl.kv dt", { hasText: /^event_id$/ }).locator("xpath=following-sibling::dd[1]");

@@ -145,6 +145,9 @@ async function expectRegressedComparison(panel: Locator): Promise<void> {
 }
 
 test.describe("Compare panel (harness)", () => {
+    // The harness injects a bundled test script via page.addScriptTag({ content }).
+    test.use({ bypassCSP: true });
+
     test("baseline fixture vs regressed variant: deltas, findings and graph diff", async ({ page }, testInfo) => {
         const panel = await openHarness(page);
         await expectRegressedComparison(panel);

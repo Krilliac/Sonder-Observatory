@@ -40,6 +40,7 @@ for (const transport of ["sse", "ndjson"] as const) {
         try {
             const streamUrl = `http://127.0.0.1:${address.port}/events/${transport}`;
             await page.goto(`./?fixture=0&connect=${encodeURIComponent(streamUrl)}`);
+            await page.locator("#confirm-connect-btn").click();
             const card = page.locator("[data-testid=producer-card]").first();
             await expect(card.locator("[data-testid=producer-state]")).toHaveText("live");
             const send = async (events: ObservatoryEvent[], appended: number) => {

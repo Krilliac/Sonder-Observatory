@@ -40,12 +40,18 @@ export interface TransportRequest {
 
 /** Status line text for a failed HTTP stream response, with a hint. */
 /**
- * Streams and discovery are fetched with `redirect: "manual"`: a redirect is
- * never followed, so a producer cannot move the viewer to an endpoint the
- * endpoint policy (resolveEndpoint) would have refused, such as plain http://
- * on a non-loopback host.
+ * Streams, discovery, health and probes are fetched with `redirect: "manual"`:
+ * a redirect is never followed, so a producer cannot move the viewer to an
+ * endpoint the endpoint policy (resolveEndpoint) would have refused, such as
+ * plain http:// on a non-loopback host.
  */
 export const NO_REDIRECTS: RequestRedirect = "manual";
+
+/**
+ * Telemetry fetches never send ambient browser cookies or HTTP auth: bearer
+ * tokens are attached explicitly via the Authorization header only.
+ */
+export const NO_CREDENTIALS: RequestCredentials = "omit";
 
 /** A redirect answer: a 3xx, or the opaque redirect a browser reports for "manual". */
 export function isRedirect(response: Response): boolean {
@@ -172,6 +178,7 @@ export function openHttpStream(
             headers,
             signal: controller.signal,
             cache: "no-store",
+            credentials: NO_CREDENTIALS,
             redirect: NO_REDIRECTS,
         });
         if (isRedirect(response)) {

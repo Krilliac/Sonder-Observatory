@@ -18,7 +18,8 @@
  * event_id and reports `duplicates`.
  */
 import type { ObservatoryEvent } from "../../protocol/events";
-import { formatIssues, validateEvent } from "../../protocol/validate";
+import { boundRejectedLine, estimateEventBytes } from "../../protocol/size";
+import { formatIssues, isLimitViolation, validateEvent } from "../../protocol/validate";
 import type { RejectedLine } from "../../recording/ndjson";
 import type { WebSocketFactory, WebSocketLike } from "../../transport/live";
 import { normalizeAdapted, type EventAdapter } from "./adapter";
@@ -85,6 +86,10 @@ export interface LiveIngestOptions {
     adapter?: EventAdapter;
     /** Max events held between flushes. Default 20000. */
     bufferCapacity?: number;
+    /** Max estimated bytes held between flushes. Default DEFAULT_BUFFER_MAX_BYTES (16 MiB). */
+    bufferMaxBytes?: number;
+    /** Disconnect a producer after this many size/complexity limit violations. Default DEFAULT_MAX_LIMIT_VIOLATIONS (10). */
+    maxLimitViolations?: number;
     /** What to discard when full. Default "drop-oldest" (keep the live edge). */
     overflow?: OverflowPolicy;
     /** Max events per sink.append call. Default 1000. */
@@ -132,6 +137,12 @@ function hasAuthorization(headers: Readonly<Record<string, string>> | undefined)
 const WS_TOKEN_REFUSED = "a bearer token cannot be sent over WebSocket; use the producer's SSE or NDJSON stream";
 
 const MAX_REJECTED_KEPT = 1000;
+
+/** Default estimated-byte cap for the in-flight live ingest queue (16 MiB). */
+export const DEFAULT_BUFFER_MAX_BYTES = 16 * 1024 * 1024;
+
+/** Default per-connection size/complexity limit violation cap before disconnecting. */
+export const DEFAULT_MAX_LIMIT_VIOLATIONS = 10;
 
 /**
  * Upper bound for a producer's SSE `retry:` hint. setTimeout treats delays
@@ -185,6 +196,9 @@ export class LiveIngestClient {
     private readonly flushIntervalMs: number;
     private readonly highWater: number;
     private readonly lowWater: number;
+    private readonly highWaterBytes: number;
+    private readonly lowWaterBytes: number;
+    private readonly maxLimitViolations: number;
     private readonly listeners = new Set<(s: LiveIngestStatus) => void>();
     private readonly statusValue: LiveIngestStatus;
     private handle: TransportHandle | null = null;
@@ -196,6 +210,7 @@ export class LiveIngestClient {
     private stopped = true;
     private everOpened = false;
     private failures = 0;
+    private limitViolations = 0;
     private serverRetryMs: number | null = null;
     private retryTimer: ReturnType<typeof setTimeout> | null = null;
     private flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -209,12 +224,19 @@ export class LiveIngestClient {
     constructor(options: LiveIngestOptions) {
         this.options = options;
         const capacity = options.bufferCapacity ?? 20_000;
-        this.buffer = new BoundedBuffer<ObservatoryEvent>(capacity, options.overflow ?? "drop-oldest");
+        const maxBytes = options.bufferMaxBytes ?? DEFAULT_BUFFER_MAX_BYTES;
+        this.buffer = new BoundedBuffer<ObservatoryEvent>(capacity, options.overflow ?? "drop-oldest", {
+            maxBytes,
+            sizeOf: estimateEventBytes,
+        });
         this.backoff = new Backoff(options.backoff);
         this.batchSize = Math.max(1, options.batchSize ?? 1000);
         this.flushIntervalMs = Math.max(0, options.flushIntervalMs ?? 50);
         this.highWater = Math.max(1, Math.floor(capacity * 0.75));
         this.lowWater = Math.floor(capacity * 0.25);
+        this.highWaterBytes = Math.max(1, Math.floor(maxBytes * 0.75));
+        this.lowWaterBytes = Math.floor(maxBytes * 0.25);
+        this.maxLimitViolations = Math.max(1, Math.floor(options.maxLimitViolations ?? DEFAULT_MAX_LIMIT_VIOLATIONS));
         this.discoveryUrl = discoveryUrlFor(options);
         const endpoint = checkedEndpoint(options);
         this.kind = this.discoveryUrl === null ? endpoint.kind : null;
@@ -272,6 +294,7 @@ export class LiveIngestClient {
         this.stopped = false;
         // An explicit start is a new retry run; automatic reconnects stay in connect().
         this.failures = 0;
+        this.limitViolations = 0;
         this.backoff.reset();
         this.connect();
     }
@@ -397,6 +420,9 @@ export class LiveIngestClient {
             onInvalidFrame: (reason) => {
                 if (current()) {
                     this.reject({ line: ++this.lineCounter, reason, raw: "" });
+                    if (/exceeds.*limit/i.test(reason) && this.recordLimitViolation(reason)) {
+                        return;
+                    }
                     this.scheduleFlush();
                 }
             },
@@ -503,7 +529,11 @@ export class LiveIngestClient {
             for (const candidate of values) {
                 const result = !adapter && candidate === value ? source : validateEvent(candidate);
                 if (!result.ok) {
-                    this.reject({ line, reason: formatIssues(result.issues), raw });
+                    const reason = formatIssues(result.issues);
+                    this.reject({ line, reason, raw });
+                    if (isLimitViolation(result.issues) && this.recordLimitViolation(reason)) {
+                        return;
+                    }
                     continue;
                 }
                 yield { event: result.event };
@@ -537,12 +567,18 @@ export class LiveIngestClient {
 
     private ingest(text: string, sseId: string | null, trackSourceCursor: boolean): void {
         for (const part of this.decode(text)) {
+            if (this.stopped) {
+                return;
+            }
             if ("event" in part) {
                 this.accept(part.event, !trackSourceCursor);
             } else if (trackSourceCursor && sseId === null && part.cursor !== null) {
                 // HTTP drop mode consumes the whole line synchronously, including fanout.
                 this.statusValue.lastEventId = part.cursor;
             }
+        }
+        if (this.stopped) {
+            return;
         }
         this.finishPayload(sseId);
     }
@@ -560,7 +596,7 @@ export class LiveIngestClient {
                 }
                 continue;
             }
-            if (this.buffer.size >= this.highWater) {
+            if (this.isAboveHighWater()) {
                 this.scheduleFlush();
                 await this.waitForCapacity();
                 if (!current()) {
@@ -569,14 +605,47 @@ export class LiveIngestClient {
             }
             this.accept(part.event, false);
         }
+        if (!current()) {
+            return;
+        }
         this.finishPayload(sseId);
     }
 
     private reject(line: RejectedLine): void {
         this.statusValue.rejected += 1;
         if (this.pendingRejected.length < MAX_REJECTED_KEPT) {
-            this.pendingRejected.push(line);
+            this.pendingRejected.push(boundRejectedLine(line));
         }
+    }
+
+    /** Disconnects an abusive producer that repeatedly exceeds size/complexity limits. */
+    private recordLimitViolation(reason: string): boolean {
+        this.limitViolations += 1;
+        if (this.limitViolations < this.maxLimitViolations) {
+            return false;
+        }
+        this.stopped = true;
+        this.generation += 1;
+        this.clearRetry();
+        const handle = this.handle;
+        this.handle = null;
+        handle?.close();
+        this.releaseWaiters();
+        this.scheduleFlush();
+        this.update({
+            state: "failed",
+            retryInMs: null,
+            lastError: `disconnected producer after ${this.limitViolations} telemetry limit violations (last: ${reason})`,
+        });
+        return true;
+    }
+
+    private isAboveHighWater(): boolean {
+        return this.buffer.size >= this.highWater || this.buffer.bytes >= this.highWaterBytes;
+    }
+
+    private isAtOrBelowLowWater(): boolean {
+        return this.buffer.size <= this.lowWater && this.buffer.bytes <= this.lowWaterBytes;
     }
 
     // --- batching / backpressure ----------------------------------------------
@@ -617,7 +686,7 @@ export class LiveIngestClient {
             }
             this.statusValue.buffered = this.buffer.size;
             this.statusValue.dropped = this.buffer.dropped;
-            if (this.buffer.size <= this.lowWater) {
+            if (this.isAtOrBelowLowWater()) {
                 this.releaseWaiters();
             }
             this.emit();
@@ -632,7 +701,7 @@ export class LiveIngestClient {
         if (
             this.stopped ||
             this.options.httpBackpressure === "drop" ||
-            this.buffer.size < this.highWater
+            !this.isAboveHighWater()
         ) {
             return Promise.resolve();
         }
