@@ -239,38 +239,41 @@ export class SessionStore {
         // copy is linear; only the new batch is sorted.
         const old = this.events;
         const oldSizes = this.eventSizes;
-        const next: ObservatoryEvent[] = [];
-        const nextSizes: number[] = [];
         const last = old[old.length - 1];
         const at = last === undefined || compareEvents(last, fresh[0]!) <= 0 ? old.length : upperBound(old, fresh[0]!);
-        // Merge the sorted batch into the tail it overlaps (an in-order batch has no overlap).
-        let i = 0;
-        let j = 0;
-        while (i < at) {
-            next.push(old[i]!);
-            nextSizes.push(oldSizes[i]!);
-            i += 1;
-        }
-        while (i < old.length && j < fresh.length) {
-            if (compareEvents(old[i]!, fresh[j]!) <= 0) {
+        let next: ObservatoryEvent[];
+        let nextSizes: number[];
+        if (at === old.length) {
+            // Fast path for in-order appends: let V8 bulk-copy both backing stores.
+            next = old.concat(fresh);
+            nextSizes = oldSizes.concat(freshSizes);
+        } else {
+            next = old.slice(0, at);
+            nextSizes = oldSizes.slice(0, at);
+            // Merge the sorted batch into the tail it overlaps.
+            let i = at;
+            let j = 0;
+            while (i < old.length && j < fresh.length) {
+                if (compareEvents(old[i]!, fresh[j]!) <= 0) {
+                    next.push(old[i]!);
+                    nextSizes.push(oldSizes[i]!);
+                    i += 1;
+                } else {
+                    next.push(fresh[j]!);
+                    nextSizes.push(freshSizes[j]!);
+                    j += 1;
+                }
+            }
+            while (i < old.length) {
                 next.push(old[i]!);
                 nextSizes.push(oldSizes[i]!);
                 i += 1;
-            } else {
+            }
+            while (j < fresh.length) {
                 next.push(fresh[j]!);
                 nextSizes.push(freshSizes[j]!);
                 j += 1;
             }
-        }
-        while (i < old.length) {
-            next.push(old[i]!);
-            nextSizes.push(oldSizes[i]!);
-            i += 1;
-        }
-        while (j < fresh.length) {
-            next.push(fresh[j]!);
-            nextSizes.push(freshSizes[j]!);
-            j += 1;
         }
         const totalBytes = this.retainedBytesCount + freshBytes;
         const drop = this.retentionDrop(nextSizes, totalBytes);

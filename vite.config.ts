@@ -12,7 +12,7 @@ const BROWSER_CSP_DIRECTIVES = [
     "img-src 'self' data: blob:",
     "font-src 'self' data:",
     "worker-src 'self' blob:",
-    "connect-src 'self' ipc: http://ipc.localhost ws://127.0.0.1:* ws://localhost:* ws://[::1]:* wss: http://127.0.0.1:* http://localhost:* http://[::1]:* https:",
+    "connect-src 'self' ipc: http://ipc.localhost ws://127.0.0.1:* ws://localhost:* wss: http://127.0.0.1:* http://localhost:* https:",
     "object-src 'none'",
     "base-uri 'none'",
     "form-action 'none'",

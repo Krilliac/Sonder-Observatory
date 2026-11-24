@@ -107,7 +107,11 @@ test("topology edge evidence pages reset when changing graph selection", async (
     await expect(rows).toHaveCount(0);
 });
 
-test("both topology pages survive actual Store live appends and reset on retention or replacement", async ({ page }) => {
+test.describe("topology live pagination harness", () => {
+    // Injects the compiled harness bundle via page.addScriptTag({ content }).
+    test.use({ bypassCSP: true });
+
+    test("both topology pages survive actual Store live appends and reset on retention or replacement", async ({ page }) => {
     const base = generateEvents(2, 13).next().value!;
     const events = (start: number, count: number) => Array.from({ length: count }, (_, offset) => ({
         ...base, event_id: `evt_topo_live_${start + offset}`, sequence: start + offset,
@@ -148,4 +152,5 @@ test("both topology pages survive actual Store live appends and reset on retenti
     for (const kind of ["evidence", "diagnostics"]) {
         await expect(panel.locator(`.topology-${kind}-page`)).toContainText("1–50 of 120");
     }
+    });
 });
