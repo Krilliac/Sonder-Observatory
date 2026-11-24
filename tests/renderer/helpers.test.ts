@@ -167,6 +167,62 @@ describe("URL parameters", () => {
         expect(redactUrlSecrets("127.0.0.1:9/sse?token=abc")).toBe("127.0.0.1:9/sse");
         expect(redactUrlSecrets("::bad?x=1&access_token=abc#f")).toBe("::bad?x=1#f");
         expect(redactUrlSecrets("weird://user:pw@")).not.toMatch(/pw/);
+        // Semicolon-delimited secrets inside valid and non-URL values are redacted (F6).
+        expect(redactUrlSecrets("http://127.0.0.1:9/sse?format=ndjson;token=SECRET")).toBe("http://127.0.0.1:9/sse?format=ndjson");
+        expect(redactUrlSecrets("http://127.0.0.1:9/sse?format=ndjson;api_key=SECRET&x=1")).toBe("http://127.0.0.1:9/sse?format=ndjson&x=1");
+        expect(redactUrlSecrets("127.0.0.1:9/sse?x=1;api_key=SECRET;y=2")).toBe("127.0.0.1:9/sse?x=1;y=2");
+    });
+
+    it("detects and strips semicolon-delimited secrets in page and connect URLs (F6)", () => {
+        const p = parseLaunchParams(new URLSearchParams("fixture=0;token=SECRET1&view=events;api_key=SECRET2"));
+        expect(p.ignoredSecrets).toEqual(["token", "api_key"]);
+        expect(p.fixture).toBe(false);
+
+        const cleanTop = urlWithoutSecrets("http://127.0.0.1:5173/?fixture=0;token=SECRET1&x=1;api_key=SECRET2")!;
+        expect(cleanTop).not.toMatch(/SECRET/);
+        expect(cleanTop).toBe("http://127.0.0.1:5173/?fixture=0&x=1");
+
+        const nested = new URLSearchParams();
+        nested.append("connect", "http://127.0.0.1:11435/sse?format=ndjson;token=SECRET3");
+        nested.append("ws", "ws://127.0.0.1:8765/ws?a=1;api_key=SECRET4");
+        const parsedNested = parseLaunchParams(nested);
+        expect(parsedNested.connect).toEqual(["http://127.0.0.1:11435/sse?format=ndjson", "ws://127.0.0.1:8765/ws?a=1"]);
+        expect(parsedNested.ignoredConnectSecrets).toBe(true);
+        expect(JSON.stringify(parsedNested)).not.toMatch(/SECRET/);
+
+        expect(rememberable("http://127.0.0.1:11435/sse?format=ndjson;token=SECRET")).toBe(false);
+        expect(rememberable("http://127.0.0.1:11435/sse?format=ndjson;api_key=SECRET")).toBe(false);
+        expect(rememberEndpoint([], { url: "http://127.0.0.1:11435/sse?format=ndjson;token=SECRET", transport: "auto" })).toEqual([]);
+    });
+
+    it("gates unallowlisted query endpoints while allowing local Sonder loopback ports (F1)", () => {
+        // Exact local Observatory live URL auto-connects cleanly with zero pending prompts.
+        const liveUrl = new URL(
+            "http://127.0.0.1:5173/?connect=http://127.0.0.1:5174&connect=http://127.0.0.1:11441&connect=http://127.0.0.1:11437&connect=http://127.0.0.1:5175&fixture=0",
+        );
+        const liveParams = parseLaunchParams(liveUrl.searchParams);
+        expect(liveParams.autoConnect).toEqual([
+            "http://127.0.0.1:5174",
+            "http://127.0.0.1:11441",
+            "http://127.0.0.1:11437",
+            "http://127.0.0.1:5175",
+        ]);
+        expect(liveParams.pendingConnect).toEqual([]);
+        expect(liveParams.fixture).toBe(false);
+
+        // Remote hosts and arbitrary loopback ports are gated into pendingConnect.
+        const mixed = new URLSearchParams();
+        mixed.append("connect", "http://127.0.0.1:11435");
+        mixed.append("connect", "https://attacker.example/sse");
+        mixed.append("ws", "ws://127.0.0.1:9222/devtools");
+        mixed.append("connect", "http://127.0.0.1:6379/");
+        const mixedParams = parseLaunchParams(mixed);
+        expect(mixedParams.autoConnect).toEqual(["http://127.0.0.1:11435"]);
+        expect(mixedParams.pendingConnect).toEqual([
+            "https://attacker.example/sse",
+            "http://127.0.0.1:6379/",
+            "ws://127.0.0.1:9222/devtools",
+        ]);
     });
 });
 

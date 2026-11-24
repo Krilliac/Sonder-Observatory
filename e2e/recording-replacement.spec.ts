@@ -255,6 +255,7 @@ test("paused live appends retain UI time; Follow resumes before recording replac
     const producer = await startFakeLiveProducer({ role: "runtime", events, corsOrigins: [origin], pace: "timeline" });
     try {
         await page.goto(`./?fixture=0&connect=${encodeURIComponent(producer.urls.base)}`);
+        await page.locator("#confirm-connect-btn").click();
         const total = async () => Number(/\/(\d+) events/.exec(await page.locator("#cursor-label").innerText())?.[1] ?? 0);
         await expect.poll(total).toBeGreaterThanOrEqual(3);
         await scrubTo(page, 250);

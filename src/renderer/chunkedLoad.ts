@@ -14,7 +14,15 @@
 import { parseNdjson, type RejectedLine } from "../recording/ndjson";
 import { loadRecording, RECORDING_FORMAT, type LoadedRecording, type RecordingManifest } from "../recording/sobs";
 import type { ObservatoryEvent } from "../protocol/events";
-import { MAX_RECORDING_BYTES, MAX_RECORDING_LINE_CHARS, recordingTooLarge } from "../recording/limits";
+import { boundRejectedLine } from "../protocol/size";
+import {
+    MAX_RECORDING_BYTES,
+    MAX_RECORDING_EVENTS,
+    MAX_RECORDING_HEAP_BYTES,
+    MAX_RECORDING_LINE_CHARS,
+    recordingTooLarge,
+    type RecordingTruncation,
+} from "../recording/limits";
 
 export interface LoadProgress {
     bytesDone: number;
@@ -38,11 +46,15 @@ export interface ChunkedLoadOptions {
     now?: () => number;
     /** Streams only: total size limit in bytes. Default MAX_RECORDING_BYTES. */
     maxBytes?: number;
-    /** Streams only: longest line kept, in UTF-16 code units. Default MAX_RECORDING_LINE_CHARS. */
+    /** Longest line kept, in UTF-16 code units. Default MAX_RECORDING_LINE_CHARS. */
     maxLineChars?: number;
+    /** Maximum events retained before stopping cleanly with a partial result. Default MAX_RECORDING_EVENTS. */
+    maxEvents?: number;
+    /** Estimated JS heap byte ceiling before stopping cleanly with a partial result. Default MAX_RECORDING_HEAP_BYTES. */
+    maxHeapBytes?: number;
 }
 
-export { MAX_RECORDING_BYTES, MAX_RECORDING_LINE_CHARS };
+export { MAX_RECORDING_BYTES, MAX_RECORDING_EVENTS, MAX_RECORDING_HEAP_BYTES, MAX_RECORDING_LINE_CHARS, type RecordingTruncation };
 
 /** Below this size the plain synchronous loader is used. */
 export const CHUNKED_LOAD_THRESHOLD_CHARS = 2 * 1024 * 1024;
@@ -87,19 +99,48 @@ class SliceParser {
     readonly events: ObservatoryEvent[] = [];
     private readonly rejected: RejectedLine[] = [];
     private readonly records: { line: number; value: Record<string, unknown> }[] = [];
+    private readonly maxEvents: number;
+    private readonly maxHeapBytes: number;
+    private readonly maxLineChars: number;
+    private estimatedBytes = 0;
+    private truncated: RecordingTruncation | null = null;
     private lineOffset = 0;
+
+    constructor(options: { maxEvents: number; maxHeapBytes: number; maxLineChars: number }) {
+        this.maxEvents = options.maxEvents;
+        this.maxHeapBytes = options.maxHeapBytes;
+        this.maxLineChars = options.maxLineChars;
+    }
+
+    get isTruncated(): boolean {
+        return this.truncated !== null;
+    }
 
     /** `slice` must contain whole lines (it may omit the final newline only at end of input). */
     push(slice: string): void {
-        const parsed = parseNdjson(slice, { isRecord: isManifestRecord });
+        if (this.truncated !== null) {
+            return;
+        }
+        const parsed = parseNdjson(slice, {
+            isRecord: isManifestRecord,
+            maxLineChars: this.maxLineChars,
+            maxEvents: this.maxEvents,
+            maxHeapBytes: this.maxHeapBytes,
+            initialEvents: this.events.length,
+            initialBytes: this.estimatedBytes,
+        });
         for (const e of parsed.events) {
             this.events.push(e);
         }
+        this.estimatedBytes += parsed.estimatedBytes ?? 0;
         for (const r of parsed.rejected) {
             this.rejected.push(this.lineOffset === 0 ? r : { ...r, line: r.line + this.lineOffset });
         }
         for (const r of parsed.records) {
             this.records.push({ line: r.line + this.lineOffset, value: r.value });
+        }
+        if (parsed.truncated) {
+            this.truncated = parsed.truncated;
         }
         let newlines = 0;
         for (let i = slice.indexOf("\n"); i >= 0; i = slice.indexOf("\n", i + 1)) {
@@ -124,12 +165,23 @@ class SliceParser {
         const late: RejectedLine[] = [];
         for (const record of this.records) {
             if (record.line !== 1 || manifest !== null) {
-                late.push({ line: record.line, reason: "manifest record is only allowed on line 1", raw: JSON.stringify(record.value) });
+                late.push(
+                    boundRejectedLine({
+                        line: record.line,
+                        reason: "manifest record is only allowed on line 1",
+                        raw: JSON.stringify(record.value),
+                    }),
+                );
                 continue;
             }
             manifest = record.value as unknown as RecordingManifest;
         }
-        return { manifest, events: this.events, rejected: [...this.rejected, ...late] };
+        return {
+            manifest,
+            events: this.events,
+            rejected: [...this.rejected, ...late],
+            ...(this.truncated ? { truncated: this.truncated } : {}),
+        };
     }
 }
 
@@ -146,7 +198,7 @@ async function parseSlices(
     const budget = Math.max(1, options.sliceBudgetMs ?? 8);
     const total = text.length;
     let pos = 0;
-    while (pos < total) {
+    while (pos < total && !parser.isTruncated) {
         if (options.signal?.aborted) {
             throw abortError();
         }
@@ -160,6 +212,9 @@ async function parseSlices(
         const sliceLen = end - pos;
         pos = end;
         progress(pos);
+        if (parser.isTruncated) {
+            break;
+        }
         if (options.chunkChars === undefined) {
             const elapsed = Math.max(0.1, now() - started);
             const factor = Math.min(2, Math.max(0.5, budget / elapsed));
@@ -175,7 +230,11 @@ export async function loadRecordingChunked(text: string, options: ChunkedLoadOpt
     if (text.startsWith("PK")) {
         return loadRecording(text);
     }
-    const parser = new SliceParser();
+    const parser = new SliceParser({
+        maxEvents: options.maxEvents ?? MAX_RECORDING_EVENTS,
+        maxHeapBytes: options.maxHeapBytes ?? MAX_RECORDING_HEAP_BYTES,
+        maxLineChars: options.maxLineChars ?? MAX_RECORDING_LINE_CHARS,
+    });
     const state = { chunk: options.chunkChars ?? options.initialChunkChars ?? 256 * 1024 };
     await parseSlices(text, parser, options, state, (done) =>
         options.onProgress?.({ bytesDone: done, totalBytes: text.length, events: parser.events.length, rejected: parser.rejectedCount }),
@@ -196,11 +255,15 @@ export async function loadRecordingStream(
     const pause = options.yieldToEventLoop ?? yieldToEventLoop;
     const reader = stream.getReader();
     const decoder = new TextDecoder("utf-8");
-    const parser = new SliceParser();
-    const state = { chunk: options.chunkChars ?? options.initialChunkChars ?? 256 * 1024 };
-    const totalBytes = options.totalBytes ?? 0;
     const maxBytes = options.maxBytes ?? MAX_RECORDING_BYTES;
     const maxLine = options.maxLineChars ?? MAX_RECORDING_LINE_CHARS;
+    const parser = new SliceParser({
+        maxEvents: options.maxEvents ?? MAX_RECORDING_EVENTS,
+        maxHeapBytes: options.maxHeapBytes ?? MAX_RECORDING_HEAP_BYTES,
+        maxLineChars: maxLine,
+    });
+    const state = { chunk: options.chunkChars ?? options.initialChunkChars ?? 256 * 1024 };
+    const totalBytes = options.totalBytes ?? 0;
     const lineTooLong = `line exceeds the ${maxLine}-character limit; not parsed`;
     let bytesRead = 0;
     /** Pieces of the unterminated last line (no newline in any of them). */
@@ -291,6 +354,10 @@ export async function loadRecordingStream(
                 await parseSlices(text, parser, options, state, () =>
                     options.onProgress?.({ bytesDone: bytesRead, totalBytes, events: parser.events.length, rejected: parser.rejectedCount }),
                 );
+                if (parser.isTruncated) {
+                    await reader.cancel().catch(() => undefined);
+                    break;
+                }
             }
             if (done) {
                 break;

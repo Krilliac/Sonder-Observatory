@@ -2,6 +2,10 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+    MAX_ATTRIBUTE_ARRAY_LENGTH,
+    MAX_ATTRIBUTE_DEPTH,
+    MAX_ATTRIBUTE_NODES,
+    MAX_ATTRIBUTE_STRING_LENGTH,
     NULLABLE_ID_FIELDS,
     PRODUCER_OPTIONAL_FIELDS,
     PRODUCER_REQUIRED_FIELDS,
@@ -120,5 +124,26 @@ describe("protocol schema mirror", () => {
             delete copy[key];
             expect(validateEvent(copy).ok, `missing ${key}`).toBe(false);
         }
+    });
+
+    it("mirrors recursive attribute limits from the JSON Schema", () => {
+        const attrs = schema.properties.attributes as unknown as {
+            maxProperties: number;
+            propertyNames: { maxLength: number };
+            "x-limits": {
+                maxDepth: number;
+                maxNodes: number;
+                maxArrayLength: number;
+                maxStringLength: number;
+            };
+        };
+        expect(attrs["x-limits"]).toEqual({
+            maxDepth: MAX_ATTRIBUTE_DEPTH,
+            maxNodes: MAX_ATTRIBUTE_NODES,
+            maxArrayLength: MAX_ATTRIBUTE_ARRAY_LENGTH,
+            maxStringLength: MAX_ATTRIBUTE_STRING_LENGTH,
+        });
+        expect(attrs.maxProperties).toBe(MAX_ATTRIBUTE_NODES);
+        expect(attrs.propertyNames.maxLength).toBe(MAX_ATTRIBUTE_STRING_LENGTH);
     });
 });

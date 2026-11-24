@@ -61,7 +61,121 @@
     },
     "attributes": {
       "type": "object",
-      "additionalProperties": true
+      "maxProperties": 256,
+      "propertyNames": { "maxLength": 16384 },
+      "additionalProperties": { "$ref": "#/$defs/attributeDepth1" },
+      "x-limits": {
+        "maxDepth": 8,
+        "maxNodes": 256,
+        "maxArrayLength": 128,
+        "maxStringLength": 16384
+      }
+    }
+  },
+  "$defs": {
+    "attributeScalar": {
+      "oneOf": [
+        { "type": "string", "maxLength": 16384 },
+        { "type": "number" },
+        { "type": "boolean" },
+        { "type": "null" }
+      ]
+    },
+    "attributeDepth8": {
+      "oneOf": [
+        { "$ref": "#/$defs/attributeScalar" },
+        { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/attributeScalar" } },
+        {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": { "maxLength": 16384 },
+          "additionalProperties": { "$ref": "#/$defs/attributeScalar" }
+        }
+      ]
+    },
+    "attributeDepth7": {
+      "oneOf": [
+        { "$ref": "#/$defs/attributeScalar" },
+        { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/attributeDepth8" } },
+        {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": { "maxLength": 16384 },
+          "additionalProperties": { "$ref": "#/$defs/attributeDepth8" }
+        }
+      ]
+    },
+    "attributeDepth6": {
+      "oneOf": [
+        { "$ref": "#/$defs/attributeScalar" },
+        { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/attributeDepth7" } },
+        {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": { "maxLength": 16384 },
+          "additionalProperties": { "$ref": "#/$defs/attributeDepth7" }
+        }
+      ]
+    },
+    "attributeDepth5": {
+      "oneOf": [
+        { "$ref": "#/$defs/attributeScalar" },
+        { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/attributeDepth6" } },
+        {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": { "maxLength": 16384 },
+          "additionalProperties": { "$ref": "#/$defs/attributeDepth6" }
+        }
+      ]
+    },
+    "attributeDepth4": {
+      "oneOf": [
+        { "$ref": "#/$defs/attributeScalar" },
+        { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/attributeDepth5" } },
+        {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": { "maxLength": 16384 },
+          "additionalProperties": { "$ref": "#/$defs/attributeDepth5" }
+        }
+      ]
+    },
+    "attributeDepth3": {
+      "oneOf": [
+        { "$ref": "#/$defs/attributeScalar" },
+        { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/attributeDepth4" } },
+        {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": { "maxLength": 16384 },
+          "additionalProperties": { "$ref": "#/$defs/attributeDepth4" }
+        }
+      ]
+    },
+    "attributeDepth2": {
+      "oneOf": [
+        { "$ref": "#/$defs/attributeScalar" },
+        { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/attributeDepth3" } },
+        {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": { "maxLength": 16384 },
+          "additionalProperties": { "$ref": "#/$defs/attributeDepth3" }
+        }
+      ]
+    },
+    "attributeDepth1": {
+      "oneOf": [
+        { "$ref": "#/$defs/attributeScalar" },
+        { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/attributeDepth2" } },
+        {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": { "maxLength": 16384 },
+          "additionalProperties": { "$ref": "#/$defs/attributeDepth2" }
+        }
+      ]
     }
   },
   "additionalProperties": true

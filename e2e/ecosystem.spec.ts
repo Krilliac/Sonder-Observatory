@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type APIRequestContext, type Locator, type Page, type TestInfo } from "@playwright/test";
-import { shot, showView } from "./helpers";
+import { confirmQueryConnectsIfPrompted, shot, showView } from "./helpers";
 
 /**
  * Cross-repo ecosystem proof (docs/integration/ecosystem-e2e.md): a real
@@ -153,6 +153,7 @@ test.describe("Sonder ecosystem (live Runtime + Sonder-Inference)", () => {
 
         // 1-2. Both producers through discovery plus SSE.
         await page.goto(`./?fixture=0&connect=${encodeURIComponent(RUNTIME)}&connect=${encodeURIComponent(INFERENCE)}`);
+        await confirmQueryConnectsIfPrompted(page);
         await expectLive(page, "sonder-runtime", RUNTIME);
         await expectLive(page, "sonder-inference", INFERENCE);
         await expect(card(page, "sonder-runtime")).toContainText("runtime");
@@ -304,6 +305,7 @@ test.describe("Sonder ecosystem (live Runtime + Sonder-Inference)", () => {
     test("negative control: a Runtime without the viewer's origin fails with CORS advice", async ({ page }, testInfo) => {
         test.skip(NO_ORIGIN_RUNTIME === "", "E2E_RUNTIME_NO_ORIGIN_URL is not set");
         await page.goto(`./?fixture=0&connect=${encodeURIComponent(NO_ORIGIN_RUNTIME)}`);
+        await confirmQueryConnectsIfPrompted(page);
         const failed = page.locator("[data-testid=producer-card]").first();
         await expect(failed.locator("[data-testid=producer-state]")).toHaveText("failed", { timeout: LIVE_TIMEOUT });
         await expect(failed).toContainText("SONDER_OBSERVATORY_ORIGINS");

@@ -23,6 +23,7 @@ interface Call {
     url: string;
     headers: Record<string, string>;
     redirect: RequestRedirect | undefined;
+    credentials: RequestCredentials | undefined;
 }
 
 function event(instance: string, name: string, role: string, seq: number, extra: Partial<ObservatoryEvent> = {}): ObservatoryEvent {
@@ -84,7 +85,7 @@ function fakeFetch(routes: Record<string, Route>) {
     const calls: Call[] = [];
     const fetch = async (input: string, init?: RequestInit): Promise<Response> => {
         const headers = { ...(init?.headers as Record<string, string> | undefined) };
-        const call = { url: input, headers, redirect: init?.redirect };
+        const call = { url: input, headers, redirect: init?.redirect, credentials: init?.credentials };
         calls.push(call);
         const route = routes[input];
         if (!route) {
@@ -210,6 +211,8 @@ describe("LiveConnectionManager", () => {
         const healthCall = calls.find((c) => c.url.endsWith("/v1/sonder/health"))!;
         expect(healthCall.headers.Authorization).toBe("Bearer secret-token");
         expect(healthCall.redirect).toBe("manual");
+        expect(healthCall.credentials).toBe("omit");
+        expect(calls.every((c) => c.credentials === "omit")).toBe(true);
     });
 
     it("never fetches a health link on another origin", async () => {
@@ -571,6 +574,7 @@ describe("probeProducer", () => {
         expect(live).toMatchObject({ ok: true, streamUrl: `${INF}/events/sse`, error: null });
         expect(aborted).toBe(true);
         expect(calls[0]!.headers).toMatchObject({ Accept: "text/event-stream", Authorization: "Bearer tok" });
+        expect(calls[0]!.credentials).toBe("omit");
         expect(await probeProducer(`${INF}/missing`, { fetch })).toMatchObject({ ok: false, corsSuspected: false });
         expect((await probeProducer(`${INF}/missing`, { fetch })).error).toMatch(/HTTP 404/);
         const dead = await probeProducer("http://127.0.0.1:9/sse", { fetch });

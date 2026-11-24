@@ -11,7 +11,7 @@
  * relies on in-stream `backend.registered` events).
  */
 import { readBoundedText } from "./discovery";
-import { NO_REDIRECTS, isRedirect, type FetchLike } from "./transports";
+import { NO_CREDENTIALS, NO_REDIRECTS, isRedirect, type FetchLike } from "./transports";
 
 export interface HealthBackend {
     name: string;
@@ -83,7 +83,13 @@ export async function fetchProducerHealth(
         headers.Authorization = `Bearer ${options.token}`;
     }
     try {
-        const response = await fetchImpl(url, { headers, signal: controller.signal, cache: "no-store", redirect: NO_REDIRECTS });
+        const response = await fetchImpl(url, {
+            headers,
+            signal: controller.signal,
+            cache: "no-store",
+            credentials: NO_CREDENTIALS,
+            redirect: NO_REDIRECTS,
+        });
         // Health answers 503 while starting or draining but still describes the backends.
         if (isRedirect(response) || (!response.ok && response.status !== 503)) {
             await response.body?.cancel().catch(() => undefined);

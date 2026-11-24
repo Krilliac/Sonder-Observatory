@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { formatIssues, isValidDateTime, validateEvent } from "../src/protocol/validate";
+import {
+    MAX_ATTRIBUTE_ARRAY_LENGTH,
+    MAX_ATTRIBUTE_DEPTH,
+    MAX_ATTRIBUTE_NODES,
+    MAX_ATTRIBUTE_STRING_LENGTH,
+} from "../src/protocol/events";
+import { formatIssues, isLimitViolation, isValidDateTime, validateEvent } from "../src/protocol/validate";
 import { makeEvent } from "./helpers";
 
 function issuesOf(value: unknown): string[] {
@@ -95,7 +101,61 @@ describe("validateEvent", () => {
         expect(r.ok).toBe(false);
         if (!r.ok) {
             expect(formatIssues(r.issues)).toBe("sequence: must be an integer >= 0");
+            expect(isLimitViolation(r.issues)).toBe(false);
         }
+    });
+
+    it("enforces recursive bounds on attributes depth, node count, array length, and string length", () => {
+        // Depth 8 container holding a scalar is allowed; depth 9 container is rejected.
+        const nest = (levels: number): Record<string, unknown> => {
+            let cur: Record<string, unknown> = { leaf: "ok" };
+            for (let i = 0; i < levels; i += 1) {
+                cur = { n: cur };
+            }
+            return cur;
+        };
+        expect(validateEvent(makeEvent({ attributes: nest(MAX_ATTRIBUTE_DEPTH) })).ok).toBe(true);
+        const tooDeep = validateEvent(makeEvent({ attributes: nest(MAX_ATTRIBUTE_DEPTH + 1) }));
+        expect(tooDeep.ok).toBe(false);
+        if (!tooDeep.ok) {
+            expect(formatIssues(tooDeep.issues)).toMatch(/maximum nesting depth/);
+            expect(isLimitViolation(tooDeep.issues)).toBe(true);
+        }
+
+        // Array length 128 allowed; 129 rejected.
+        expect(validateEvent(makeEvent({ attributes: { arr: Array.from({ length: MAX_ATTRIBUTE_ARRAY_LENGTH }, (_, i) => i) } })).ok).toBe(true);
+        const tooWideArr = validateEvent(makeEvent({ attributes: { arr: Array.from({ length: MAX_ATTRIBUTE_ARRAY_LENGTH + 1 }, (_, i) => i) } }));
+        expect(tooWideArr.ok).toBe(false);
+        if (!tooWideArr.ok) {
+            expect(formatIssues(tooWideArr.issues)).toMatch(/array exceeds maximum length/);
+            expect(isLimitViolation(tooWideArr.issues)).toBe(true);
+        }
+
+        // 256 total nodes allowed; 257 rejected.
+        const okNodes: Record<string, number> = {};
+        for (let i = 0; i < MAX_ATTRIBUTE_NODES; i += 1) {
+            okNodes[`k${i}`] = i;
+        }
+        expect(validateEvent(makeEvent({ attributes: okNodes })).ok).toBe(true);
+        const tooManyNodes = validateEvent(makeEvent({ attributes: { ...okNodes, extra: 1 } }));
+        expect(tooManyNodes.ok).toBe(false);
+        if (!tooManyNodes.ok) {
+            expect(formatIssues(tooManyNodes.issues)).toMatch(/maximum of 256 attribute nodes/);
+            expect(isLimitViolation(tooManyNodes.issues)).toBe(true);
+        }
+
+        // String length 16 KiB allowed; 16 KiB + 1 rejected (values, keys, and top-level IDs).
+        expect(validateEvent(makeEvent({ attributes: { s: "a".repeat(MAX_ATTRIBUTE_STRING_LENGTH) } })).ok).toBe(true);
+        const tooLongVal = validateEvent(makeEvent({ attributes: { s: "a".repeat(MAX_ATTRIBUTE_STRING_LENGTH + 1) } }));
+        expect(tooLongVal.ok).toBe(false);
+        if (!tooLongVal.ok) {
+            expect(formatIssues(tooLongVal.issues)).toMatch(/string exceeds maximum length/);
+            expect(isLimitViolation(tooLongVal.issues)).toBe(true);
+        }
+        const tooLongKey = validateEvent(makeEvent({ attributes: { ["k".repeat(MAX_ATTRIBUTE_STRING_LENGTH + 1)]: 1 } }));
+        expect(tooLongKey.ok).toBe(false);
+        const tooLongEventId = validateEvent(makeEvent({ event_id: "e".repeat(MAX_ATTRIBUTE_STRING_LENGTH + 1) }));
+        expect(tooLongEventId.ok).toBe(false);
     });
 });
 

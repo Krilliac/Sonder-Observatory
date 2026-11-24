@@ -2,23 +2,35 @@
  * Renderer URL parameters (contract section 8.2):
  *
  * - `?connect=<url>` (repeatable) adds a live producer; `?ws=<url>` is the
- *   legacy alias and is added after the connect URLs;
+ *   legacy alias and is added after the connect URLs. Only explicitly
+ *   allowlisted local Sonder loopback endpoints auto-connect on load; all
+ *   other query-supplied endpoints require explicit user confirmation;
  * - `?fixture=0` starts without the synthetic fixture;
  * - `?view=overview|events|3d|diagnostics|agents|compare` picks the tab;
  * - `?theme=light|dark` overrides the theme for this load.
  *
- * Tokens never travel in URLs: `token` and `access_token` parameters are
- * ignored, reported as a visible warning, and stripped from the address bar.
- * The same applies inside a `connect`/`ws` value: credentials
- * (`user:pass@`) and token parameters of the producer URL are removed before
- * the URL is connected, shown or put back in the address bar.
+ * Tokens never travel in URLs: `token`, `access_token` and `api_key`
+ * parameters (delimited by either `&` or `;`) are ignored, reported as a
+ * visible warning, and stripped from the address bar. The same applies inside
+ * a `connect`/`ws` value: credentials (`user:pass@`) and token parameters of
+ * the producer URL are removed before the URL is connected, shown or put back
+ * in the address bar.
  */
-import { SECRET_QUERY_PARAMS } from "../ingest/live/endpoint";
+import {
+    SECRET_QUERY_PARAMS,
+    findSecretQueryParams,
+    isAutoConnectAllowedUrl,
+    stripSecretQueryParams,
+} from "../ingest/live/endpoint";
 import { parseTheme, type ThemeName } from "./theme";
 
 export interface LaunchParams {
-    /** Producer URLs to connect, with any credentials or token parameters removed. */
+    /** Producer URLs from query parameters, with any credentials or token parameters removed. */
     connect: string[];
+    /** Subset of `connect` allowed to auto-connect on load (allowlisted local Sonder loopback ports). */
+    autoConnect: string[];
+    /** Subset of `connect` gated behind explicit user confirmation before connecting. */
+    pendingConnect: string[];
     fixture: boolean;
     view: string | null;
     theme: ThemeName | null;
@@ -30,13 +42,32 @@ export interface LaunchParams {
 
 const SECRET_NAMES: readonly string[] = SECRET_QUERY_PARAMS;
 /** Fallback for values that do not parse as URLs. */
-const SECRET_PARAM_TEXT = new RegExp(`([?&;])(?:${SECRET_QUERY_PARAMS.join("|")})=[^&#]*`, "gi");
+const SECRET_PARAM_TEXT = new RegExp(`([?&;])(?:${SECRET_QUERY_PARAMS.join("|")})=[^&#;]*`, "gi");
 const USERINFO_TEXT = /^([a-z][a-z0-9+.-]*:\/\/)[^/?#@]*@/i;
 
 /**
- * `url` without userinfo (`user:pass@`) and without token/access_token query
- * parameters (any case), for display, storage-free echoes and the address
- * bar. Everything else is kept as written. Never logs the value.
+ * Splits query-supplied connect URLs into allowlisted local Sonder loopback
+ * endpoints (safe to auto-connect) vs endpoints requiring explicit user
+ * confirmation before initiating any network connection.
+ */
+export function partitionConnectUrls(urls: readonly string[]): { autoConnect: string[]; pendingConnect: string[] } {
+    const autoConnect: string[] = [];
+    const pendingConnect: string[] = [];
+    for (const url of urls) {
+        if (isAutoConnectAllowedUrl(url)) {
+            autoConnect.push(url);
+        } else {
+            pendingConnect.push(url);
+        }
+    }
+    return { autoConnect, pendingConnect };
+}
+
+/**
+ * `url` without userinfo (`user:pass@`) and without token/access_token/api_key
+ * query parameters (any case, `&` or `;` separated), for display, storage-free
+ * echoes and the address bar. Everything else is kept as written. Never logs
+ * the value.
  */
 export function redactUrlSecrets(url: string): string {
     let parsed: URL | null;
@@ -46,12 +77,21 @@ export function redactUrlSecrets(url: string): string {
         parsed = null;
     }
     if (!parsed) {
-        return url.replace(USERINFO_TEXT, "$1").replace(SECRET_PARAM_TEXT, "$1").replace(/([?&;])[&;]+/g, "$1").replace(/[?&;]+(#|$)/, "$1");
+        return url
+            .replace(USERINFO_TEXT, "$1")
+            .replace(SECRET_PARAM_TEXT, "$1")
+            .replace(/([?&;])[&;]+/g, "$1")
+            .replace(/[?&;]+(#|$)/, "$1");
     }
     let changed = false;
     if (parsed.username !== "" || parsed.password !== "") {
         parsed.username = "";
         parsed.password = "";
+        changed = true;
+    }
+    const stripped = stripSecretQueryParams(parsed.search);
+    if (stripped.changed) {
+        parsed.search = stripped.search;
         changed = true;
     }
     for (const name of [...parsed.searchParams.keys()]) {
@@ -66,10 +106,30 @@ export function redactUrlSecrets(url: string): string {
 export function parseLaunchParams(params: URLSearchParams): LaunchParams {
     const raw = [...params.getAll("connect"), ...params.getAll("ws")].map((u) => u.trim()).filter((u) => u !== "");
     const connect = raw.map(redactUrlSecrets);
-    const ignoredSecrets = SECRET_QUERY_PARAMS.filter((name) => params.has(name));
+    const uniqueConnect = [...new Set(connect)];
+    const { autoConnect, pendingConnect } = partitionConnectUrls(uniqueConnect);
+    const secretSet = new Set<string>();
+    for (const [key, value] of params.entries()) {
+        const lower = key.toLowerCase();
+        if (SECRET_NAMES.includes(lower)) {
+            secretSet.add(lower);
+            continue;
+        }
+        if (lower !== "connect" && lower !== "ws" && value.includes(";")) {
+            // Semicolon-separated secrets hidden inside another top-level parameter value.
+            for (const found of findSecretQueryParams(value.slice(value.indexOf(";") + 1))) {
+                secretSet.add(found.toLowerCase());
+            }
+        }
+    }
+    const ignoredSecrets = SECRET_QUERY_PARAMS.filter((name) => secretSet.has(name));
+    const fixtureValue = params.get("fixture");
+    const fixtureBase = fixtureValue === null ? null : fixtureValue.split(";")[0];
     return {
-        connect: [...new Set(connect)],
-        fixture: params.get("fixture") !== "0" && connect.length === 0,
+        connect: uniqueConnect,
+        autoConnect,
+        pendingConnect,
+        fixture: fixtureBase !== "0" && uniqueConnect.length === 0,
         view: params.get("view"),
         theme: parseTheme(params.get("theme")),
         ignoredSecrets,
@@ -93,8 +153,8 @@ export function secretParamWarning(ignored: readonly string[], inConnectUrl = fa
 }
 
 /**
- * The page URL without token parameters, or null when nothing needs
- * removing. The value is never returned or logged.
+ * The page URL without token parameters (both `&` and `;` separated), or null
+ * when nothing needs removing. The value is never returned or logged.
  */
 export function urlWithoutSecrets(href: string): string | null {
     let url: URL;
@@ -104,8 +164,13 @@ export function urlWithoutSecrets(href: string): string | null {
         return null;
     }
     let changed = false;
-    for (const name of SECRET_QUERY_PARAMS) {
-        if (url.searchParams.has(name)) {
+    const stripped = stripSecretQueryParams(url.search);
+    if (stripped.changed) {
+        url.search = stripped.search;
+        changed = true;
+    }
+    for (const name of [...url.searchParams.keys()]) {
+        if (SECRET_NAMES.includes(name.toLowerCase())) {
             url.searchParams.delete(name);
             changed = true;
         }

@@ -81,15 +81,30 @@ describe("live SessionStore retention", () => {
         expect(store.retentionNotice).toBeNull();
     });
 
-    it("caps kept rejected lines for a live session but counts them all", () => {
+    it("caps kept rejected lines for a live session and bounds raw previews", () => {
         const store = new SessionStore({ maxLiveEvents: 10 });
         store.reset("live", "u");
-        const lines: RejectedLine[] = Array.from({ length: 5000 }, (_, i) => ({ line: i + 1, reason: "bad", raw: "" }));
+        const bigRaw = "x".repeat(50_000);
+        const lines: RejectedLine[] = Array.from({ length: 5000 }, (_, i) => ({ line: i + 1, reason: "bad", raw: i === 0 ? bigRaw : "" }));
         store.addRejected(lines);
         store.addRejected(lines);
         expect(store.rejected.length).toBeLessThanOrEqual(1000);
         expect(store.rejectedCount).toBe(10_000);
         expect(store.rejected[0]!.line).toBe(1);
+        expect(store.rejected[0]!.raw.length).toBeLessThanOrEqual(256);
+    });
+
+    it("evicts oldest live events when maxLiveBytes is exceeded even under maxLiveEvents", () => {
+        const store = new SessionStore({ maxLiveEvents: 1000, maxLiveBytes: 20_000 });
+        store.reset("live", "http://127.0.0.1:11437/events");
+        for (let i = 0; i < 15; i += 1) {
+            store.append([ev(i, { attributes: { payload: "p".repeat(1500) } })]);
+        }
+        expect(store.retainedBytes).toBeLessThanOrEqual(20_000);
+        expect(store.events.length).toBeLessThan(15);
+        expect(store.droppedByRetention).toBe(15 - store.events.length);
+        expect(store.events.at(-1)!.event_id).toBe("e14");
+        expect(store.retentionNotice).toContain(`${store.droppedByRetention} older live event(s) dropped`);
     });
 });
 

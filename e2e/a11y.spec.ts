@@ -133,6 +133,9 @@ for (const theme of ["dark", "light"] as const) {
 
             test("live, failed and disconnected cards and a probe result", async ({ page }, testInfo) => {
                 await page.goto(`./?fixture=0&theme=${theme}&connect=${encodeURIComponent(live.urls.base)}&connect=${encodeURIComponent(failing.urls.base)}`);
+                await expect(page.locator("#connect-confirm")).toBeVisible();
+                await scan(page, testInfo, `connect-confirm-${theme}`);
+                await page.locator("#confirm-connect-btn").click();
                 const cards = page.locator("[data-testid=producer-card]");
                 await expect(cards.locator("[data-testid=producer-state]", { hasText: "live" })).toHaveCount(1);
                 await expect(cards.locator("[data-testid=producer-state]", { hasText: "failed" })).toHaveCount(1);

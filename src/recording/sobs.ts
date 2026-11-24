@@ -13,7 +13,14 @@
  * invented.
  */
 import type { ObservatoryEvent } from "../protocol/events";
+import { boundRejectedLine } from "../protocol/size";
 import { totalDroppedEvents } from "../query/attributes";
+import {
+    MAX_RECORDING_EVENTS,
+    MAX_RECORDING_HEAP_BYTES,
+    MAX_RECORDING_LINE_CHARS,
+    type RecordingTruncation,
+} from "./limits";
 import { parseNdjson, toNdjson, type RejectedLine } from "./ndjson";
 
 export const RECORDING_FORMAT = "sonder.observatory.recording/1";
@@ -48,6 +55,17 @@ export interface LoadedRecording {
     manifest: RecordingManifest | null;
     events: ObservatoryEvent[];
     rejected: RejectedLine[];
+    /** Set when loading stopped early to stay within the recording event/heap budget. */
+    truncated?: RecordingTruncation;
+}
+
+export interface LoadRecordingOptions {
+    /** Most events retained from the recording. Default MAX_RECORDING_EVENTS. */
+    maxEvents?: number;
+    /** Estimated JS heap byte budget for the recording. Default MAX_RECORDING_HEAP_BYTES. */
+    maxHeapBytes?: number;
+    /** Longest single line parsed (UTF-16 code units). Default MAX_RECORDING_LINE_CHARS. */
+    maxLineChars?: number;
 }
 
 export function isSyntheticProducer(producer: ObservatoryEvent["producer"]): boolean {
@@ -133,9 +151,11 @@ function isManifestRecord(value: Record<string, unknown>): boolean {
 }
 
 /**
- * Loads a `.sobs` recording or a bare NDJSON/JSONL event log (no manifest).
+ * Loads a `.sobs` recording or a bare NDJSON/JSONL event log (no manifest),
+ * stopping cleanly with `truncated` before exceeding event-count or heap
+ * memory budgets.
  */
-export function loadRecording(text: string): LoadedRecording {
+export function loadRecording(text: string, options: LoadRecordingOptions = {}): LoadedRecording {
     if (text.startsWith("PK")) {
         return {
             manifest: null,
@@ -149,19 +169,31 @@ export function loadRecording(text: string): LoadedRecording {
             ],
         };
     }
-    const parsed = parseNdjson(text, { isRecord: isManifestRecord });
+    const parsed = parseNdjson(text, {
+        isRecord: isManifestRecord,
+        maxEvents: options.maxEvents ?? MAX_RECORDING_EVENTS,
+        maxHeapBytes: options.maxHeapBytes ?? MAX_RECORDING_HEAP_BYTES,
+        maxLineChars: options.maxLineChars ?? MAX_RECORDING_LINE_CHARS,
+    });
     const rejected = [...parsed.rejected];
     let manifest: RecordingManifest | null = null;
     for (const record of parsed.records) {
         if (record.line !== 1 || manifest !== null) {
-            rejected.push({
-                line: record.line,
-                reason: "manifest record is only allowed on line 1",
-                raw: JSON.stringify(record.value),
-            });
+            rejected.push(
+                boundRejectedLine({
+                    line: record.line,
+                    reason: "manifest record is only allowed on line 1",
+                    raw: JSON.stringify(record.value),
+                }),
+            );
             continue;
         }
         manifest = record.value as unknown as RecordingManifest;
     }
-    return { manifest, events: parsed.events, rejected };
+    return {
+        manifest,
+        events: parsed.events,
+        rejected,
+        ...(parsed.truncated ? { truncated: parsed.truncated } : {}),
+    };
 }
