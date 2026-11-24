@@ -1,71 +1,37 @@
 import fixtureText from "../../fixtures/synthetic-session.ndjson?raw";
-import type { ComparePanel } from "../compare/panel";
-import type { Inference3DPanel } from "../inference3d/inference3dPanel";
-import { FindingsController, renderFindingsPanel, runDiagnostics } from "../diagnostics";
 import { renderInspector } from "../inspector/inspector";
-import { LiveConnectionManager, type ProducerConnection, type ProducerEndpointInput } from "../ingest/live/manager";
-import { isLoopbackHost, type TransportPreference } from "../ingest/live/endpoint";
-import type { HealthBackend } from "../ingest/live/health";
+import type { ProducerEndpointInput } from "../ingest/live/manager";
 import type { ObservatoryEvent } from "../protocol/events";
-import { describeRange, isFullRange, type ExportRange } from "../export/filter";
-import { EXPORT_FORMATS } from "../export/save";
-import { EVENT_CLASSES, isErrorEvent, type EventClass } from "../query/classify";
+import { isErrorEvent, type EventClass } from "../query/classify";
 import type { Metrics } from "../query/metrics";
-import { gpuMemoryAt } from "../query/gpuMemoryIndex";
 import { metricsAt } from "../query/metricsIndex";
 import { stripSeries } from "../query/series";
-import { loadRecording, RECORDING_EXTENSION } from "../recording/sobs";
 import { ReplayCursor } from "../replay/controller";
 import { streamKey } from "../replay/order";
 import { SessionStore } from "../replay/session";
-import { TopologyPanel } from "../topology";
-import { brandMark } from "./brand";
-import { CHUNKED_LOAD_THRESHOLD_CHARS, loadRecordingChunked, loadRecordingStream, type ChunkedLoadOptions } from "./chunkedLoad";
+import { bindAppControls, buildViewRange, executeConfirmedExport, formatViewRangeText } from "./appControls";
+import { buildAppLayout, FIXTURE_LABEL, persistSidebarOpen, readInitialSidebarOpen, VIEWS, type ViewId } from "./appLayout";
 import { ConnectionPanel } from "./connectionPanel";
-import { byId, h } from "./dom";
-import { mountDropZone, RECORDING_FILE_EXTENSIONS } from "./dropZone";
+import { byId } from "./dom";
 import { EventTable } from "./eventTable";
 import { ExportDialog, type ExportChoice } from "./exportDialog";
-import { fmtBytes, fmtMs, fmtPct, fmtRelNs } from "./format";
-import { renderGpuCards } from "./gpuCards";
+import { fmtRelNs } from "./format";
+import { LiveController } from "./liveController";
 import { renderMetricStrip, stripItems } from "./metricStrip";
-import { errorSearchStart, findMatching, producersInSession, syntheticBannerText, timelineSummaryText } from "./navigation";
+import { errorSearchStart, findMatching, timelineSummaryText } from "./navigation";
 import { Onboarding } from "./onboarding";
-import type { ObservatoryPanel, PanelContext } from "./panels";
-import { parseLaunchParams, redactUrlSecrets, secretParamWarning, urlWithoutSecrets } from "./params";
-import { producerCardModel, ProducersPanel } from "./producersPanel";
-import { promptCacheCardModel, speculationCardModel, type ReuseCardModel } from "./reuseCards";
-import { readShortcutsEnabled, ShortcutsDialog, shortcutAction, writeShortcutsEnabled, type ShortcutAction } from "./shortcuts";
+import { renderOverviewCards } from "./overviewCards";
+import type { ObservatoryPanel } from "./panels";
+import { parseLaunchParams, secretParamWarning, urlWithoutSecrets } from "./params";
+import { ProducersPanel } from "./producersPanel";
+import { RecordingLoader, type LoadedRecording } from "./recordingLoader";
+import { readShortcutsEnabled, ShortcutsDialog, writeShortcutsEnabled } from "./shortcuts";
 import { mountSplitter } from "./splitter";
+import { renderHeaderStatus, renderWarningsRegion } from "./statusChrome";
 import { safeStorage, type ThemeController } from "./theme";
 import { getEventIndex, TRACKS } from "./timelineModel";
 import { TimelineView } from "./timelineView";
-import { tokenCardModel } from "./tokenCard";
-
-const SPEEDS = [0.25, 0.5, 1, 2, 4, 8];
-/** Main views, shown as tabs; the inspector is docked beside every view. */
-const VIEWS = [
-    { id: "overview", title: "Overview" },
-    { id: "events", title: "Events" },
-    { id: "3d", title: "3D Inference" },
-    { id: "diagnostics", title: "Diagnostics" },
-    { id: "agents", title: "Agents" },
-    { id: "compare", title: "Compare" },
-] as const;
-type ViewId = (typeof VIEWS)[number]["id"];
-
-const SIDEBAR_STORAGE_KEY = "sonder-observatory.sidebar";
-/** Below this width the layout stacks and the sidebar starts collapsed. */
-const NARROW_QUERY = "(max-width: 900px)";
-const FIXTURE_LABEL = "synthetic fixture (fixtures/synthetic-session.ndjson)";
-
-type LoadedRecording = ReturnType<typeof loadRecording>;
-
-interface RememberedInput {
-    url: string;
-    transport: TransportPreference;
-    label?: string;
-}
+import { ViewTabsController } from "./viewTabs";
 
 export interface AppOptions {
     theme?: ThemeController;
@@ -95,13 +61,12 @@ export class ObservatoryApp {
     private cursorSource: readonly ObservatoryEvent[] = this.cursor.events;
     private readonly storage: Storage | null;
     private readonly theme: ThemeController | null;
-    /** Live producers (src/ingest/live/manager.ts). */
-    private readonly manager: LiveConnectionManager;
-    private connections: ProducerConnection[] = [];
-    /** Producers the user disconnected: kept as cards with their final counters. */
-    private readonly closed = new Map<string, ProducerConnection>();
-    /** URL/transport/label per connection id (never the token), for Reconnect and Edit. */
-    private readonly inputs = new Map<string, RememberedInput>();
+    /** Live producers (src/ingest/live/manager.ts) and query-connect confirmation. */
+    private readonly live: LiveController;
+    /** Recording/fixture loading, chunked progress, cancel, and drop-zone wiring. */
+    private readonly loader: RecordingLoader;
+    /** Secondary view tabs (Diagnostics, Agents, Compare, 3D Inference) and extra panels. */
+    private readonly viewTabs: ViewTabsController;
     /** Messages shown in #warnings until the next load or connect. */
     private notices: string[] = [];
     /**
@@ -110,9 +75,6 @@ export class ObservatoryApp {
      * launch clear `notices`, and the warning must still be seen.
      */
     private readonly launchNotices: string[] = [];
-    /** Query-supplied ?connect= / ?ws= URLs outside the local Sonder allowlist awaiting confirmation. */
-    private pendingQueryConnects: string[] = [];
-    private pendingConnectStamp = "";
     /** Result of the last error jump ("no later error"), cleared by the next selection. */
     private navNotice: string | null = null;
     private follow = true;
@@ -127,15 +89,9 @@ export class ObservatoryApp {
     private view: ViewId = "overview";
     /** Event ids highlighted in timeline/table (diagnostics or topology evidence). */
     private highlighted = new Set<string>();
-    private readonly diag: FindingsController;
-    private findingsDirty = true;
-    private findingsVersion = 0;
-    private diagStamp = "";
     private inspectorStamp = "";
     private warningsText = "";
     private summaryText = "";
-    private readonly topology: TopologyPanel;
-    private topologyDirty = true;
     private timelineView: TimelineView | null = null;
     private eventTable: EventTable | null = null;
     private connectionPanel: ConnectionPanel | null = null;
@@ -143,41 +99,55 @@ export class ObservatoryApp {
     private onboarding: Onboarding | null = null;
     private shortcuts: ShortcutsDialog | null = null;
     private exportDialog: ExportDialog | null = null;
-    /**
-     * Session comparison tab (src/compare); the current session feeds it,
-     * throttled while live. Loaded on first use (it and src/export are split
-     * out of the main bundle).
-     */
-    private compare: ComparePanel | null = null;
-    private compareLoading = false;
-    /** 3D Inference tab (src/inference3d, with three.js): its own lazy chunk, loaded on first use. */
-    private inference3d: Inference3DPanel | null = null;
-    private inference3dLoading = false;
     private stripStamp = "";
     /** Last export result or failure, shown in #warnings until the next load. */
     private exportNotice: string | null = null;
-    /** Bumped per load so a superseded chunked load is discarded. */
-    private loadToken = 0;
-    /** Aborts the running chunked/streamed parse when a newer load or connect wins. */
-    private loadAbort: AbortController | null = null;
-    private loading: string | null = null;
 
     constructor(root: HTMLElement, panels: readonly ObservatoryPanel[] = [], options: AppOptions = {}) {
         this.root = root;
         this.panels = [...panels];
         this.theme = options.theme ?? null;
         this.storage = options.storage !== undefined ? options.storage : safeStorage();
-        this.manager = new LiveConnectionManager(this.store, {
+        this.live = new LiveController(this.store, {
             onAppend: () => {
                 this.rebuildCursor();
                 this.queueRender();
             },
+            onBeforeAddProducer: () => {
+                this.loader.supersede();
+                this.notices = [];
+                if (this.store.source !== "live") {
+                    this.selectedId = null;
+                    this.setFollow(true);
+                }
+            },
+            onEditFill: (input, focus) => {
+                this.setSidebar(true);
+                this.connectionPanel?.fill(input, focus);
+            },
+            onRender: () => this.render(),
+            onQueueRender: () => this.queueRender(),
         });
-        this.diag = new FindingsController({
-            highlightEvents: (ids) => {
+        this.loader = new RecordingLoader({
+            afterLiveStopped: (load) => this.live.afterLiveStopped(load),
+            onLoaded: (loaded, source, label) => this.applyLoaded(loaded, source, label),
+            onNotice: (message) => {
+                this.notices = [message];
+                this.render();
+            },
+            onRender: () => this.render(),
+        });
+        this.viewTabs = new ViewTabsController(this.panels, {
+            getStore: () => this.store,
+            getCursor: () => this.cursor,
+            getSelectedId: () => this.selectedId,
+            isFollow: () => this.follow,
+            describeSource: () => this.describeSource(),
+            healthByInstance: () => this.live.healthByInstance(),
+            setHighlighted: (ids) => {
                 this.highlighted = new Set(ids);
             },
-            selectEvent: (id) => {
+            selectEventById: (id) => {
                 const event = this.store.events.find((e) => e.event_id === id);
                 if (event) {
                     this.setFollow(false);
@@ -185,14 +155,9 @@ export class ObservatoryApp {
                     this.selectedId = event.event_id;
                 }
             },
-        });
-        this.topology = new TopologyPanel({
-            onSelectEvent: (event) => this.seekTo(event),
-            onSelectionChange: (_selection, evidenceEventIds) => {
-                this.highlighted = new Set(evidenceEventIds);
-                this.render();
-            },
-            relativeTime: (event) => fmtRelNs(this.cursor.relativeTime(event)),
+            selectEvent: (event) => this.select(event),
+            seekTo: (event) => this.seekTo(event),
+            onRender: () => this.render(),
         });
     }
 
@@ -206,26 +171,34 @@ export class ObservatoryApp {
                 window.history.replaceState(window.history.state, "", clean);
             }
         }
-        this.connectionPanel = new ConnectionPanel(this.storage, { onConnect: (input) => this.addProducer(input) }, params.connect[0] ?? "");
+        this.connectionPanel = new ConnectionPanel(this.storage, { onConnect: (input) => this.live.addProducer(input) }, params.connect[0] ?? "");
         this.producersPanel = new ProducersPanel({
-            onDisconnect: (id) => void this.disconnectProducer(id),
-            onReconnect: (id) => this.reconnectProducer(id),
-            onEdit: (id) => this.editProducer(id),
-            onRemove: (id) => void this.removeProducer(id),
+            onDisconnect: (id) => void this.live.disconnectProducer(id),
+            onReconnect: (id) => this.live.reconnectProducer(id),
+            onEdit: (id) => this.live.editProducer(id),
+            onRemove: (id) => void this.live.removeProducer(id),
         });
         this.onboarding = new Onboarding({
-            onConnect: (url) => this.addProducer({ url }),
+            onConnect: (url) => this.live.addProducer({ url }),
             onOpenRecording: () => byId("file-open").click(),
             onLoadDemo: () => this.loadFixture(),
             onShowSources: () => this.showSources(),
         });
-        this.root.replaceChildren(this.layout());
+        this.root.replaceChildren(
+            buildAppLayout({
+                sidebarOpen: readInitialSidebarOpen(this.storage),
+                producersElement: this.producersPanel.element,
+                connectionElement: this.connectionPanel.element,
+                onboardingElement: this.onboarding.element,
+                panels: this.panels,
+            }),
+        );
         this.shortcuts = new ShortcutsDialog(document, {
             enabled: readShortcutsEnabled(this.storage),
             onToggle: (enabled) => writeShortcutsEnabled(this.storage, enabled),
         });
         this.exportDialog = new ExportDialog(document, { onExport: (choice) => void this.exportAs(choice) });
-        byId("view-agents").append(this.topology.element);
+        this.viewTabs.mountTopology();
         this.timelineView = new TimelineView(byId("timeline"), ({ rel, event }) => {
             this.setFollow(false);
             this.cursor.seek(event ? this.cursor.relativeTime(event) : rel);
@@ -242,383 +215,96 @@ export class ObservatoryApp {
         this.theme?.bindToggle(byId<HTMLButtonElement>("theme-toggle"));
         this.theme?.onChange(() => {
             this.timelineView?.invalidatePalette();
-            this.inference3d?.invalidatePalette();
+            this.viewTabs.invalidatePalette();
             this.render();
         });
-        this.manager.subscribe((connections) => {
-            this.connections = [...connections];
-            this.queueRender();
-        });
-        mountDropZone(window, document, {
-            onFile: (file) => this.openFile(file),
-            onReject: (message) => {
-                this.notices = [message];
-                this.render();
-            },
-        });
+        this.live.subscribe();
+        this.loader.mountDropTarget(window, document);
         window.addEventListener("resize", () => this.queueRender());
         if (params.autoConnect.length > 0) {
             this.connectProducers(params.autoConnect.map((url) => ({ url })));
         }
         if (params.pendingConnect.length > 0) {
-            this.pendingQueryConnects = [...params.pendingConnect];
+            this.live.setPendingQueryConnects(params.pendingConnect);
         }
         if (params.connect.length === 0 && params.fixture) {
-            this.loadText(fixtureText, "fixture", FIXTURE_LABEL);
+            this.loader.loadText(fixtureText, "fixture", FIXTURE_LABEL);
         }
         this.render();
     }
 
     /** Loads recording text as a file source (desktop native open and recent menu). */
     openRecordingText(text: string, label: string): void {
-        this.afterLiveStopped(() => this.loadText(text, "file", label));
+        this.loader.openTextAfterLive(text, "file", label);
     }
 
     /** Streams a large recording (desktop native open): no whole-file string. */
     openRecordingStream(stream: ReadableStream<Uint8Array>, label: string): void {
-        this.afterLiveStopped(() => this.loadChunked((opts) => loadRecordingStream(stream, opts), "file", label));
+        this.loader.openStreamAfterLive(stream, label);
     }
 
     /** Connects to one live endpoint (older desktop shells: `--connect` without tokens). */
     connectLive(url: string): void {
-        this.addProducer({ url });
+        this.live.addProducer({ url });
     }
 
     /** Connects every producer (desktop `--connect` list with per-URL tokens, confirmed `?connect=`). */
     connectProducers(inputs: readonly ProducerEndpointInput[]): void {
-        for (const input of inputs) {
-            this.addProducer(input);
-        }
+        this.live.connectProducers(inputs);
     }
 
-    private confirmPendingQueryConnects(): void {
-        const urls = this.pendingQueryConnects;
-        this.pendingQueryConnects = [];
-        if (urls.length > 0) {
-            this.connectProducers(urls.map((url) => ({ url })));
-        }
-        this.render();
-    }
-
-    private dismissPendingQueryConnects(): void {
-        this.pendingQueryConnects = [];
-        this.render();
-    }
-
-    // ---------------------------------------------------------------- layout
-
-    private layout(): HTMLElement {
-        const narrow = window.matchMedia?.(NARROW_QUERY).matches ?? false;
-        let sidebarOpen = !narrow;
-        try {
-            const stored = this.storage?.getItem(SIDEBAR_STORAGE_KEY);
-            if (stored === "open" || stored === "closed") {
-                sidebarOpen = stored === "open";
-            }
-        } catch {
-            // Storage unavailable: use the width-based default.
-        }
-        const timeline = h("div", {
-            id: "timeline",
-            class: "timeline",
-            tabindex: 0,
-            role: "group",
-            "aria-label": "Timeline. Left and Right step to the previous or next event, Home and End jump to the first or last.",
-            "aria-describedby": "timeline-summary",
-        });
-        return h(
-            "div",
-            { class: `shell${sidebarOpen ? "" : " sidebar-collapsed"}`, id: "shell" },
-            h(
-                "header",
-                { class: "topbar" },
-                h("div", { class: "brand" }, brandMark(document), h("h1", { text: "Sonder Observatory" })),
-                h("button", {
-                    id: "sidebar-toggle",
-                    type: "button",
-                    class: "toggle",
-                    "aria-expanded": sidebarOpen ? "true" : "false",
-                    "aria-controls": "sidebar",
-                    text: "Sources",
-                }),
-                h(
-                    "div",
-                    { class: "badges" },
-                    h("span", { id: "conn-chip", class: "chip", "data-tone": "idle" }),
-                    h("span", { id: "mode-chip", class: "chip", "data-tone": "idle" }),
-                    h("span", { id: "source-badge", class: "badge" }),
-                    h("span", { id: "synthetic-badge", class: "badge badge-synthetic", hidden: true, text: "SYNTHETIC DATA" }),
-                    h("span", { id: "capture-badge", class: "badge" }),
-                    h("span", { id: "live-status", class: "badge conn", role: "status", "data-tone": "idle" }),
-                ),
-                h(
-                    "div",
-                    { class: "actions" },
-                    // The input comes first so CSS can show its keyboard focus on the visible label.
-                    h("input", { id: "file-input", type: "file", accept: RECORDING_FILE_EXTENSIONS.join(","), class: "sr-only" }),
-                    h("label", { id: "file-open", class: "button-like", for: "file-input", text: "Open recording…" }),
-                    h("button", { id: "fixture-btn", type: "button", text: "Synthetic demo" }),
-                    h("button", { id: "save-btn", type: "button", text: `Save (${RECORDING_EXTENSION})` }),
-                    h("button", { id: "export-btn", type: "button", "aria-haspopup": "dialog", text: "Export…", title: "Export a report, summary, JSON or recording range" }),
-                    h("button", { id: "theme-toggle", type: "button", class: "toggle", text: "Theme" }),
-                    h("button", { id: "shortcuts-btn", type: "button", class: "toggle", "aria-haspopup": "dialog", text: "Shortcuts", title: "Keyboard shortcuts (?)" }),
-                ),
-            ),
-            h(
-                "div",
-                { class: "notices" },
-                h("div", { id: "connect-confirm", class: "banner connect-confirm", hidden: true, role: "region", "aria-label": "Confirm requested live connections" }),
-                h("div", { id: "synthetic-banner", class: "banner", hidden: true, role: "note" }),
-                h("div", { id: "warnings", class: "warnings", role: "status", "aria-live": "polite" }),
-                h(
-                    "div",
-                    { id: "load-status", class: "load-status", hidden: true },
-                    h("span", { id: "load-label" }),
-                    h("div", { id: "load-progress", class: "progress", role: "progressbar", "aria-label": "Loading recording", "aria-valuemin": 0, "aria-valuemax": 100 }, h("div", { class: "progress-bar" })),
-                    h("button", { id: "load-cancel", type: "button", class: "small", text: "Cancel loading" }),
-                ),
-            ),
-            h(
-                "div",
-                { class: "workspace" },
-                h("aside", { id: "sidebar", class: "sidebar", "aria-label": "Producers and sources" }, this.producersPanel!.element, this.connectionPanel!.element),
-                h(
-                    "main",
-                    { id: "main", class: "main" },
-                    this.onboarding!.element,
-                    h(
-                        "div",
-                        { id: "analysis", class: "analysis" },
-                        h("section", { id: "metric-strip", class: "metric-strip", "aria-label": "Key metrics at the replay cursor" }),
-                        h(
-                            "div",
-                            { class: "tabs", role: "tablist", "aria-label": "Views" },
-                            ...VIEWS.map((v) =>
-                                h("button", { id: `tab-${v.id}`, type: "button", role: "tab", class: "tab", "aria-controls": `view-${v.id}`, text: v.title }),
-                            ),
-                        ),
-                        h(
-                            "div",
-                            { id: "replay-bar", class: "replay-bar", role: "group", "aria-label": "Replay controls" },
-                            h(
-                                "div",
-                                { class: "replay-controls" },
-                                h("button", { id: "play-btn", type: "button", text: "Play" }),
-                                h("label", { for: "speed-select", text: "Speed" }),
-                                h("select", { id: "speed-select" }, ...SPEEDS.map((s) => h("option", { value: s, selected: s === 1, text: `${s}×` }))),
-                                h("button", { id: "prev-error-btn", type: "button", text: "Previous error" }),
-                                h("button", { id: "next-error-btn", type: "button", text: "Next error" }),
-                                h("label", { class: "check" }, h("input", { id: "follow-check", type: "checkbox", checked: true }), " Follow latest"),
-                                h("span", { id: "cursor-label", class: "mono cursor-label" }),
-                            ),
-                            h("input", { id: "scrubber", type: "range", min: 0, max: 1000, value: 1000, step: 1, "aria-label": "Replay position" }),
-                        ),
-                        h(
-                            "div",
-                            { id: "split", class: "split" },
-                            h(
-                                "div",
-                                { class: "split-main" },
-                                h(
-                                    "div",
-                                    { id: "view-overview", class: "view view-overview", role: "tabpanel", "aria-labelledby": "tab-overview" },
-                                    h("section", { id: "cards", class: "cards", "aria-label": "Metrics" }),
-                                    h(
-                                        "section",
-                                        { class: "panel timeline-panel", "aria-labelledby": "timeline-title" },
-                                        h("div", { class: "panel-head" }, h("h2", { id: "timeline-title", text: "Timeline" }), this.timelineLegend()),
-                                        timeline,
-                                        h("p", { id: "timeline-summary", class: "timeline-summary muted" }),
-                                    ),
-                                ),
-                                h(
-                                    "div",
-                                    { id: "view-events", class: "view view-events", role: "tabpanel", "aria-labelledby": "tab-events" },
-                                    h(
-                                        "section",
-                                        { class: "panel table-panel", "aria-labelledby": "events-title" },
-                                        h(
-                                            "div",
-                                            { class: "panel-head" },
-                                            h("h2", { id: "events-title", text: "Events" }),
-                                            h(
-                                                "div",
-                                                { class: "filters" },
-                                                h("input", {
-                                                    id: "filter-text",
-                                                    type: "search",
-                                                    placeholder: "type, id, request, run, agent, producer",
-                                                    "aria-label": "Filter events by type, id, request, run, agent or producer",
-                                                }),
-                                                h(
-                                                    "select",
-                                                    { id: "filter-class", "aria-label": "Event class" },
-                                                    h("option", { value: "all", text: "all classes" }),
-                                                    ...EVENT_CLASSES.map((c) => h("option", { value: c, text: c })),
-                                                ),
-                                                h("span", { id: "table-count", class: "muted" }),
-                                            ),
-                                        ),
-                                        h("div", { id: "table-wrap", class: "table-wrap", tabindex: 0, role: "region", "aria-label": "Event table (Up and Down move the selection)" }),
-                                    ),
-                                ),
-                                h("div", { id: "view-3d", class: "view view-3d", role: "tabpanel", "aria-labelledby": "tab-3d" }),
-                                h("div", { id: "view-diagnostics", class: "view", role: "tabpanel", "aria-labelledby": "tab-diagnostics" }),
-                                h("div", { id: "view-agents", class: "view", role: "tabpanel", "aria-labelledby": "tab-agents" }),
-                                h("div", { id: "view-compare", class: "view view-compare", role: "tabpanel", "aria-labelledby": "tab-compare" }),
-                                h(
-                                    "div",
-                                    { id: "extra-panels", class: "extra-panels" },
-                                    ...this.panels.map((p) =>
-                                        h(
-                                            "section",
-                                            { class: "panel", "aria-label": p.title },
-                                            h("div", { class: "panel-head" }, h("h2", { text: p.title })),
-                                            h("div", { id: `panel-${p.id}`, class: "panel-body" }),
-                                        ),
-                                    ),
-                                ),
-                            ),
-                            h("div", {
-                                id: "split-handle",
-                                class: "split-handle",
-                                role: "separator",
-                                tabindex: 0,
-                                "aria-orientation": "vertical",
-                                "aria-controls": "inspector",
-                                "aria-label": "Resize the inspector",
-                            }),
-                            h("section", { id: "inspector", class: "panel inspector", "aria-label": "Inspector" }),
-                        ),
-                    ),
-                ),
-            ),
-        );
-    }
-
-    private timelineLegend(): HTMLElement {
-        const item = (cls: string, text: string) => h("li", {}, h("span", { class: `swatch ${cls}`, "aria-hidden": "true" }), text);
-        return h(
-            "ul",
-            { id: "timeline-legend", class: "legend", "aria-label": "Timeline legend" },
-            ...TRACKS.map((c) => item(`dot cls-${c}`, c)),
-            item("span-swatch", "request span"),
-            item("span-swatch failed", "failed request"),
-            item("span-swatch open", "open request"),
-            item("mark-swatch selected", "selected"),
-            item("mark-swatch evidence", "evidence"),
-            item("cursor-swatch", "cursor"),
-        );
-    }
+    // -------------------------------------------------------------- controls
 
     private bindControls(): void {
-        byId<HTMLButtonElement>("sidebar-toggle").addEventListener("click", () => this.setSidebar(byId("shell").classList.contains("sidebar-collapsed")));
-        byId<HTMLInputElement>("file-input").addEventListener("change", (ev) => {
-            const input = ev.target as HTMLInputElement;
-            const file = input.files?.[0];
-            if (file) {
-                this.openFile(file);
-            }
-            input.value = "";
-        });
-        byId<HTMLButtonElement>("fixture-btn").addEventListener("click", () => this.loadFixture());
-        byId<HTMLButtonElement>("save-btn").addEventListener("click", () => this.saveRecording());
-        byId<HTMLButtonElement>("export-btn").addEventListener("click", () => this.exportDialog?.open(this.viewRangeText()));
-        byId<HTMLButtonElement>("shortcuts-btn").addEventListener("click", () => this.shortcuts?.open());
-        byId<HTMLButtonElement>("load-cancel").addEventListener("click", () => this.cancelLoad());
-        byId<HTMLButtonElement>("play-btn").addEventListener("click", () => this.togglePlay());
-        byId<HTMLSelectElement>("speed-select").addEventListener("change", (ev) => {
-            this.speed = Number((ev.target as HTMLSelectElement).value);
-        });
-        byId<HTMLButtonElement>("next-error-btn").addEventListener("click", () => this.jumpToError(1));
-        byId<HTMLButtonElement>("prev-error-btn").addEventListener("click", () => this.jumpToError(-1));
-        byId<HTMLInputElement>("follow-check").addEventListener("change", (ev) => {
-            this.setFollow((ev.target as HTMLInputElement).checked);
-            if (this.follow) {
-                this.cursor.seek(this.cursor.durationNs);
-            }
-            this.render();
-        });
-        byId<HTMLInputElement>("scrubber").addEventListener("input", (ev) => {
-            const v = Number((ev.target as HTMLInputElement).value);
-            this.setFollow(v >= 1000);
-            this.cursor.seek((v / 1000) * this.cursor.durationNs);
-            this.render();
-        });
-        byId<HTMLInputElement>("filter-text").addEventListener("input", (ev) => {
-            this.filterText = (ev.target as HTMLInputElement).value.trim().toLowerCase();
-            this.render();
-        });
-        byId<HTMLSelectElement>("filter-class").addEventListener("change", (ev) => {
-            this.filterClass = (ev.target as HTMLSelectElement).value as EventClass | "all";
-            this.render();
-        });
-        byId<HTMLDivElement>("table-wrap").addEventListener("keydown", (ev) => this.onTableKey(ev));
-        byId<HTMLDivElement>("timeline").addEventListener("keydown", (ev) => this.onTimelineKey(ev));
-        VIEWS.forEach((v, i) => {
-            const tab = byId<HTMLButtonElement>(`tab-${v.id}`);
-            tab.addEventListener("click", () => this.setView(v.id));
-            // WAI-ARIA tabs pattern (automatic activation): Left/Right wrap, Home/End jump.
-            tab.addEventListener("keydown", (ev) => {
-                const n = VIEWS.length;
-                const target =
-                    ev.key === "ArrowRight" ? (i + 1) % n : ev.key === "ArrowLeft" ? (i - 1 + n) % n : ev.key === "Home" ? 0 : ev.key === "End" ? n - 1 : -1;
-                if (target < 0) {
-                    return;
+        bindAppControls({
+            toggleSidebar: () => this.setSidebar(byId("shell").classList.contains("sidebar-collapsed")),
+            openFile: (file) => this.loader.openFile(file),
+            loadFixture: () => this.loadFixture(),
+            saveRecording: () => this.saveRecording(),
+            openExport: () => this.exportDialog?.open(formatViewRangeText(this.cursor, this.filterClass, this.filterText)),
+            openShortcuts: () => this.shortcuts?.open(),
+            cancelLoad: () => this.loader.cancel(),
+            togglePlay: () => this.togglePlay(),
+            setSpeed: (speed) => {
+                this.speed = speed;
+            },
+            jumpToError: (dir) => this.jumpToError(dir),
+            setFollowFromCheck: (checked) => {
+                this.setFollow(checked);
+                if (this.follow) {
+                    this.cursor.seek(this.cursor.durationNs);
                 }
-                ev.preventDefault();
-                this.setView(VIEWS[target]!.id);
-                byId(`tab-${this.view}`).focus();
-            });
-        });
-        document.addEventListener("keydown", (ev) => {
-            if (!this.shortcuts?.enabled || document.querySelector("dialog[open]") || ev.defaultPrevented) {
-                return;
-            }
-            const action = shortcutAction(ev);
-            if (action) {
-                ev.preventDefault();
-                this.runShortcut(action);
-            }
+                this.render();
+            },
+            scrubTo: (v) => {
+                this.setFollow(v >= 1000);
+                this.cursor.seek((v / 1000) * this.cursor.durationNs);
+                this.render();
+            },
+            setFilterText: (text) => {
+                this.filterText = text;
+                this.render();
+            },
+            setFilterClass: (cls) => {
+                this.filterClass = cls;
+                this.render();
+            },
+            onTableKey: (ev) => this.onTableKey(ev),
+            onTimelineKey: (ev) => this.onTimelineKey(ev),
+            setView: (view) => this.setView(view),
+            getView: () => this.view,
+            isShortcutsEnabled: () => Boolean(this.shortcuts?.enabled),
+            stepEvent: (delta) => this.stepEvent(delta),
+            followLatest: () => {
+                this.setFollow(true);
+                this.cursor.seek(this.cursor.durationNs);
+                this.render();
+            },
+            toggleTheme: () => this.theme?.toggle(),
         });
     }
 
     // --------------------------------------------------------------- actions
-
-    private runShortcut(action: ShortcutAction): void {
-        switch (action) {
-            case "help":
-                this.shortcuts?.open();
-                break;
-            case "play-pause":
-                this.togglePlay();
-                break;
-            case "next-event":
-                this.stepEvent(1);
-                break;
-            case "previous-event":
-                this.stepEvent(-1);
-                break;
-            case "next-error":
-                this.jumpToError(1);
-                break;
-            case "previous-error":
-                this.jumpToError(-1);
-                break;
-            case "focus-filter":
-                this.setView("events");
-                byId<HTMLInputElement>("filter-text").focus();
-                break;
-            case "follow-latest":
-                this.setFollow(true);
-                this.cursor.seek(this.cursor.durationNs);
-                this.render();
-                break;
-            case "toggle-theme":
-                this.theme?.toggle();
-                break;
-        }
-    }
 
     private setView(view: ViewId): void {
         const changed = view !== this.view;
@@ -632,11 +318,7 @@ export class ObservatoryApp {
     private setSidebar(open: boolean): void {
         byId("shell").classList.toggle("sidebar-collapsed", !open);
         byId("sidebar-toggle").setAttribute("aria-expanded", open ? "true" : "false");
-        try {
-            this.storage?.setItem(SIDEBAR_STORAGE_KEY, open ? "open" : "closed");
-        } catch {
-            // Not persisted.
-        }
+        persistSidebarOpen(this.storage, open);
         this.queueRender();
     }
 
@@ -645,179 +327,8 @@ export class ObservatoryApp {
         this.connectionPanel?.focusUrl();
     }
 
-    /** Adds a live producer; its events merge into the current live session. */
-    private addProducer(input: ProducerEndpointInput): void {
-        this.supersedeLoad();
-        this.notices = [];
-        if (this.store.source !== "live") {
-            this.selectedId = null;
-            this.setFollow(true);
-        }
-        const remembered: RememberedInput = { url: input.url, transport: input.transport ?? "auto", ...(input.label ? { label: input.label } : {}) };
-        void this.manager.add(input).then((connection) => {
-            this.inputs.set(connection.id, remembered);
-            this.queueRender();
-        });
-        this.render();
-    }
-
-    private async disconnectProducer(id: string): Promise<void> {
-        const connection = this.connections.find((c) => c.id === id);
-        if (connection) {
-            this.closed.set(id, { ...connection, status: { ...connection.status, state: "closed", retryInMs: null } });
-        }
-        await this.manager.remove(id);
-        this.render();
-    }
-
-    private reconnectProducer(id: string): void {
-        const connection = this.closed.get(id);
-        this.closed.delete(id);
-        if (!connection) {
-            return;
-        }
-        const input = this.inputs.get(id) ?? { url: connection.url, transport: "auto" as const };
-        this.addProducer({ url: input.url, transport: input.transport, ...(connection.label ? { label: connection.label } : {}) });
-    }
-
-    private editProducer(id: string): void {
-        const connection = this.closed.get(id) ?? this.connections.find((c) => c.id === id);
-        if (!connection) {
-            return;
-        }
-        const input = this.inputs.get(id) ?? { url: connection.url, transport: "auto" as const };
-        const needsToken = connection.hasToken || /token/i.test(connection.status.lastError ?? "");
-        this.setSidebar(true);
-        this.connectionPanel?.fill({ url: redactUrlSecrets(input.url), transport: input.transport }, needsToken ? "token" : "url");
-        void this.removeProducer(id);
-    }
-
-    private async removeProducer(id: string): Promise<void> {
-        if (this.closed.delete(id)) {
-            this.render();
-            return;
-        }
-        await this.manager.remove(id);
-        this.render();
-    }
-
-    /** Runs `load` once every live stream has stopped and flushed (so none appends into the new source). */
-    private afterLiveStopped(load: () => void): void {
-        this.closed.clear();
-        if (this.manager.list().length === 0) {
-            load();
-            return;
-        }
-        void this.manager.disconnectAll().then(load);
-    }
-
     private loadFixture(): void {
-        this.afterLiveStopped(() => this.loadText(fixtureText, "fixture", FIXTURE_LABEL));
-    }
-
-    private openFile(file: File): void {
-        this.afterLiveStopped(() => {
-            if (file.size >= CHUNKED_LOAD_THRESHOLD_CHARS) {
-                // Stream large files: no giant string, UI stays responsive.
-                this.loadChunked((opts) => loadRecordingStream(file.stream(), { ...opts, totalBytes: file.size }), "file", file.name);
-                return;
-            }
-            const token = this.supersedeLoad();
-            void file.text().then(
-                (text) => {
-                    if (token === this.loadToken) {
-                        this.loadText(text, "file", file.name);
-                    }
-                },
-                (error: unknown) => {
-                    this.notices = [`could not read ${file.name}: ${(error as Error)?.message ?? String(error)}`];
-                    this.render();
-                },
-            );
-        });
-    }
-
-    private loadText(text: string, source: "fixture" | "file", label: string): void {
-        if (text.length < CHUNKED_LOAD_THRESHOLD_CHARS) {
-            this.supersedeLoad();
-            this.applyLoaded(loadRecording(text), source, label);
-            return;
-        }
-        this.loadChunked((opts) => loadRecordingChunked(text, opts), source, label);
-    }
-
-    /** Invalidates the running load (discard its result, abort its parse) and returns the new token. */
-    private supersedeLoad(): number {
-        this.loadAbort?.abort();
-        this.loadAbort = null;
-        this.setLoading(null);
-        return ++this.loadToken;
-    }
-
-    private cancelLoad(): void {
-        const label = this.loading;
-        this.supersedeLoad();
-        if (label) {
-            this.notices = [`Loading ${label} was cancelled; the previous source is still shown.`];
-        }
-        this.render();
-    }
-
-    private setLoading(label: string | null, progress?: { pct: number | null; events: number }): void {
-        this.loading = label;
-        const box = document.getElementById("load-status");
-        if (!box) {
-            return;
-        }
-        box.hidden = label === null;
-        if (label === null) {
-            return;
-        }
-        const bar = byId("load-progress");
-        const pct = progress?.pct ?? null;
-        byId("load-label").textContent = `Loading ${label}${progress ? ` · ${progress.events} events` : ""}`;
-        if (pct === null) {
-            bar.removeAttribute("aria-valuenow");
-            bar.setAttribute("aria-valuetext", progress ? `${progress.events} events read` : "starting");
-            bar.classList.add("indeterminate");
-        } else {
-            bar.setAttribute("aria-valuenow", String(pct));
-            bar.setAttribute("aria-valuetext", `${pct}%, ${progress?.events ?? 0} events`);
-            bar.classList.remove("indeterminate");
-        }
-        (bar.firstElementChild as HTMLElement).style.width = pct === null ? "" : `${pct}%`;
-    }
-
-    /** Large recordings parse in slices so the UI keeps painting; a newer load or connect wins. */
-    private loadChunked(run: (options: ChunkedLoadOptions) => Promise<LoadedRecording>, source: "fixture" | "file", label: string): void {
-        const token = this.supersedeLoad();
-        const abort = new AbortController();
-        this.loadAbort = abort;
-        this.setLoading(label);
-        run({
-            signal: abort.signal,
-            onProgress: (p) => {
-                if (token === this.loadToken) {
-                    this.setLoading(label, { pct: p.totalBytes > 0 ? Math.round((p.bytesDone / p.totalBytes) * 100) : null, events: p.events });
-                }
-            },
-        }).then(
-            (loaded) => {
-                if (token === this.loadToken) {
-                    this.loadAbort = null;
-                    this.setLoading(null);
-                    this.applyLoaded(loaded, source, label);
-                }
-            },
-            (error: unknown) => {
-                if (token === this.loadToken) {
-                    this.loadAbort = null;
-                    this.setLoading(null);
-                    this.notices = [`failed to load ${label}: ${(error as Error)?.message ?? String(error)}`];
-                    this.render();
-                }
-            },
-        );
+        this.loader.openTextAfterLive(fixtureText, "fixture", FIXTURE_LABEL);
     }
 
     private applyLoaded(loaded: LoadedRecording, source: "fixture" | "file", label: string): void {
@@ -843,45 +354,20 @@ export class ObservatoryApp {
         void this.exportAs({ format: "sobs", scope: "session" });
     }
 
-    /** The range "Current view" exports: the event-table filters up to the replay cursor. */
-    private viewRange(): ExportRange {
-        const last = this.cursor.visibleEvents().at(-1);
-        return { cls: this.filterClass, text: this.filterText, toNs: last ? last.mono_ns : null };
-    }
-
-    private viewRangeText(): string {
-        const shown = this.cursor.visibleCount();
-        const all = this.cursor.events.length;
-        const cursor = shown < all ? `events up to the replay cursor (${shown} of ${all})` : "all events (the cursor is at the end)";
-        const filtered = this.filterClass !== "all" || this.filterText !== "";
-        const filters = filtered ? `, filtered by ${describeRange({ cls: this.filterClass, text: this.filterText }, this.cursor.originNs)}` : "";
-        return `As in the Events table: ${cursor}${filters}.`;
-    }
-
     /** Runs an export through exportWithConfirmation (never exportSession directly). */
     private async exportAs(choice: ExportChoice): Promise<void> {
-        const events = this.store.events;
-        if (events.length === 0) {
-            return;
+        const notice = await executeConfirmedExport(choice, this.store.events, () => buildViewRange(this.cursor, this.filterClass, this.filterText));
+        if (notice !== null) {
+            this.exportNotice = notice;
+            this.render();
         }
-        const range: ExportRange = choice.scope === "view" ? this.viewRange() : {};
-        const label = EXPORT_FORMATS[choice.format].label;
-        try {
-            const { confirmSensitiveExport, exportWithConfirmation } = await import("../export");
-            const saved = await exportWithConfirmation(choice.format, { events, range: isFullRange(range) ? {} : range }, confirmSensitiveExport);
-            this.exportNotice = saved ? `Exported ${label}: ${saved.name}` : `${label} export cancelled; nothing was written.`;
-        } catch (error) {
-            this.exportNotice = `${label} export failed: ${(error as Error)?.message ?? String(error)}`;
-        }
-        this.render();
     }
 
     /** Label of the current source for the Compare tab ("live: …", a file name or the fixture). */
     private describeSource(): string {
         const s = this.store;
         if (s.source === "live") {
-            const urls = this.connections.map((c) => redactUrlSecrets(c.url));
-            return `live: ${urls.join(", ") || "producers"}`;
+            return this.live.describeLiveSource();
         }
         return s.source === "none" ? "current session" : s.sourceLabel;
     }
@@ -891,8 +377,7 @@ export class ObservatoryApp {
         this.cursor = new ReplayCursor(this.store.events);
         this.cursorSource = this.store.events;
         this.cursor.seek(this.follow ? this.cursor.durationNs : previous);
-        this.findingsDirty = true;
-        this.topologyDirty = true;
+        this.viewTabs.markDataChanged();
     }
 
     private setFollow(follow: boolean): void {
@@ -1024,81 +509,48 @@ export class ObservatoryApp {
         const visible = this.cursor.visibleEvents();
         // Equal to deriveMetrics(visible), from the incremental index.
         const metrics = this.cursor.metrics();
-        this.renderHeader();
+        renderHeaderStatus({
+            store: this.store,
+            connections: this.live.connections,
+            closedCount: this.live.closedCount,
+            follow: this.follow,
+            playing: this.playing,
+            speed: this.speed,
+        });
         this.renderSources();
-        this.renderConnectConfirm();
-        this.renderWarnings();
+        this.live.renderConnectConfirm();
+        this.warningsText = renderWarningsRegion(
+            {
+                store: this.store,
+                connections: this.live.connections,
+                launchNotices: this.launchNotices,
+                notices: this.notices,
+                navNotice: this.navNotice,
+                exportNotice: this.exportNotice,
+            },
+            this.warningsText,
+        );
         this.renderStrip(visible, metrics);
-        this.renderViews();
+        this.viewTabs.render(this.view, visible);
         if (this.view === "overview") {
-            this.renderCards(metrics);
+            renderOverviewCards(metrics, this.cursor.events, this.cursor.visibleCount(), this.store);
             this.renderTimeline(metrics);
         }
         this.renderReplay();
         this.renderTable();
         this.renderInspectorPanel();
-        this.renderExtraPanels(visible);
+        this.viewTabs.renderExtraPanels(this.view, visible);
     }
 
     private hasSource(): boolean {
-        return this.store.source !== "none" || this.connections.length > 0 || this.closed.size > 0 || this.loading !== null;
+        return this.store.source !== "none" || this.live.hasAny() || this.loader.loading !== null;
     }
 
     private renderSources(): void {
-        const models = [...this.connections.map((c) => producerCardModel(c)), ...[...this.closed.values()].map((c) => producerCardModel(c, true))].sort(
-            (a, b) => Number(a.id.replace(/\D+/g, "")) - Number(b.id.replace(/\D+/g, "")),
-        );
-        this.producersPanel?.update(models);
+        this.producersPanel?.update(this.live.producerCardModels());
         const empty = !this.hasSource();
         this.onboarding?.setVisible(empty);
         byId("analysis").hidden = empty;
-    }
-
-    private renderViews(): void {
-        for (const v of VIEWS) {
-            const active = v.id === this.view;
-            const tab = byId<HTMLButtonElement>(`tab-${v.id}`);
-            tab.setAttribute("aria-selected", active ? "true" : "false");
-            // Roving tabindex: only the active tab is in the Tab sequence.
-            tab.tabIndex = active ? 0 : -1;
-            tab.classList.toggle("active", active);
-            byId(`view-${v.id}`).hidden = !active;
-        }
-        byId("extra-panels").hidden = this.view !== "overview";
-        this.renderDiagnostics();
-        this.renderTopology();
-        this.renderCompare();
-        this.render3d();
-    }
-
-    /** Hidden tabs are not rendered; the panel throttles re-analysis of a growing live session. */
-    private renderCompare(): void {
-        const container = byId("view-compare");
-        if (container.hidden) {
-            return;
-        }
-        if (!this.compare) {
-            if (!this.compareLoading) {
-                this.compareLoading = true;
-                container.replaceChildren(h("p", { class: "muted", text: "Loading Compare…" }));
-                import("../compare/panel").then(
-                    ({ ComparePanel }) => {
-                        this.compare = new ComparePanel({ describeCurrent: () => this.describeSource() });
-                        this.render();
-                    },
-                    (error: unknown) => {
-                        this.compareLoading = false;
-                        container.replaceChildren(h("p", { class: "warning", text: `Compare failed to load: ${(error as Error)?.message ?? String(error)}` }));
-                    },
-                );
-            }
-            return;
-        }
-        try {
-            this.compare.render(container, this.panelContext(this.cursor.visibleEvents()));
-        } catch (error) {
-            container.replaceChildren(h("p", { class: "warning", text: `Compare failed: ${(error as Error).message}` }));
-        }
     }
 
     /** Metric strip: redrawn only when the cursor or the session changes. */
@@ -1109,435 +561,6 @@ export class ObservatoryApp {
         }
         this.stripStamp = stamp;
         renderMetricStrip(byId("metric-strip"), stripItems(metrics, stripSeries(visible, metrics)));
-    }
-
-    /** Health backends per producer instance (live connections that fetched their health link). */
-    private healthByInstance(): { map: Map<string, readonly HealthBackend[]>; stamp: string } {
-        const map = new Map<string, readonly HealthBackend[]>();
-        for (const c of this.connections) {
-            const instance = c.identity?.instance_id;
-            if (instance && c.health) {
-                map.set(instance, c.health.backends);
-            }
-        }
-        return { map, stamp: [...map.entries()].map(([k, v]) => `${k}:${v.map((b) => `${b.name}=${b.capabilities.join("+")}`).join(",")}`).join(";") };
-    }
-
-    /** 3D Inference tab: loads its chunk (and three.js) on first use; hidden tabs stop rendering. */
-    private render3d(): void {
-        const container = byId("view-3d");
-        if (container.hidden) {
-            this.inference3d?.setActive(false);
-            return;
-        }
-        if (!this.inference3d) {
-            if (!this.inference3dLoading) {
-                this.inference3dLoading = true;
-                container.replaceChildren(h("p", { class: "muted", text: "Loading the 3D view…" }));
-                import("../inference3d/inference3dPanel").then(
-                    ({ Inference3DPanel }) => {
-                        this.inference3d = new Inference3DPanel({
-                            onInspect: (event) => this.select(event),
-                            onEvidence: (ids) => {
-                                this.highlighted = new Set(ids);
-                            },
-                        });
-                        container.replaceChildren(this.inference3d.element);
-                        this.render();
-                    },
-                    (error: unknown) => {
-                        this.inference3dLoading = false;
-                        container.replaceChildren(h("p", { class: "warning", text: `The 3D view failed to load: ${(error as Error)?.message ?? String(error)}` }));
-                    },
-                );
-            }
-            return;
-        }
-        this.inference3d.setActive(true);
-        const health = this.healthByInstance();
-        try {
-            this.inference3d.update({
-                all: this.store.events,
-                visible: this.cursor.visibleEvents(),
-                nowNs: this.cursor.events.length > 0 ? this.cursor.originNs + this.cursor.position : null,
-                health: health.map,
-                healthStamp: health.stamp,
-                relativeTime: (ns) => fmtRelNs(ns - this.cursor.originNs),
-            });
-        } catch (error) {
-            container.append(h("p", { class: "warning", text: `3D view failed: ${(error as Error).message}` }));
-        }
-    }
-
-    private panelContext(visible: readonly ObservatoryEvent[]): PanelContext {
-        return {
-            visible,
-            all: this.store.events,
-            selectedId: this.selectedId,
-            select: (e) => this.seekTo(e),
-            synthetic: this.store.synthetic,
-        };
-    }
-
-    /** Topology layout uses the whole session; the graph itself is derived at the replay cursor. */
-    private renderTopology(): void {
-        if (byId("view-agents").hidden) {
-            return;
-        }
-        if (this.topologyDirty) {
-            this.topologyDirty = false;
-            this.topology.setEvents(this.store.events);
-        }
-        this.topology.setTime(this.follow ? null : this.cursor.originNs + this.cursor.position);
-    }
-
-    /** Findings are recomputed over the whole session when it changes (fine for M1-sized sessions). */
-    private renderDiagnostics(): void {
-        const container = byId("view-diagnostics");
-        if (container.hidden) {
-            return;
-        }
-        if (this.findingsDirty) {
-            this.findingsDirty = false;
-            this.findingsVersion += 1;
-            this.diag.setFindings(runDiagnostics(this.store.events));
-        }
-        const stamp = `${this.findingsVersion}|${this.diag.revision}|${this.store.synthetic}|${this.cursor.originNs}`;
-        if (stamp === this.diagStamp) {
-            return;
-        }
-        this.diagStamp = stamp;
-        const hadFocus = container.contains(document.activeElement);
-        const origin = this.cursor.originNs;
-        container.replaceChildren(
-            ...renderFindingsPanel(this.diag, {
-                relativeTime: (ns) => fmtRelNs(ns - origin),
-                onChange: () => this.render(),
-                synthetic: this.store.synthetic,
-            }),
-        );
-        if (hadFocus) {
-            (container.querySelector<HTMLElement>(".diag-finding.selected") ?? container.querySelector<HTMLElement>(".diag-finding"))?.focus();
-        }
-    }
-
-    private renderExtraPanels(visible: readonly ObservatoryEvent[]): void {
-        if (this.view !== "overview") {
-            return;
-        }
-        for (const panel of this.panels) {
-            const container = document.getElementById(`panel-${panel.id}`);
-            if (!container) {
-                continue;
-            }
-            try {
-                panel.render(container, this.panelContext(visible));
-            } catch (error) {
-                // A failing panel must not take down the rest of the viewer.
-                container.replaceChildren(h("p", { class: "warning", text: `Panel "${panel.title}" failed: ${(error as Error).message}` }));
-            }
-        }
-    }
-
-    private liveSummary(): { label: string; tone: string } {
-        if (this.connections.length === 0) {
-            return this.closed.size > 0 ? { label: "disconnected", tone: "idle" } : { label: "not connected", tone: "idle" };
-        }
-        const counts = new Map<string, number>();
-        for (const c of this.connections) {
-            const word = producerCardModel(c).state;
-            counts.set(word, (counts.get(word) ?? 0) + 1);
-        }
-        const label = [...counts.entries()].map(([word, n]) => `${n} ${word}`).join(" · ");
-        const tone = counts.has("failed") ? "error" : counts.has("connecting") || counts.has("reconnecting") ? "warn" : "ok";
-        return { label, tone };
-    }
-
-    private renderHeader(): void {
-        const s = this.store;
-        const liveCount = this.connections.length + this.closed.size;
-        const sourceText =
-            s.source === "none"
-                ? liveCount > 0
-                    ? "connecting…"
-                    : "no data"
-                : s.source === "live"
-                  ? `live · ${liveCount} producer${liveCount === 1 ? "" : "s"}`
-                  : `${s.source === "file" ? "recording" : "fixture"}${s.truncatedRecording ? " (partial)" : ""} · ${s.sourceLabel}`;
-        byId("source-badge").textContent = sourceText;
-        const producers = producersInSession(s.events);
-        const syntheticNames = producers.filter((p) => p.synthetic).map((p) => p.name);
-        const synthetic = s.manifest?.synthetic === true || syntheticNames.length > 0;
-        byId("synthetic-badge").hidden = !synthetic;
-        const banner = byId("synthetic-banner");
-        banner.hidden = !synthetic;
-        const bannerText = syntheticBannerText(syntheticNames);
-        if (banner.textContent !== bannerText) {
-            banner.textContent = bannerText;
-        }
-        byId("capture-badge").textContent = `text capture: ${s.capturePolicy}`;
-        const status = byId("live-status");
-        const live = this.liveSummary();
-        status.textContent = `live: ${live.label}`;
-        status.dataset.tone = live.tone;
-        this.renderChips(live.tone);
-        const save = byId<HTMLButtonElement>("save-btn");
-        save.disabled = s.events.length === 0;
-        byId<HTMLButtonElement>("export-btn").disabled = s.events.length === 0;
-        save.textContent =
-            s.source === "live"
-                ? `Save live session (${s.events.length} events${s.droppedByRetention > 0 ? `, ${s.droppedByRetention} older dropped` : ""})`
-                : `Save (${RECORDING_EXTENSION})`;
-        byId<HTMLButtonElement>("play-btn").textContent = this.playing ? "Pause" : "Play";
-    }
-
-    /**
-     * Header status chips (design board "Status indicators"): the connection
-     * and whether the view follows live data or replays. Words carry the
-     * state; the dot colour only repeats it.
-     */
-    private renderChips(liveTone: string): void {
-        const conn = byId("conn-chip");
-        const mode = byId("mode-chip");
-        const n = this.connections.length;
-        let connText = "";
-        let connTone = "idle";
-        if (n > 0) {
-            connTone = liveTone === "ok" ? "ok" : liveTone;
-            connText = liveTone === "ok" ? `Connected · ${n} producer${n === 1 ? "" : "s"}` : liveTone === "error" ? "Connection failed" : "Connecting";
-        } else if (this.closed.size > 0) {
-            connText = "Disconnected";
-        } else if (this.store.source === "file" || this.store.source === "fixture") {
-            connText = "Offline · recording";
-        }
-        let modeText = "";
-        let modeTone = "idle";
-        if (this.store.events.length > 0) {
-            if (this.store.source === "live" && this.follow) {
-                modeText = "Live";
-                modeTone = "live";
-            } else if (this.playing) {
-                modeText = `Replaying · ${this.speed}×`;
-                modeTone = "live";
-            } else {
-                modeText = this.follow ? "Replay · at end" : "Replay · paused at cursor";
-            }
-        }
-        if (conn.textContent !== connText || conn.dataset.tone !== connTone) {
-            conn.textContent = connText;
-            conn.dataset.tone = connTone;
-        }
-        if (mode.textContent !== modeText || mode.dataset.tone !== modeTone) {
-            mode.textContent = modeText;
-            mode.dataset.tone = modeTone;
-        }
-    }
-
-    /** Confirmation banner for query-supplied ?connect= / ?ws= endpoints outside the local Sonder allowlist. */
-    private renderConnectConfirm(): void {
-        const stamp = this.pendingQueryConnects.join("\n");
-        if (stamp === this.pendingConnectStamp) {
-            return;
-        }
-        this.pendingConnectStamp = stamp;
-        const box = byId("connect-confirm");
-        const urls = this.pendingQueryConnects;
-        if (urls.length === 0) {
-            box.hidden = true;
-            box.replaceChildren();
-            return;
-        }
-        box.hidden = false;
-        const n = urls.length;
-        const describeScope = (rawUrl: string): string => {
-            try {
-                const parsed = new URL(rawUrl);
-                return isLoopbackHost(parsed.hostname) ? "non-standard local port" : "remote host";
-            } catch {
-                return "unparsed URL";
-            }
-        };
-        const confirmBtn = h("button", {
-            id: "confirm-connect-btn",
-            type: "button",
-            class: "primary small",
-            text: n === 1 ? "Connect endpoint" : `Connect ${n} endpoints`,
-        });
-        confirmBtn.addEventListener("click", () => this.confirmPendingQueryConnects());
-        const dismissBtn = h("button", {
-            id: "dismiss-connect-btn",
-            type: "button",
-            class: "small",
-            text: "Dismiss",
-        });
-        dismissBtn.addEventListener("click", () => this.dismissPendingQueryConnects());
-        box.replaceChildren(
-            h("p", {
-                class: "connect-confirm-text",
-                text: `This link requests connecting to ${n} unallowlisted endpoint${n === 1 ? "" : "s"}. No network request has been sent yet:`,
-            }),
-            h(
-                "ul",
-                { class: "connect-confirm-list" },
-                ...urls.map((url) =>
-                    h(
-                        "li",
-                        {},
-                        h("code", { class: "mono", text: redactUrlSecrets(url) }),
-                        h("span", { text: ` (${describeScope(url)})` }),
-                    ),
-                ),
-            ),
-            h("div", { class: "connect-confirm-actions" }, confirmBtn, dismissBtn),
-        );
-    }
-
-    /** #warnings is a polite live region: it is rewritten only when its text changes. */
-    private renderWarnings(): void {
-        const s = this.store;
-        const items: string[] = [...this.launchNotices, ...this.notices, ...(this.navNotice ? [this.navNotice] : []), ...(this.exportNotice ? [this.exportNotice] : [])];
-        const retention = s.retentionNotice;
-        if (retention !== null) {
-            items.push(retention);
-        }
-        const partial = s.partialRecordingNotice;
-        if (partial !== null) {
-            items.push(partial);
-        }
-        if (s.rejectedCount > 0) {
-            const first = s.rejected[0]!;
-            items.push(`${s.rejectedCount} line(s) rejected by the schema validator (first: line ${first.line}: ${first.reason})`);
-        }
-        if (s.gaps.length > 0) {
-            const missing = s.gaps.reduce((n, g) => n + (g.to - g.from + 1), 0);
-            items.push(`${missing} sequence number(s) missing across ${s.gaps.length} gap(s): possible dropped telemetry`);
-        }
-        if (s.duplicates > 0) {
-            items.push(`${s.duplicates} duplicate event id(s) ignored`);
-        }
-        if (s.manifest && !s.manifest.complete) {
-            items.push("recording manifest marks this session as incomplete");
-        }
-        for (const c of this.connections) {
-            if (c.status.warning) {
-                items.push(`${c.identity?.name ?? c.url}: ${c.status.warning}`);
-            }
-        }
-        const text = items.join("\n");
-        if (text === this.warningsText) {
-            return;
-        }
-        this.warningsText = text;
-        byId("warnings").replaceChildren(...items.map((t) => h("div", { class: "warning", text: `⚠ ${t}` })));
-    }
-
-    private renderCards(m: Metrics): void {
-        const res = m.resources;
-        const card = (title: string, value: string, sub: string, evidence: string, tone = "", extra: Node | null = null) =>
-            h(
-                "article",
-                { class: `card ${tone}` },
-                h("h3", { text: title }),
-                h("div", { class: "value", text: value }),
-                h("div", { class: "sub", text: sub }),
-                extra,
-                h("div", { class: "evidence", text: evidence }),
-            );
-        const tokenCard = tokenCardModel(m);
-        const derived = (n: number, what: string) => (n > 0 ? `derived · ${n} ${what}` : "unavailable · no events yet");
-        const errorTypes = Object.entries(m.errors.byType)
-            .map(([t, n]) => `${t} ×${n}`)
-            .join(", ");
-        const perProducer = Object.entries(m.requestLatencyByProducer).sort(([a], [b]) => a.localeCompare(b));
-        const producerRows =
-            perProducer.length > 1
-                ? h(
-                      "ul",
-                      { class: "per-producer", "aria-label": "Request latency per producer" },
-                      ...perProducer.map(([name, stats]) =>
-                          h("li", { "data-producer": name }, h("span", { class: "producer-cell", text: name }), ` p50 ${fmtMs(stats.p50Ms)} · p95 ${fmtMs(stats.p95Ms)} · ${stats.count} req`),
-                      ),
-                  )
-                : null;
-        // Present only when a request reported them, so other streams render as before.
-        const reuseCard = (model: ReuseCardModel | null) =>
-            model
-                ? card(
-                      model.title,
-                      model.value,
-                      model.sub,
-                      model.evidence,
-                      "",
-                      h(
-                          "div",
-                          { class: "reuse-breakdown" },
-                          model.rows.length > 0
-                              ? h(
-                                    "ul",
-                                    { class: "per-producer", "aria-label": `${model.title} per model` },
-                                    ...model.rows.map(([name, text]) => h("li", { "data-model": name }, h("span", { class: "producer-cell", text: name }), ` ${text}`)),
-                                )
-                              : null,
-                          model.sessionRows.length > 0
-                              ? h(
-                                    "ul",
-                                    { class: "per-producer", "aria-label": `${model.title} per session` },
-                                    ...model.sessionRows.map(([name, text]) => h("li", { "data-session": name }, h("span", { class: "producer-cell", text: `session ${name}` }), ` ${text}`)),
-                                    ...(model.moreSessions > 0 ? [h("li", { text: `+${model.moreSessions} more sessions` })] : []),
-                                )
-                              : null,
-                      ),
-                  )
-                : null;
-        const reuseCards = [reuseCard(promptCacheCardModel(m)), reuseCard(speculationCardModel(m))].filter((c): c is HTMLElement => c !== null);
-        byId("cards").replaceChildren(
-            card(
-                "Request latency",
-                `p50 ${fmtMs(m.requestLatency.p50Ms)}`,
-                `p95 ${fmtMs(m.requestLatency.p95Ms)} · max ${fmtMs(m.requestLatency.maxMs)} · open ${m.requests.filter((r) => r.outcome === "open").length}`,
-                derived(m.requestLatency.count, "finished requests (request.started → end)"),
-                "",
-                producerRows,
-            ),
-            card(
-                "Time to first token",
-                `p50 ${fmtMs(m.timeToFirstToken.p50Ms)}`,
-                `p95 ${fmtMs(m.timeToFirstToken.p95Ms)}`,
-                derived(m.timeToFirstToken.count, "requests with a first token"),
-            ),
-            card("Token rate", tokenCard.value, tokenCard.sub, tokenCard.evidence),
-            ...reuseCards,
-            ...renderGpuCards(gpuMemoryAt(this.cursor.events, this.cursor.visibleCount())),
-            card(
-                "Errors",
-                `${m.errors.total}`,
-                errorTypes || "none",
-                m.errors.total > 0 ? `derived · failed/retry/guard events` : "derived · no error events",
-                m.errors.total > 0 ? "tone-error" : "tone-ok",
-            ),
-            card(
-                "Agents & tools",
-                `${m.agents.active.length} active agent(s)`,
-                `spawned ${m.agents.spawned} · done ${m.agents.completed} · tools ${m.tools.called} called, ${m.tools.failed} failed, ${m.tools.active.length} running`,
-                derived(m.agents.transitions, "agent/route transitions"),
-            ),
-            card(
-                "Resource pressure",
-                res.latest ? `${fmtPct(res.latest.fraction)} memory` : "—",
-                res.latest
-                    ? `${fmtBytes(res.latest.usedBytes)} / ${fmtBytes(res.latest.totalBytes)} · peak ${fmtPct(res.peak?.fraction ?? null)} · compute ${fmtPct(res.latestComputeUtilization)} · pressure events ${res.pressureEvents}`
-                    : `pressure events ${res.pressureEvents}`,
-                res.latest ? `producer-reported · device.memory.sample ${res.latest.deviceId ?? ""}` : "unavailable · no device samples",
-                res.latest && res.latest.fraction >= 0.9 ? "tone-warning" : "",
-            ),
-            card(
-                "Telemetry",
-                `${m.eventCount} events`,
-                `dropped (producer-reported) ${m.droppedEvents} · rejected ${this.store.rejectedCount}${this.store.droppedByRetention > 0 ? ` · ${this.store.droppedByRetention} older not retained` : ""}`,
-                "measured · events received at the cursor",
-                m.droppedEvents > 0 ? "tone-warning" : "",
-            ),
-        );
     }
 
     private renderTimeline(m: Metrics): void {
