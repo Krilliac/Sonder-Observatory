@@ -1474,6 +1474,12 @@ kbd {
     stroke-dasharray: 3 2;
 }
 
+.span-cancelled {
+    fill: color-mix(in srgb, var(--semantic-warning) 35%, transparent);
+    stroke: var(--semantic-warning);
+    stroke-dasharray: 2 2;
+}
+
 .cursor-line {
     stroke: var(--color-text);
     stroke-width: 1;

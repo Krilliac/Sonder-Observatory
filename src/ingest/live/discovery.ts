@@ -75,6 +75,8 @@ export interface DiscoveryFetchOptions {
     token?: string;
     fetch?: FetchLike;
     timeoutMs?: number;
+    /** Optional caller abort signal (e.g. client.stop()) to cancel an in-flight discovery request. */
+    signal?: AbortSignal;
 }
 
 /** The origin the viewer runs on, for CORS hints ("this page's origin" outside a browser). */
@@ -116,19 +118,26 @@ export async function readBoundedText(response: Response, limit: number): Promis
     const decoder = new TextDecoder();
     let size = 0;
     let text = "";
-    for (;;) {
-        const { value, done } = await reader.read();
-        if (done) {
-            break;
+    try {
+        for (;;) {
+            const { value, done } = await reader.read();
+            if (done) {
+                break;
+            }
+            if (!value) {
+                continue;
+            }
+            size += value.byteLength;
+            if (size > limit) {
+                await reader.cancel().catch(() => undefined);
+                return tooLarge;
+            }
+            text += decoder.decode(value, { stream: true });
         }
-        size += value.byteLength;
-        if (size > limit) {
-            await reader.cancel().catch(() => undefined);
-            return tooLarge;
-        }
-        text += decoder.decode(value, { stream: true });
+        return { ok: true, text: text + decoder.decode() };
+    } finally {
+        reader.releaseLock();
     }
-    return { ok: true, text: text + decoder.decode() };
 }
 
 async function readErrorCode(response: Response): Promise<string | null> {
@@ -149,6 +158,14 @@ export async function fetchDiscovery(url: string, options: DiscoveryFetchOptions
     const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
     const controller = new AbortController();
     const timeoutMs = options.timeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS;
+    const onCallerAbort = () => controller.abort();
+    if (options.signal) {
+        if (options.signal.aborted) {
+            controller.abort();
+        } else {
+            options.signal.addEventListener("abort", onCallerAbort, { once: true });
+        }
+    }
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const headers: Record<string, string> = { Accept: "application/json", "Cache-Control": "no-store" };
     if (options.token !== undefined) {
@@ -173,7 +190,11 @@ export async function fetchDiscovery(url: string, options: DiscoveryFetchOptions
             });
         } catch (error) {
             if ((error as { name?: string })?.name === "AbortError") {
-                return fail(`discovery timed out after ${timeoutMs} ms at ${url}`);
+                return fail(
+                    options.signal?.aborted
+                        ? `discovery aborted at ${url}`
+                        : `discovery timed out after ${timeoutMs} ms at ${url}`,
+                );
             }
             return fail(`could not reach ${url} (${(error as Error)?.message ?? String(error)}); ${corsHint()}`, null, true);
         }
@@ -182,6 +203,7 @@ export async function fetchDiscovery(url: string, options: DiscoveryFetchOptions
             return fail(`discovery at ${url}: ${REDIRECT_REFUSED}`, response.status || null);
         }
         if (response.status === 401) {
+            await response.body?.cancel().catch(() => undefined);
             return fail(
                 options.token === undefined
                     ? "the producer requires a bearer token; add one to this connection"
@@ -197,12 +219,14 @@ export async function fetchDiscovery(url: string, options: DiscoveryFetchOptions
             return fail(`the producer refused the request (HTTP 403${code ? ` ${code}` : ""})`, 403);
         }
         if (response.status === 404) {
+            await response.body?.cancel().catch(() => undefined);
             return fail(
                 `no discovery document at ${url} (HTTP 404); the producer may not publish telemetry — enter its stream URL instead`,
                 404,
             );
         }
         if (!response.ok) {
+            await response.body?.cancel().catch(() => undefined);
             return fail(`discovery failed with HTTP ${response.status} at ${url}`, response.status);
         }
         let body: unknown;
@@ -214,7 +238,11 @@ export async function fetchDiscovery(url: string, options: DiscoveryFetchOptions
             body = JSON.parse(read.text);
         } catch (error) {
             if ((error as { name?: string })?.name === "AbortError") {
-                return fail(`discovery timed out after ${timeoutMs} ms at ${url}`);
+                return fail(
+                    options.signal?.aborted
+                        ? `discovery aborted at ${url}`
+                        : `discovery timed out after ${timeoutMs} ms at ${url}`,
+                );
             }
             return fail(`the discovery document at ${url} is not JSON`, response.status);
         }
@@ -228,6 +256,7 @@ export async function fetchDiscovery(url: string, options: DiscoveryFetchOptions
         return { ok: true, discovery: parsed.discovery, status: response.status, error: null, corsSuspected: false };
     } finally {
         clearTimeout(timer);
+        options.signal?.removeEventListener("abort", onCallerAbort);
     }
 }
 

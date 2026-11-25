@@ -38,7 +38,7 @@ export {
     type ProducerIdentity,
 } from "./manager";
 export { connectLiveSession, type LiveSessionOptions } from "./session";
-export { LineSplitter, SseParser, type SseMessage } from "./sse";
+export { LineSplitter, MAX_LINE_CHARS, MAX_SSE_FIELD_CHARS, SseParser, type SseMessage } from "./sse";
 export {
     describeStatus,
     producerState,
@@ -46,4 +46,10 @@ export {
     type StatusTone,
     type StatusView,
 } from "./status";
-export type { FetchLike } from "./transports";
+export {
+    isValidHttpHeaderValue,
+    parseRetryAfterMs,
+    parseSseControlComment,
+    type FetchLike,
+    type SseServerNotice,
+} from "./transports";

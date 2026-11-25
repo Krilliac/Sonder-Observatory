@@ -5,7 +5,12 @@
  */
 import type { WebSocketFactory, WebSocketLike } from "../../transport/live";
 import { withQueryParam, type TransportKind } from "./endpoint";
-import { LineSplitter, MAX_LINE_CHARS, SseParser } from "./sse";
+import { LineSplitter, MAX_LINE_CHARS, MAX_SSE_FIELD_CHARS, SseParser } from "./sse";
+
+/** Producer-announced live stream notices carried in SSE comments (live protocol v1). */
+export type SseServerNotice =
+    | { kind: "resume-gap"; from: number; to: number }
+    | { kind: "dropped"; count: number };
 
 export interface TransportCallbacks {
     onOpen(kind: TransportKind): void;
@@ -13,8 +18,10 @@ export interface TransportCallbacks {
     onPayload(text: string, id: string | null): void | Promise<void>;
     /** A frame that cannot carry NDJSON text (for example a binary frame). */
     onInvalidFrame(reason: string): void;
-    /** Server-requested reconnection delay (SSE `retry:`). */
+    /** Server-requested reconnection delay (SSE `retry:` or HTTP `Retry-After`). */
     onRetryHint(ms: number): void;
+    /** Producer-announced SSE stream notice (`: resume-gap` or `: dropped`). */
+    onServerNotice?(notice: SseServerNotice): void;
     onClose(reason: string, failed: boolean): void;
     /**
      * Resolves when the consumer has room again. Pull-based transports
@@ -22,6 +29,76 @@ export interface TransportCallbacks {
      * applies TCP backpressure instead of dropping events.
      */
     waitForCapacity(): Promise<void>;
+}
+
+/**
+ * Parses an HTTP `Retry-After` header (RFC 9110: non-negative integer seconds
+ * or HTTP-date) into a delay in milliseconds, or null when missing/invalid.
+ */
+export function parseRetryAfterMs(header: string | null, nowMs: number = Date.now()): number | null {
+    if (header === null) {
+        return null;
+    }
+    const trimmed = header.trim();
+    if (trimmed === "") {
+        return null;
+    }
+    if (/^\d+$/.test(trimmed)) {
+        const seconds = Number(trimmed);
+        return Number.isFinite(seconds) ? seconds * 1000 : null;
+    }
+    // Every RFC 9110 HTTP-date includes month/day letters; guard against V8's loose Date.parse("-5").
+    if (!/[a-zA-Z]/.test(trimmed)) {
+        return null;
+    }
+    const dateMs = Date.parse(trimmed);
+    if (Number.isFinite(dateMs)) {
+        return Math.max(0, dateMs - nowMs);
+    }
+    return null;
+}
+
+/**
+ * True when `value` can safely be placed in an HTTP request header (Fetch API
+ * ByteString: Latin-1 without C0/DEL control characters, bounded length).
+ */
+export function isValidHttpHeaderValue(value: string): boolean {
+    if (value.length === 0 || value.length > MAX_SSE_FIELD_CHARS) {
+        return false;
+    }
+    for (let i = 0; i < value.length; i += 1) {
+        const code = value.charCodeAt(i);
+        if (code < 0x20 || code === 0x7f || code > 0xff) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * Parses Sonder live-protocol v1 SSE comments:
+ * - `: resume-gap <from>-<to>`
+ * - `: dropped <n>`
+ */
+export function parseSseControlComment(comment: string): SseServerNotice | null {
+    const trimmed = comment.trim();
+    const gap = /^resume-gap\s+(\d+)-(\d+)$/.exec(trimmed);
+    if (gap) {
+        const from = Number(gap[1]);
+        const to = Number(gap[2]);
+        if (Number.isSafeInteger(from) && Number.isSafeInteger(to) && from <= to) {
+            return { kind: "resume-gap", from, to };
+        }
+        return null;
+    }
+    const dropped = /^dropped\s+(\d+)$/.exec(trimmed);
+    if (dropped) {
+        const count = Number(dropped[1]);
+        if (Number.isSafeInteger(count) && count > 0) {
+            return { kind: "dropped", count };
+        }
+    }
+    return null;
 }
 
 export interface TransportRequest {
@@ -171,10 +248,17 @@ export function openHttpStream(
                     : "text/event-stream, application/x-ndjson;q=0.5",
             "Cache-Control": "no-store",
         };
+        let streamUrl = request.url;
         if (request.lastEventId) {
-            headers["Last-Event-ID"] = request.lastEventId;
+            if (isValidHttpHeaderValue(request.lastEventId)) {
+                headers["Last-Event-ID"] = request.lastEventId;
+            } else if (!request.lastEventId.includes("\u0000") && request.lastEventId.length <= MAX_SSE_FIELD_CHARS) {
+                // Non-ByteString cursors (e.g. Unicode > 0xFF) would throw TypeError in Fetch Headers;
+                // fall back to the protocol's percent-encoded query parameter so reconnect never loops on TypeError.
+                streamUrl = withQueryParam(request.url, request.resumeParam, request.lastEventId);
+            }
         }
-        const response = await fetchImpl(request.url, {
+        const response = await fetchImpl(streamUrl, {
             headers,
             signal: controller.signal,
             cache: "no-store",
@@ -187,6 +271,11 @@ export function openHttpStream(
             return;
         }
         if (!response.ok || !response.body) {
+            const retryAfter = parseRetryAfterMs(response.headers.get("retry-after"));
+            if (retryAfter !== null) {
+                callbacks.onRetryHint(retryAfter);
+            }
+            await response.body?.cancel().catch(() => undefined);
             finish(describeHttpFailure(response.status), true);
             return;
         }
@@ -216,6 +305,12 @@ export function openHttpStream(
                     }
                 },
                 onRetry: (ms) => callbacks.onRetryHint(ms),
+                onComment: (comment) => {
+                    const notice = parseSseControlComment(comment);
+                    if (notice !== null) {
+                        callbacks.onServerNotice?.(notice);
+                    }
+                },
                 onOversize: (reason) => callbacks.onInvalidFrame(reason),
             });
             feed = (text) => parser.feed(text);
@@ -254,7 +349,9 @@ export function openHttpStream(
                     finish("stream ended", false);
                     break;
                 }
-                feed(decoder.decode(value, { stream: true }));
+                if (value) {
+                    feed(decoder.decode(value, { stream: true }));
+                }
                 await deliver();
             }
         } finally {

@@ -106,6 +106,19 @@ describe("live SessionStore retention", () => {
         expect(store.events.at(-1)!.event_id).toBe("e14");
         expect(store.retentionNotice).toContain(`${store.droppedByRetention} older live event(s) dropped`);
     });
+
+    it("handles a single oversized live event exceeding maxLiveBytes and retains strict ordering watermark", () => {
+        const store = new SessionStore({ maxLiveEvents: 100, maxLiveBytes: 1000 });
+        store.reset("live", "http://127.0.0.1:11437/events");
+        store.append([ev(10, { attributes: { payload: "x".repeat(1200) } })]);
+        expect(store.events).toEqual([]);
+        expect(store.retainedBytes).toBe(0);
+        expect(store.droppedByRetention).toBe(1);
+        // Earlier events remain rejected by the eviction watermark; newer small events are retained.
+        store.append([ev(9, { event_id: "older-than-evicted" }), ev(11, { event_id: "small-new" })]);
+        expect(store.events.map((e) => e.event_id)).toEqual(["small-new"]);
+        expect(store.droppedByRetention).toBe(2);
+    });
 });
 
 describe("live SessionStore incremental ordering", () => {
