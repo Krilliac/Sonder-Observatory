@@ -28,7 +28,14 @@ import type { WebSocketFactory } from "../../transport/live";
 import { LiveIngestClient, type LiveIngestStatus } from "./client";
 import { DEFAULT_DISCOVERY_TIMEOUT_MS, classifyProducerUrl, corsHint, fetchDiscovery, selectStream } from "./discovery";
 import { isLoopbackHost, resolveEndpoint, type TransportPreference } from "./endpoint";
-import { fetchProducerHealth, healthUrl, type ProducerHealth } from "./health";
+import {
+    fetchProducerHealth,
+    fetchProducerNode,
+    healthUrl,
+    nodeUrl,
+    type ProducerHealth,
+    type ProducerNode,
+} from "./health";
 import { NO_CREDENTIALS, NO_REDIRECTS, describeHttpFailure, isRedirect, type FetchLike } from "./transports";
 
 export type { FetchLike } from "./transports";
@@ -66,6 +73,12 @@ export interface ProducerConnection {
      * (same origin only); null until fetched, or when there is none.
      */
     health: ProducerHealth | null;
+    /**
+     * Node GPU inventory and hybrid VRAM pool summary from discovery `links.node`
+     * (`/v1/sonder/node`, same-origin + loopback/private-host only); absent when
+     * not advertised or not yet fetched.
+     */
+    node?: ProducerNode | null;
     status: LiveIngestStatus;
 }
 
@@ -414,6 +427,7 @@ export class LiveConnectionManager {
             entry.connection.discovery = fetched.discovery;
             entry.connection.identity = identityFromDiscovery(fetched.discovery);
             void this.loadHealth(entry, classified.discoveryUrl!, fetched.discovery.links?.health, token);
+            void this.loadNode(entry, classified.discoveryUrl!, fetched.discovery.links?.node, token);
             const selected = selectStream(fetched.discovery, classified.discoveryUrl!, {
                 transport: input.transport,
                 hasToken: token !== undefined,
@@ -479,6 +493,19 @@ export class LiveConnectionManager {
         const health = await fetchProducerHealth(url, { token, fetch: this.options.fetch, timeoutMs: this.options.discoveryTimeoutMs });
         if (health !== null && !entry.removed) {
             entry.connection.health = health;
+            this.notify();
+        }
+    }
+
+    /** Fetches the optional `/v1/sonder/node` document; same-origin + private/loopback only, failures silent. */
+    private async loadNode(entry: Entry, discoveryUrl: string, link: unknown, token: string | undefined): Promise<void> {
+        const url = nodeUrl(discoveryUrl, link);
+        if (url === null) {
+            return;
+        }
+        const node = await fetchProducerNode(url, { token, fetch: this.options.fetch, timeoutMs: this.options.discoveryTimeoutMs });
+        if (node !== null && !entry.removed) {
+            entry.connection.node = node;
             this.notify();
         }
     }
