@@ -11,8 +11,10 @@
  */
 import { classifyProducerUrl } from "../ingest/live/discovery";
 import type { TransportPreference } from "../ingest/live/endpoint";
+import type { ProducerNode } from "../ingest/live/health";
 import { LOCAL_PRESETS, probeProducer, type ProbeOptions, type ProbeResult, type ProducerEndpointInput } from "../ingest/live/manager";
 import { h } from "./dom";
+import { fmtBytes } from "./format";
 import { redactUrlSecrets } from "./params";
 
 export const RECENT_ENDPOINTS_KEY = "sonder-observatory.recent-endpoints";
@@ -161,6 +163,39 @@ export interface ProbeReport {
     lines: string[];
 }
 
+function formatMib(mib: number): string {
+    return fmtBytes(mib * 1024 * 1024);
+}
+
+function describeProbedNode(node: ProducerNode): string {
+    const discrete = node.gpuPool?.discreteGpuCount ?? node.gpus.filter((g) => g.isIntegratedUma === false).length;
+    const uma = node.gpuPool?.integratedUmaGpuCount ?? node.gpus.filter((g) => g.isIntegratedUma === true).length;
+    const gpuParts: string[] = [];
+    if (discrete > 0) {
+        gpuParts.push(`${discrete} discrete`);
+    }
+    if (uma > 0) {
+        gpuParts.push(`${uma} UMA`);
+    }
+    const gpuSummary =
+        node.gpus.length === 0
+            ? "0 GPUs"
+            : `${node.gpus.length} GPU${node.gpus.length === 1 ? "" : "s"}${gpuParts.length > 0 ? ` (${gpuParts.join(", ")})` : ""}`;
+    const details: string[] = [gpuSummary];
+    if (node.combinedGpuVramMib !== null && Number.isFinite(node.combinedGpuVramMib) && node.combinedGpuVramMib >= 0) {
+        details.push(`${formatMib(node.combinedGpuVramMib)} combined VRAM`);
+    }
+    if (node.gpuPool?.hybridVulkanPoolAvailable === true) {
+        const devs = node.gpuPool.llamaArgDevice ?? node.gpuPool.recommendedDevices.join(",");
+        details.push(devs ? `Hybrid Vulkan pool (${devs})` : "Hybrid Vulkan pool");
+    }
+    if (node.models.length > 0) {
+        details.push(`${node.models.length} model${node.models.length === 1 ? "" : "s"}`);
+    }
+    const platform = node.platform ? ` (${node.platform})` : "";
+    return `Node${platform}: ${details.join(" · ")}.`;
+}
+
 /** Human-readable result of the Test button. */
 export function describeProbe(url: string, result: ProbeResult, hasToken: boolean): ProbeReport {
     if (!result.ok) {
@@ -173,14 +208,15 @@ export function describeProbe(url: string, result: ProbeResult, hasToken: boolea
     }
     const p = d.producer;
     const transports = d.streams.map((s) => s.transport).join(", ");
-    return {
-        ok: true,
-        lines: [
-            `Found ${p.name} ${p.version} (role ${p.role}${p.synthetic ? ", SYNTHETIC data" : ""}) on node ${p.node_id}, instance ${p.instance_id}.`,
-            `Streams: ${transports}; would open ${result.streamUrl ?? "none"}.`,
-            `Auth: ${d.auth.required ? `bearer token required${hasToken ? " (token given)" : " (enter it under Bearer token)"}` : "none"}. Retained events: ${d.resume.retained_events}.`,
-        ],
-    };
+    const lines = [
+        `Found ${p.name} ${p.version} (role ${p.role}${p.synthetic ? ", SYNTHETIC data" : ""}) on node ${p.node_id}, instance ${p.instance_id}.`,
+        `Streams: ${transports}; would open ${result.streamUrl ?? "none"}.`,
+        `Auth: ${d.auth.required ? `bearer token required${hasToken ? " (token given)" : " (enter it under Bearer token)"}` : "none"}. Retained events: ${d.resume.retained_events}.`,
+    ];
+    if (result.node) {
+        lines.push(describeProbedNode(result.node));
+    }
+    return { ok: true, lines };
 }
 
 export interface ConnectionPanelCallbacks {

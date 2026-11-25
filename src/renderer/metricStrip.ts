@@ -10,7 +10,7 @@ import type { PrefillDecodeMetrics } from "../query/prefillDecode";
 import type { StripSeries } from "../query/series";
 import { h, svg } from "./dom";
 import { fmtMs, fmtRate } from "./format";
-import { stripRouteSummary } from "./routeBadges";
+import { stripBreakdownSummary, stripRouteSummary } from "./routeBadges";
 
 export interface StripExtras {
     prefillDecode?: PrefillDecodeMetrics;
@@ -64,7 +64,23 @@ export function stripItems(m: Metrics, s: StripSeries, extras?: StripExtras): St
     const t = m.tokens;
     const kv = s.kvLatest;
     const model = s.activeModel;
-    const routeSummary = extras?.routes ? stripRouteSummary(extras.routes) : null;
+    const routeSummary = extras?.routes
+        ? stripRouteSummary(extras.routes, m.orchestration)
+        : stripBreakdownSummary(m.executionRoutes, m.orchestration);
+    let embedCount = 0;
+    for (const r of m.requests) {
+        if (r.requestKind === "embed") {
+            embedCount += 1;
+        }
+    }
+    const latencyP50Sub =
+        embedCount === 0
+            ? m.requestLatency.count > 0
+                ? `${m.requestLatency.count} finished requests`
+                : "no finished requests"
+            : m.requestLatency.count > 0
+              ? `${m.requestLatency.count} finished requests · ${embedCount} embed`
+              : `${embedCount} embed request${embedCount === 1 ? "" : "s"}`;
     return [
         {
             id: "tokens",
@@ -79,7 +95,7 @@ export function stripItems(m: Metrics, s: StripSeries, extras?: StripExtras): St
             id: "latency-p50",
             title: "Latency p50",
             value: fmtMs(m.requestLatency.p50Ms),
-            sub: m.requestLatency.count > 0 ? `${m.requestLatency.count} finished requests` : "no finished requests",
+            sub: latencyP50Sub,
             points: s.latencyP50,
             tone: "latency",
             trend: `rolling p50 over the last 8 finished requests, ${trendWords(s.latencyP50)}`,
