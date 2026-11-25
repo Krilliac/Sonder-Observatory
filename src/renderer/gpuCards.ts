@@ -1,6 +1,17 @@
-import type { GpuBackendMetrics, GpuMetrics, GpuMemorySample, GpuWarning } from "../query/gpuMemory";
+import type {
+    CombinedGpuPool,
+    GpuBackendMetrics,
+    GpuDeviceClass,
+    GpuMemorySample,
+    GpuMetrics,
+    GpuWarning,
+    GpuWeightsEvidence,
+    MultiGpuMetrics,
+    NodeGpuDeviceMetrics,
+    NodeGpuMetrics,
+} from "../query/gpuMemory";
 import { h, svg } from "./dom";
-import { fmtBytes } from "./format";
+import { fmtBytes, fmtPct } from "./format";
 import "./gpuCards.css";
 
 export interface GpuChartPoint {
@@ -238,4 +249,345 @@ function card(model: GpuCardModel): HTMLElement {
 
 export function renderGpuCards(metrics: GpuMetrics): HTMLElement[] {
     return gpuCardModels(metrics).map(card);
+}
+
+// ---------------------------------------------------------------------------
+// Per-node multi-GPU VRAM cards (discrete vs integrated UMA + combined pool)
+// ---------------------------------------------------------------------------
+
+export interface NodeGpuDeviceCardRow {
+    key: string;
+    deviceId: string;
+    name: string;
+    vendor: string | null;
+    gpuClass: GpuDeviceClass;
+    classLabel: string;
+    backendHint: string | null;
+    source: string | null;
+    effectiveTotalBytes: number | null;
+    effectiveUsedBytes: number | null;
+    effectiveFreeBytes: number | null;
+    usedFraction: number | null;
+    dedicatedTotalBytes: number | null;
+    sharedTotalBytes: number | null;
+    modelWeightsBytes: number | null;
+    carryingModelWeights: boolean;
+    weightsEvidence: GpuWeightsEvidence;
+    usageText: string;
+    detailText: string | null;
+}
+
+export interface NodeCombinedPoolModel {
+    badge: string;
+    tone: "active" | "hybrid" | "pool";
+    isHybridDiscreteUma: boolean;
+    bothCarryingWeights: boolean;
+    multiGpuActive: boolean;
+    weightsEvidence: GpuWeightsEvidence;
+    summaryText: string;
+    splitText: string | null;
+    discretePercent: number;
+    umaPercent: number;
+    totalUsedPercent: number | null;
+    activeDevices: string[];
+}
+
+export interface NodeGpuCardModel {
+    key: string;
+    nodeId: string;
+    identity: string;
+    gpuMixLabel: string;
+    synthetic: boolean;
+    latestWallTime: string | null;
+    devices: NodeGpuDeviceCardRow[];
+    combinedPool: NodeCombinedPoolModel | null;
+}
+
+export function gpuClassLabel(gpuClass: GpuDeviceClass): string {
+    switch (gpuClass) {
+        case "discrete":
+            return "Discrete";
+        case "integrated-uma":
+            return "Integrated UMA";
+        default:
+            return "GPU";
+    }
+}
+
+export function nodeGpuDeviceSummary(device: NodeGpuDeviceMetrics): { usageText: string; detailText: string | null } {
+    const latest = device.latest;
+    if (!latest || (latest.effectiveTotalBytes === null && latest.effectiveUsedBytes === null && latest.effectiveFreeBytes === null)) {
+        return { usageText: "VRAM reading unavailable", detailText: null };
+    }
+    const isUma = device.gpuClass === "integrated-uma";
+    const poolWord = isUma ? "UMA pool" : "VRAM";
+    let usageText: string;
+    if (latest.effectiveUsedBytes !== null && latest.effectiveTotalBytes !== null) {
+        const pct = latest.usedFraction !== null ? ` (${fmtPct(latest.usedFraction)})` : "";
+        usageText = `${fmtBytes(latest.effectiveUsedBytes)} / ${fmtBytes(latest.effectiveTotalBytes)} ${poolWord}${pct}`;
+    } else if (latest.effectiveTotalBytes !== null) {
+        usageText = `${fmtBytes(latest.effectiveTotalBytes)} ${poolWord} total · usage unknown`;
+    } else if (latest.effectiveFreeBytes !== null) {
+        usageText = `${fmtBytes(latest.effectiveFreeBytes)} ${poolWord} free`;
+    } else {
+        usageText = `${fmtBytes(latest.effectiveUsedBytes!)} ${poolWord} used`;
+    }
+
+    const details: string[] = [];
+    if (latest.effectiveFreeBytes !== null && latest.effectiveUsedBytes !== null) {
+        details.push(`${fmtBytes(latest.effectiveFreeBytes)} free`);
+    }
+    if (isUma) {
+        if (latest.dedicatedTotalBytes !== null && latest.sharedTotalBytes !== null) {
+            details.push(`${fmtBytes(latest.dedicatedTotalBytes)} carveout + ${fmtBytes(latest.sharedTotalBytes)} shared GTT`);
+        } else if (latest.sharedTotalBytes !== null) {
+            details.push(`${fmtBytes(latest.sharedTotalBytes)} shared GTT`);
+        }
+    } else if (latest.sharedTotalBytes !== null) {
+        details.push(`${fmtBytes(latest.sharedTotalBytes)} shared`);
+    }
+    if (latest.modelWeightsBytes !== null && latest.modelWeightsBytes > 0) {
+        details.push(`weights ${fmtBytes(latest.modelWeightsBytes)}`);
+    }
+    return { usageText, detailText: details.length > 0 ? details.join(" · ") : null };
+}
+
+export function combinedPoolModel(pool: CombinedGpuPool): NodeCombinedPoolModel {
+    const badge = pool.bothCarryingWeights
+        ? "Combined VRAM Pool Active"
+        : pool.multiGpuActive
+          ? "Multi-GPU Pool Active"
+          : pool.isHybridDiscreteUma
+            ? "Hybrid Discrete + UMA Pool"
+            : "Multi-GPU VRAM Pool";
+    const tone: NodeCombinedPoolModel["tone"] = pool.bothCarryingWeights || pool.multiGpuActive ? "active" : pool.isHybridDiscreteUma ? "hybrid" : "pool";
+
+    let summaryText: string;
+    if (pool.combinedUsedBytes !== null && pool.combinedTotalBytes !== null) {
+        const pct = pool.combinedUsedFraction !== null ? ` (${fmtPct(pool.combinedUsedFraction)})` : "";
+        summaryText = `${fmtBytes(pool.combinedUsedBytes)} / ${fmtBytes(pool.combinedTotalBytes)} combined${pct}`;
+    } else if (pool.combinedTotalBytes !== null) {
+        summaryText = `${fmtBytes(pool.combinedTotalBytes)} combined capacity · usage partial`;
+    } else {
+        summaryText = "Combined VRAM total unavailable (partial device readings)";
+    }
+
+    const splitParts: string[] = [];
+    if (pool.discreteCount > 0) {
+        const dText =
+            pool.discreteUsedBytes !== null && pool.discreteTotalBytes !== null
+                ? `${fmtBytes(pool.discreteUsedBytes)} / ${fmtBytes(pool.discreteTotalBytes)}`
+                : pool.discreteTotalBytes !== null
+                  ? fmtBytes(pool.discreteTotalBytes)
+                  : "unknown";
+        splitParts.push(`Discrete ${dText}`);
+    }
+    if (pool.integratedUmaCount > 0) {
+        const uText =
+            pool.umaUsedBytes !== null && pool.umaTotalBytes !== null
+                ? `${fmtBytes(pool.umaUsedBytes)} / ${fmtBytes(pool.umaTotalBytes)}`
+                : pool.umaTotalBytes !== null
+                  ? fmtBytes(pool.umaTotalBytes)
+                  : "unknown";
+        splitParts.push(`UMA ${uText}`);
+    }
+    if (pool.bothCarryingWeights) {
+        splitParts.push(pool.weightsEvidence === "reported" ? "both GPUs carrying weights (reported)" : "both GPUs carrying weights (observed VRAM)");
+    }
+
+    const total = pool.combinedTotalBytes ?? 0;
+    const discretePercent = total > 0 && pool.discreteUsedBytes !== null ? Math.min(100, Math.max(0, (pool.discreteUsedBytes / total) * 100)) : 0;
+    const umaPercent = total > 0 && pool.umaUsedBytes !== null ? Math.min(100 - discretePercent, Math.max(0, (pool.umaUsedBytes / total) * 100)) : 0;
+    const totalUsedPercent = pool.combinedUsedFraction !== null ? Math.round(pool.combinedUsedFraction * 100) : null;
+
+    return {
+        badge,
+        tone,
+        isHybridDiscreteUma: pool.isHybridDiscreteUma,
+        bothCarryingWeights: pool.bothCarryingWeights,
+        multiGpuActive: pool.multiGpuActive,
+        weightsEvidence: pool.weightsEvidence,
+        summaryText,
+        splitText: splitParts.length > 0 ? splitParts.join(" · ") : null,
+        discretePercent,
+        umaPercent,
+        totalUsedPercent,
+        activeDevices: pool.activeDevices,
+    };
+}
+
+function gpuMixLabel(node: NodeGpuMetrics): string {
+    const discrete = node.devices.filter((d) => d.gpuClass === "discrete").length;
+    const uma = node.devices.filter((d) => d.gpuClass === "integrated-uma").length;
+    const total = node.devices.length;
+    const prefix = `${total} GPU${total === 1 ? "" : "s"}`;
+    if (discrete > 0 && uma > 0) {
+        return `${prefix} · Discrete + UMA`;
+    }
+    if (discrete > 0) {
+        return `${prefix} · Discrete`;
+    }
+    if (uma > 0) {
+        return `${prefix} · Integrated UMA`;
+    }
+    return prefix;
+}
+
+/** Pure renderer model for per-node multi-GPU VRAM cards. */
+export function nodeGpuCardModels(metrics: MultiGpuMetrics): NodeGpuCardModel[] {
+    return metrics.nodes
+        .filter((node) => node.devices.length > 0)
+        .map((node) => ({
+            key: node.key,
+            nodeId: node.nodeId,
+            identity: [node.producer, node.instanceId].filter(Boolean).join(" · "),
+            gpuMixLabel: gpuMixLabel(node),
+            synthetic: node.synthetic,
+            latestWallTime: node.latestWallTime,
+            devices: node.devices.map((device) => {
+                const { usageText, detailText } = nodeGpuDeviceSummary(device);
+                return {
+                    key: device.key,
+                    deviceId: device.deviceId,
+                    name: device.name,
+                    vendor: device.vendor,
+                    gpuClass: device.gpuClass,
+                    classLabel: gpuClassLabel(device.gpuClass),
+                    backendHint: device.backendHint,
+                    source: device.source,
+                    effectiveTotalBytes: device.latest?.effectiveTotalBytes ?? null,
+                    effectiveUsedBytes: device.latest?.effectiveUsedBytes ?? null,
+                    effectiveFreeBytes: device.latest?.effectiveFreeBytes ?? null,
+                    usedFraction: device.latest?.usedFraction ?? null,
+                    dedicatedTotalBytes: device.latest?.dedicatedTotalBytes ?? null,
+                    sharedTotalBytes: device.latest?.sharedTotalBytes ?? null,
+                    modelWeightsBytes: device.latest?.modelWeightsBytes ?? null,
+                    carryingModelWeights: device.carryingModelWeights,
+                    weightsEvidence: device.weightsEvidence,
+                    usageText,
+                    detailText,
+                };
+            }),
+            combinedPool: node.combinedPool ? combinedPoolModel(node.combinedPool) : null,
+        }));
+}
+
+function renderCombinedPoolBanner(pool: NodeCombinedPoolModel): HTMLElement {
+    const bar =
+        pool.totalUsedPercent !== null
+            ? h(
+                  "div",
+                  {
+                      class: "gpu-pool-bar",
+                      role: "progressbar",
+                      "aria-label": `Combined VRAM utilization: ${pool.totalUsedPercent}%`,
+                      "aria-valuemin": 0,
+                      "aria-valuemax": 100,
+                      "aria-valuenow": pool.totalUsedPercent,
+                  },
+                  pool.discretePercent > 0
+                      ? h("span", { class: "gpu-pool-seg gpu-pool-seg-discrete", style: `width:${pool.discretePercent.toFixed(1)}%` })
+                      : null,
+                  pool.umaPercent > 0
+                      ? h("span", { class: "gpu-pool-seg gpu-pool-seg-uma", style: `width:${pool.umaPercent.toFixed(1)}%` })
+                      : null,
+              )
+            : null;
+
+    return h(
+        "div",
+        {
+            class: `gpu-pool-banner gpu-pool-${pool.tone}`,
+            "data-testid": "combined-vram-pool",
+            "data-both-carrying": pool.bothCarryingWeights ? "true" : "false",
+        },
+        h(
+            "div",
+            { class: "gpu-pool-head" },
+            h("span", { class: `gpu-pool-badge gpu-pool-badge-${pool.tone}`, text: pool.badge }),
+            ...pool.activeDevices.map((dev) => h("span", { class: "gpu-device-pill mono", text: dev })),
+        ),
+        h("div", { class: "gpu-pool-summary", text: pool.summaryText }),
+        bar,
+        pool.splitText ? h("div", { class: "gpu-pool-split", text: pool.splitText }) : null,
+    );
+}
+
+function renderNodeGpuDeviceRow(device: NodeGpuDeviceCardRow): HTMLElement {
+    const pct = device.usedFraction !== null ? Math.round(device.usedFraction * 100) : null;
+    const bar =
+        pct !== null
+            ? h(
+                  "div",
+                  {
+                      class: "gpu-vram-bar",
+                      role: "progressbar",
+                      "aria-label": `${device.name} ${device.classLabel} memory: ${pct}%`,
+                      "aria-valuemin": 0,
+                      "aria-valuemax": 100,
+                      "aria-valuenow": pct,
+                  },
+                  h("span", {
+                      class: `gpu-vram-fill gpu-vram-fill-${device.gpuClass}`,
+                      style: `width:${Math.min(100, Math.max(0, pct))}%`,
+                  }),
+              )
+            : null;
+
+    return h(
+        "li",
+        { class: "gpu-device-row", "data-gpu-device": device.deviceId, "data-gpu-class": device.gpuClass },
+        h(
+            "div",
+            { class: "gpu-device-head" },
+            h("span", { class: "gpu-device-name", text: device.name }),
+            h("span", { class: "gpu-device-id mono", text: device.deviceId }),
+            h("span", { class: `gpu-class-badge gpu-class-${device.gpuClass}`, text: device.classLabel }),
+            device.backendHint ? h("span", { class: "gpu-device-pill mono", text: device.backendHint }) : null,
+            device.carryingModelWeights
+                ? h("span", {
+                      class: "gpu-weights-badge",
+                      title: device.weightsEvidence === "reported" ? "Producer reported active model weights" : "Observed active VRAM allocation",
+                      text: "Model weights",
+                  })
+                : null,
+        ),
+        h("div", { class: "gpu-device-usage", text: device.usageText }),
+        bar,
+        device.detailText ? h("div", { class: "gpu-device-detail", text: device.detailText }) : null,
+    );
+}
+
+function renderNodeGpuCard(model: NodeGpuCardModel): HTMLElement {
+    return h(
+        "article",
+        { class: "gpu-card gpu-node-card card", "data-gpu-node": model.nodeId, "data-testid": "gpu-node-card" },
+        h(
+            "header",
+            { class: "gpu-card-header" },
+            h(
+                "div",
+                {},
+                h(
+                    "div",
+                    { class: "gpu-node-title-row" },
+                    h("h3", { text: "GPU VRAM" }),
+                    h("span", { class: "producer-node mono", text: model.nodeId }),
+                    h("span", { class: "gpu-mix-pill", text: model.gpuMixLabel }),
+                ),
+                h("p", { class: "gpu-identity", text: model.identity || "producer identity unavailable" }),
+            ),
+            model.synthetic ? h("span", { class: "tag tag-synthetic", text: "synthetic" }) : null,
+        ),
+        model.combinedPool ? renderCombinedPoolBanner(model.combinedPool) : null,
+        h("ul", { class: "gpu-device-list", "aria-label": `GPUs on ${model.nodeId}` }, ...model.devices.map(renderNodeGpuDeviceRow)),
+        h("div", {
+            class: "gpu-chart-meta",
+            text: `producer-reported · device.memory.sample (kind=gpu)${model.latestWallTime ? ` · last sample ${model.latestWallTime}` : ""}`,
+        }),
+    );
+}
+
+export function renderNodeGpuCards(metrics: MultiGpuMetrics): HTMLElement[] {
+    return nodeGpuCardModels(metrics).map(renderNodeGpuCard);
 }

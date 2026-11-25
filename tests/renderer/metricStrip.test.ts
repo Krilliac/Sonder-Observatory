@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { ollamaPoolFixture } from "../../src/inference3d/fixtures";
+import { deriveExecutionRoutes } from "../../src/query/executionRoute";
 import { deriveMetrics } from "../../src/query/metrics";
+import { derivePrefillDecode } from "../../src/query/prefillDecode";
 import { stripSeries } from "../../src/query/series";
 import { renderMetricStrip, stripItems, type StripItem } from "../../src/renderer/metricStrip";
 import type { ObservatoryEvent } from "../../src/protocol/events";
-import { makeEvent } from "../helpers";
+import { at, makeEvent } from "../helpers";
 
 describe("metric strip", () => {
     const events = ollamaPoolFixture();
@@ -42,6 +44,38 @@ describe("metric strip", () => {
         expect(byId.kv!.value).toBe("0%");
         expect(byId.kv!.sub).toBe("24 / 8192 logical blocks");
         expect(byId.model!.value).toBe("qwen3:14b");
+    });
+
+    it("surfaces prefill tok/s, reload counts, and execution_route badges in strip sub-lines while keeping 6 cards", () => {
+        const prod = { name: "sonder-inference", version: "0.4.0", node_id: "NODE1", instance_id: "tel-node1" };
+        const rt = { name: "sonder-runtime", version: "0.9.0", node_id: "workstation", instance_id: "rt-1", role: "runtime" };
+        const dualEvents: ObservatoryEvent[] = [
+            at(0, "route.selected", {
+                producer: rt,
+                request_id: "t1",
+                attributes: {
+                    execution_route: { mode: "ensemble", band: "hard", difficulty_score: 0.8, recommended_tiers: ["code", "reasoning"], auto_selected: true },
+                },
+            }),
+            at(0, "request.started", { producer: prod, request_id: "r1" }),
+            at(3500, "inference.token.generated", { producer: prod, request_id: "r1", attributes: { unit: "chunk" } }),
+            at(4500, "backend.model.load.reported", { producer: prod, request_id: "r1", attributes: { load_duration_ns: 3_000_000_000 } }),
+            at(4500, "inference.prefill.completed", { producer: prod, request_id: "r1", attributes: { prompt_tokens: 1000, backend_prompt_eval_ms: 4000, ttft_ms: 3500 } }),
+            at(4500, "inference.decode.completed", { producer: prod, request_id: "r1", attributes: { completion_tokens: 40, backend_eval_ms: 1000 } }),
+            at(4500, "request.completed", { producer: prod, request_id: "r1", attributes: { completion_tokens: 40, token_counts_from_backend: true, ttft_ms: 3500, total_ms: 4500 } }),
+        ];
+        const dm = deriveMetrics(dualEvents);
+        const ds = stripSeries(dualEvents, dm);
+        const items = stripItems(dm, ds, {
+            prefillDecode: derivePrefillDecode(dualEvents),
+            routes: deriveExecutionRoutes(dualEvents),
+        });
+        expect(items).toHaveLength(6);
+        const byId = Object.fromEntries(items.map((i) => [i.id, i]));
+        expect(byId.tokens!.title).toBe("Tokens / sec");
+        expect(byId.tokens!.sub).toContain("prefill 250.0 tok/s");
+        expect(byId.tokens!.sub).toContain("1 reload");
+        expect(byId.agents!.sub).toContain("Auto · Hard · Ensemble (code+reasoning)");
     });
 });
 

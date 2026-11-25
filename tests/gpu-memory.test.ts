@@ -2,8 +2,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { ObservatoryEvent } from "../src/protocol/events";
-import { deriveGpuMemory, gpuMemorySample } from "../src/query/gpuMemory";
-import { gpuMemoryAt } from "../src/query/gpuMemoryIndex";
+import { deriveGpuMemory, deriveNodeGpuMemory, gpuMemorySample, nodeGpuDeviceSample } from "../src/query/gpuMemory";
+import { gpuMemoryAt, nodeGpuMemoryAt } from "../src/query/gpuMemoryIndex";
 import { deriveMetrics } from "../src/query/metrics";
 import { parseNdjson } from "../src/recording/ndjson";
 import { ReplayCursor } from "../src/replay/controller";
@@ -160,5 +160,252 @@ describe("GPU replay/live index", () => {
         deriveGpuMemory(events);
         expect(deriveMetrics(events)).toEqual(before);
         expect(JSON.stringify(events)).toBe(wire);
+    });
+});
+
+describe("per-node multi-GPU VRAM inventory (discrete vs integrated UMA + combined pool)", () => {
+    const MIB = 1024 * 1024;
+    const GIB = 1024 * MIB;
+    const node1Producer = { name: "sonder-inference", version: "0.4.0", node_id: "NODE1", instance_id: "tel-node1", synthetic: false };
+    const wsProducer = { name: "sonder-inference", version: "0.4.0", node_id: "workstation", instance_id: "tel-ws", synthetic: false };
+
+    const gpuSample = (
+        ms: number,
+        producer: typeof node1Producer,
+        deviceId: string,
+        attributes: Record<string, unknown>,
+    ): ObservatoryEvent =>
+        at(ms, "device.memory.sample", {
+            producer,
+            device_id: deviceId,
+            attributes: { kind: "gpu", ...attributes },
+        });
+
+    it("distinguishes discrete GPU vs integrated UMA across dual-PC nodes and detects active combined VRAM pool", () => {
+        const events: ObservatoryEvent[] = [
+            // Workstation: discrete RTX 5070 Ti (16 GiB)
+            gpuSample(100, wsProducer, "gpu:0", {
+                name: "NVIDIA GeForce RTX 5070 Ti",
+                vendor: "nvidia",
+                is_integrated_uma: false,
+                backend_hint: "cuda",
+                source: "dxgi",
+                dedicated_total_bytes: 16303 * MIB,
+                total_bytes: 16303 * MIB,
+                dedicated_free_bytes: 4303 * MIB,
+                available_bytes: 4303 * MIB,
+                used_bytes: 12000 * MIB,
+                shared_total_bytes: 16 * GIB,
+                effective_vram_mib: 16303,
+                effective_free_vram_mib: 4303,
+            }),
+            // NODE1 gpu:0: discrete RX 9060 XT (16 GiB, carrying 15.2 GiB weights)
+            gpuSample(110, node1Producer, "gpu:0", {
+                name: "AMD Radeon RX 9060 XT",
+                vendor: "amd",
+                is_integrated_uma: false,
+                backend_hint: "vulkan",
+                source: "dxgi",
+                dedicated_total_bytes: 16288 * MIB,
+                total_bytes: 16288 * MIB,
+                dedicated_free_bytes: 720 * MIB,
+                available_bytes: 720 * MIB,
+                used_bytes: 15568 * MIB,
+                shared_total_bytes: 32 * GIB,
+                effective_vram_mib: 16288,
+                effective_free_vram_mib: 720,
+            }),
+            // NODE1 gpu:1: integrated Radeon 780M UMA (512 MiB BIOS carveout + 31.3 GiB GTT; total/available/used omitted like Sonder-Inference)
+            gpuSample(120, node1Producer, "gpu:1", {
+                name: "AMD Radeon 780M Graphics",
+                vendor: "amd",
+                is_integrated_uma: true,
+                backend_hint: "vulkan",
+                source: "dxgi",
+                dedicated_total_bytes: 512 * MIB,
+                dedicated_free_bytes: 13728 * MIB,
+                shared_total_bytes: 32064 * MIB,
+                effective_vram_mib: 32576,
+                effective_free_vram_mib: 13728,
+            }),
+        ];
+
+        const multi = deriveNodeGpuMemory(events);
+        expect(multi.nodes).toHaveLength(2);
+
+        const ws = multi.nodes.find((n) => n.nodeId === "workstation")!;
+        expect(ws.devices).toHaveLength(1);
+        expect(ws.devices[0]).toMatchObject({
+            deviceId: "gpu:0",
+            name: "NVIDIA GeForce RTX 5070 Ti",
+            gpuClass: "discrete",
+            carryingModelWeights: true,
+        });
+        expect(ws.combinedPool).toBeNull();
+
+        const node1 = multi.nodes.find((n) => n.nodeId === "NODE1")!;
+        expect(node1.devices).toHaveLength(2);
+        const discrete = node1.devices.find((d) => d.deviceId === "gpu:0")!;
+        const uma = node1.devices.find((d) => d.deviceId === "gpu:1")!;
+
+        expect(discrete.gpuClass).toBe("discrete");
+        expect(discrete.latest?.effectiveTotalBytes).toBe(16288 * MIB);
+        expect(discrete.latest?.effectiveUsedBytes).toBe(15568 * MIB);
+        expect(discrete.carryingModelWeights).toBe(true);
+
+        expect(uma.gpuClass).toBe("integrated-uma");
+        expect(uma.latest?.dedicatedTotalBytes).toBe(512 * MIB);
+        expect(uma.latest?.sharedTotalBytes).toBe(32064 * MIB);
+        expect(uma.latest?.effectiveTotalBytes).toBe(32576 * MIB);
+        expect(uma.latest?.effectiveFreeBytes).toBe(13728 * MIB);
+        expect(uma.latest?.effectiveUsedBytes).toBe((32576 - 13728) * MIB);
+        expect(uma.carryingModelWeights).toBe(true);
+
+        expect(node1.combinedPool).not.toBeNull();
+        expect(node1.combinedPool).toMatchObject({
+            discreteCount: 1,
+            integratedUmaCount: 1,
+            isHybridDiscreteUma: true,
+            bothCarryingWeights: true,
+            multiGpuActive: true,
+            weightsEvidence: "observed-vram",
+            discreteTotalBytes: 16288 * MIB,
+            discreteUsedBytes: 15568 * MIB,
+            umaTotalBytes: 32576 * MIB,
+            umaUsedBytes: 18848 * MIB,
+            combinedTotalBytes: (16288 + 32576) * MIB,
+            combinedUsedBytes: (15568 + 18848) * MIB,
+        });
+    });
+
+    it("distinguishes hybrid pool available vs active when only the discrete GPU carries weights", () => {
+        const events: ObservatoryEvent[] = [
+            gpuSample(10, node1Producer, "gpu:0", {
+                name: "AMD Radeon RX 9060 XT",
+                is_integrated_uma: false,
+                dedicated_total_bytes: 16 * GIB,
+                dedicated_free_bytes: 6 * GIB,
+            }),
+            gpuSample(20, node1Producer, "gpu:1", {
+                name: "AMD Radeon 780M Graphics",
+                is_integrated_uma: true,
+                dedicated_total_bytes: 512 * MIB,
+                shared_total_bytes: 32 * GIB,
+                effective_vram_mib: 512 + 32768,
+                // Only 128 MiB in use (desktop compositor idle), well below model weight threshold.
+                effective_free_vram_mib: 512 + 32768 - 128,
+            }),
+        ];
+        const pool = deriveNodeGpuMemory(events).nodes[0]!.combinedPool!;
+        expect(pool.isHybridDiscreteUma).toBe(true);
+        expect(pool.bothCarryingWeights).toBe(false);
+        expect(pool.multiGpuActive).toBe(false);
+        expect(pool.weightsEvidence).toBe("none");
+    });
+
+    it("honors explicit carrying_model_weights, active_devices, and combined_gpu_vram_mib metadata", () => {
+        const events: ObservatoryEvent[] = [
+            at(5, "model.load.completed", {
+                producer: node1Producer,
+                attributes: {
+                    model: "qwen3-80b-moe",
+                    resident: true,
+                    combined_gpu_vram_mib: 48864,
+                    recommended_devices: ["Vulkan0", "Vulkan1"],
+                },
+            }),
+            gpuSample(10, node1Producer, "gpu:0", {
+                name: "AMD Radeon RX 9060 XT",
+                is_integrated_uma: false,
+                effective_vram_mib: 16288,
+                effective_free_vram_mib: 16100,
+                carrying_model_weights: true,
+                model_weights_bytes: 10 * GIB,
+            }),
+            gpuSample(20, node1Producer, "gpu:1", {
+                name: "AMD Radeon 780M Graphics",
+                is_integrated_uma: true,
+                effective_vram_mib: 32576,
+                effective_free_vram_mib: 32400,
+                carrying_model_weights: true,
+                model_weights_bytes: 20 * GIB,
+            }),
+        ];
+        const node = deriveNodeGpuMemory(events).nodes[0]!;
+        expect(node.combinedPool).toMatchObject({
+            bothCarryingWeights: true,
+            weightsEvidence: "reported",
+            activeDevices: ["Vulkan0", "Vulkan1"],
+            reportedCombinedTotalBytes: 48864 * MIB,
+        });
+
+        // Planner-only recommended_devices (or resident:false metadata load) must NOT falsely claim weights are resident on idle GPUs.
+        const plannedOnly = deriveNodeGpuMemory([
+            at(1, "model.load.completed", {
+                producer: node1Producer,
+                attributes: { model: "qwen3-80b-moe", resident: false, recommended_devices: ["Vulkan0", "Vulkan1"] },
+            }),
+            gpuSample(10, node1Producer, "gpu:0", { name: "RX 9060 XT", is_integrated_uma: false, effective_vram_mib: 16288, effective_free_vram_mib: 16188, recommended_devices: ["Vulkan0", "Vulkan1"] }),
+            gpuSample(20, node1Producer, "gpu:1", { name: "Radeon 780M", is_integrated_uma: true, effective_vram_mib: 32576, effective_free_vram_mib: 32476 }),
+        ]).nodes[0]!;
+        expect(plannedOnly.combinedPool?.bothCarryingWeights).toBe(false);
+        expect(plannedOnly.combinedPool?.activeDevices).toEqual(["Vulkan0", "Vulkan1"]);
+    });
+
+    it("ignores legacy kind=vram / kind=cpu samples and refuses to fabricate totals on partial or anomalous readings", () => {
+        expect(
+            deriveNodeGpuMemory([
+                at(1, "device.memory.sample", { device_id: "dev_gpu0", attributes: { kind: "vram", used_bytes: 100, total_bytes: 200 } }),
+                at(2, "device.memory.sample", { device_id: "cpu:0", attributes: { kind: "cpu", total_bytes: 32 * GIB, available_bytes: 16 * GIB } }),
+            ]),
+        ).toEqual({ nodes: [] });
+
+        // Anomalous free > total must yield null used bytes (never negative).
+        const anomalous = nodeGpuDeviceSample(
+            gpuSample(1, node1Producer, "gpu:0", {
+                name: "RX 9060 XT",
+                is_integrated_uma: false,
+                dedicated_total_bytes: 16 * GIB,
+                dedicated_free_bytes: 17 * GIB,
+            }),
+        )!;
+        expect(anomalous.effectiveFreeBytes).toBeNull();
+        expect(anomalous.effectiveUsedBytes).toBeNull();
+
+        // One known GPU + one unknown GPU must NOT report the single known GPU as the combined total.
+        const partial = deriveNodeGpuMemory([
+            gpuSample(1, node1Producer, "gpu:0", { name: "RX 9060 XT", is_integrated_uma: false, dedicated_total_bytes: 16 * GIB, dedicated_free_bytes: 8 * GIB }),
+            gpuSample(2, node1Producer, "gpu:1", { name: "Unknown APU", is_integrated_uma: true }),
+        ]).nodes[0]!;
+        expect(partial.combinedPool?.combinedTotalBytes).toBeNull();
+        expect(partial.combinedPool?.combinedUsedBytes).toBeNull();
+        expect(partial.combinedPool?.discreteTotalBytes).toBe(16 * GIB);
+        expect(partial.combinedPool?.umaTotalBytes).toBeNull();
+    });
+
+    it("nodeGpuMemoryAt matches deriveNodeGpuMemory across cursors, prefix appends, eviction, and out-of-order merges", () => {
+        const events = orderEvents([
+            gpuSample(10, node1Producer, "gpu:0", { name: "RX 9060 XT", is_integrated_uma: false, dedicated_total_bytes: 16 * GIB, dedicated_free_bytes: 15 * GIB }),
+            at(15, "inference.token.generated", { producer: node1Producer }),
+            gpuSample(20, node1Producer, "gpu:1", { name: "Radeon 780M", is_integrated_uma: true, effective_vram_mib: 32576, effective_free_vram_mib: 20000 }),
+            gpuSample(30, node1Producer, "gpu:0", { name: "RX 9060 XT", is_integrated_uma: false, dedicated_total_bytes: 16 * GIB, dedicated_free_bytes: 1 * GIB }),
+        ]).events;
+
+        for (const c of [0, 1, 2, 3, 4, 2, 1, 4]) {
+            expect(nodeGpuMemoryAt(events, c)).toEqual(deriveNodeGpuMemory(events.slice(0, c)));
+        }
+
+        const store = new SessionStore({ maxLiveEvents: 3 });
+        store.reset("live", "multi-gpu");
+        store.append(events.slice(0, 1));
+        const before = nodeGpuMemoryAt(store.events);
+        store.append([at(12, "inference.token.generated", { producer: node1Producer })]);
+        // Token-only prefix append reuses exact cached result.
+        expect(nodeGpuMemoryAt(store.events)).toBe(before);
+        // Out-of-order and eviction stay exact.
+        store.append(events.slice(2));
+        expect(nodeGpuMemoryAt(store.events)).toEqual(deriveNodeGpuMemory(store.events));
+        store.append([at(5, "device.memory.sample", { producer: node1Producer, device_id: "gpu:0", attributes: { kind: "gpu", name: "RX 9060 XT", is_integrated_uma: false, dedicated_total_bytes: 16 * GIB, dedicated_free_bytes: 14 * GIB } })]);
+        expect(nodeGpuMemoryAt(store.events)).toEqual(deriveNodeGpuMemory(store.events));
     });
 });
