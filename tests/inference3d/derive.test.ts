@@ -187,6 +187,7 @@ describe("stageOfEvent", () => {
         expect(stageOfEvent(e("request.started", { scheduled: true }), false)!.stage).toBe("queue");
         expect(stageOfEvent(e("request.started"), false)!.stage).toBe("prefill");
         expect(stageOfEvent(e("inference.prefill.completed"), false)).toEqual({ stage: "prefill", move: false });
+        expect(stageOfEvent(e("inference.prefill.chunk"), false)).toEqual({ stage: "prefill", move: true });
         expect(stageOfEvent(e("inference.token.generated"), false)!.stage).toBe("decode");
         expect(stageOfEvent(e("request.completed"), false)!.stage).toBe("output");
         expect(stageOfEvent(e("request.started"), true)!.stage).toBe("route");
@@ -208,6 +209,55 @@ describe("stageOfEvent", () => {
         };
         const m = derivePipeline([...pool.filter((x) => x.mono_ns <= preempt.mono_ns - 1), preempt]);
         expect(m.requests.find((r) => r.requestId === "req-ws-1")!.stage).toBe("queue");
+    });
+
+    it("isolates req #1 (prefill -> decode -> cancelled) from req #2 starting 104ms later and locks cancelled state", () => {
+        const producer = { name: "sonder-inference", version: "0.1.0", node_id: "node1", instance_id: "tel-cancel-1", role: "inference" };
+        const mk = (ms: number, seq: number, type: string, requestId: string): ObservatoryEvent => ({
+            schema: SCHEMA_ID,
+            event_id: `tel-cancel-1-${seq}`,
+            sequence: seq,
+            event_type: type,
+            wall_time: new Date(Date.UTC(2026, 10, 25) + ms).toISOString(),
+            mono_ns: ms * 1e6,
+            session_id: "s-cancel",
+            producer,
+            attributes: {},
+            request_id: requestId,
+        });
+        const events = [
+            mk(0, 0, "request.started", "req-1"),
+            mk(10, 1, "inference.prefill.chunk", "req-1"),
+            mk(40, 2, "inference.decode.started", "req-1"),
+            mk(55, 3, "inference.token.generated", "req-1"),
+            mk(100, 4, "request.cancelled", "req-1"),
+            // Late stragglers on req-1 must NOT overwrite cancelled or move it back to prefill:
+            mk(102, 5, "inference.prefill.started", "req-1"),
+            mk(105, 6, "request.completed", "req-1"),
+            // 104ms after cancellation, req-2 starts in prefill:
+            mk(204, 7, "request.started", "req-2"),
+            mk(210, 8, "inference.prefill.chunk", "req-2"),
+        ];
+        const m = derivePipeline(events);
+        expect(m.requests).toHaveLength(2);
+        const r1 = m.requests.find((r) => r.requestId === "req-1")!;
+        const r2 = m.requests.find((r) => r.requestId === "req-2")!;
+        expect(r1).toMatchObject({ state: "cancelled", stage: "output", lastActiveStage: "decode", endNs: 100 * 1e6 });
+        expect(r1.transitions!.map((t) => t.stage)).toEqual(["prefill", "decode", "output"]);
+        expect(r2).toMatchObject({ state: "active", stage: "prefill", lastActiveStage: "prefill", endNs: null });
+        expect(r2.transitions!.map((t) => t.stage)).toEqual(["prefill"]);
+        expect(m.stages.find((s) => s.id === "output")!.cancelledRequests).toBe(1);
+
+        // Same request_id restarted after cancellation opens a separate active entity instead of merging.
+        const withRetry = derivePipeline([
+            ...events,
+            mk(300, 9, "request.started", "req-1"),
+            mk(310, 10, "inference.decode.started", "req-1"),
+        ]);
+        const req1Entities = withRetry.requests.filter((r) => r.requestId === "req-1");
+        expect(req1Entities).toHaveLength(2);
+        expect(req1Entities[0]).toMatchObject({ state: "cancelled", stage: "output", lastActiveStage: "decode" });
+        expect(req1Entities[1]).toMatchObject({ state: "active", stage: "decode", lastActiveStage: "decode" });
     });
 });
 

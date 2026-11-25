@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { deriveMetrics } from "../../src/query/metrics";
 import { drawTimeline, timelineGeometry, type TimelineContext } from "../../src/renderer/timelineCanvas";
 import { bucketize, getEventIndex, TRACKS } from "../../src/renderer/timelineModel";
+import { at } from "../helpers";
 import { largeEvents } from "./helpers";
 
 /** Records draw calls instead of painting. */
@@ -67,5 +68,38 @@ describe("drawTimeline", () => {
             highlighted: new Set(),
         });
         expect(stats).toEqual({ tickRects: 0, spanRects: 0, evidenceRects: 0 });
+    });
+
+    it("draws cancelled request spans with distinct warning colour and short-dash outline", () => {
+        const events = [
+            at(0, "request.started", { event_id: "e0", sequence: 0, request_id: "r-cancel" }),
+            at(50, "request.cancelled", { event_id: "e1", sequence: 1, request_id: "r-cancel" }),
+            at(154, "request.started", { event_id: "e2", sequence: 2, request_id: "r-open" }),
+        ];
+        const index = getEventIndex(events);
+        const g = timelineGeometry(600);
+        const strokes: { style: string; dash: number[] }[] = [];
+        let lastDash: number[] = [];
+        const ctx = fakeContext();
+        ctx.setLineDash = (d) => {
+            lastDash = [...d];
+        };
+        ctx.strokeRect = () => {
+            strokes.push({ style: String(ctx.strokeStyle), dash: lastDash });
+        };
+        const stats = drawTimeline(ctx, {
+            geometry: g,
+            index,
+            buckets: bucketize(index, g.plotW),
+            cursorRel: index.durationNs,
+            requests: deriveMetrics(events).requests,
+            selectedId: null,
+            highlighted: new Set(),
+        });
+        expect(stats.spanRects).toBe(2);
+        expect(strokes).toEqual([
+            { style: "#f59e0b", dash: [2, 2] },
+            { style: "#3b82f6", dash: [3, 2] },
+        ]);
     });
 });

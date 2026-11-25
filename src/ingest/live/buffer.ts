@@ -56,10 +56,18 @@ export class BoundedBuffer<T> {
 
     /** Adds an item. Returns false when one or more items (old or new) were dropped. */
     push(item: T): boolean {
-        const itemBytes = this.sizeOf ? Math.max(0, this.sizeOf(item)) : 0;
-        if (this.sizeOf && itemBytes > this.maxBytes) {
-            this.dropped += 1;
-            return false;
+        let itemBytes = 0;
+        if (this.sizeOf) {
+            const estimated = this.sizeOf(item);
+            if (!Number.isFinite(estimated)) {
+                this.dropped += 1;
+                return false;
+            }
+            itemBytes = Math.max(0, estimated);
+            if (itemBytes > this.maxBytes) {
+                this.dropped += 1;
+                return false;
+            }
         }
         if (this.policy === "drop-newest") {
             if (this.length >= this.capacity || (this.sizeOf && this.totalBytes + itemBytes > this.maxBytes)) {
@@ -97,7 +105,8 @@ export class BoundedBuffer<T> {
 
     /** Removes and returns up to `max` items in FIFO order. */
     drain(max: number = this.length): T[] {
-        const n = Math.min(Math.max(0, Math.floor(max)), this.length);
+        const limit = Number.isNaN(max) ? 0 : Math.max(0, Math.floor(max));
+        const n = Math.min(limit, this.length);
         const out: T[] = new Array<T>(n);
         for (let i = 0; i < n; i += 1) {
             const index = (this.head + i) % this.capacity;

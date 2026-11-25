@@ -35,4 +35,28 @@ describe("latency-outlier detector", () => {
     it("negative case: no findings", () => {
         expect(detect("latency-outlier", getCase("latency-outlier", "negative").events)).toEqual([]);
     });
+
+    it("scopes request_id tracking per producer stream so one producer cancelling does not clear another", () => {
+        const e = syntheticStream("lat_multi");
+        const infA = { name: "sonder-inference", version: "1", node_id: "n1", instance_id: "tel-a" };
+        const infB = { name: "sonder-inference", version: "1", node_id: "n2", instance_id: "tel-b" };
+        const events = [];
+        for (let i = 0; i < 5; i += 1) {
+            events.push(
+                e(i * 1000, "request.started", {}, { request_id: `r${i}`, producer: infA }),
+                e(i * 1000 + 100, "request.completed", {}, { request_id: `r${i}`, producer: infA }),
+            );
+        }
+        // Producer A starts shared-id; Producer B starts & cancels the same request_id; Producer A finishes slow.
+        events.push(
+            e(6000, "request.started", {}, { request_id: "shared-id", producer: infA }),
+            e(6010, "request.started", {}, { request_id: "shared-id", producer: infB }),
+            e(6020, "request.cancelled", {}, { request_id: "shared-id", producer: infB }),
+            e(9000, "request.completed", {}, { request_id: "shared-id", producer: infA }),
+        );
+        const f = detect("latency-outlier", events);
+        expect(f).toHaveLength(1);
+        expect(f[0]!.facts.request_id).toBe("shared-id");
+        expect(f[0]!.facts.duration_ms).toBe(3000);
+    });
 });

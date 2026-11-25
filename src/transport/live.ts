@@ -10,6 +10,7 @@
  */
 import type { ObservatoryEvent } from "../protocol/events";
 import { endpointPolicyViolation, isLoopbackHost } from "../ingest/live/endpoint";
+import { MAX_LINE_CHARS } from "../ingest/live/sse";
 import { parseNdjson, type RejectedLine } from "../recording/ndjson";
 
 export type ConnectionState = "disconnected" | "connecting" | "connected" | "error";
@@ -142,7 +143,7 @@ export class LiveConnection {
             ]);
             return;
         }
-        const parsed = parseNdjson(data);
+        const parsed = parseNdjson(data, { maxLineChars: MAX_LINE_CHARS });
         if (parsed.events.length > 0) {
             this.received += parsed.events.length;
             this.handlers.onEvents(parsed.events);
