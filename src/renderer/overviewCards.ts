@@ -1,15 +1,21 @@
 /**
- * Overview metric cards (#cards): latency, TTFT, token rate, prompt-cache &
- * speculation reuse, GPU memory cards, errors, agents/tools, resources, and telemetry.
+ * Overview metric cards (#cards): latency, TTFT (with steady-prefill vs reload
+ * separation), token rate (with prefill vs decode separation), prompt-cache &
+ * speculation reuse, execution routing badges, multi-GPU per-node VRAM &
+ * spill-guard GPU cards, errors, agents/tools, resources, and telemetry.
  */
 import type { ObservatoryEvent } from "../protocol/events";
-import { gpuMemoryAt } from "../query/gpuMemoryIndex";
+import { executionRouteAt } from "../query/executionRouteIndex";
+import { gpuMemoryAt, nodeGpuMemoryAt } from "../query/gpuMemoryIndex";
 import type { Metrics } from "../query/metrics";
+import { prefillDecodeAt } from "../query/prefillDecodeIndex";
 import type { SessionStore } from "../replay/session";
 import { byId, h } from "./dom";
 import { fmtBytes, fmtMs, fmtPct } from "./format";
-import { renderGpuCards } from "./gpuCards";
+import { renderGpuCards, renderNodeGpuCards } from "./gpuCards";
+import { renderPrefillDecodeSplit, renderTtftBreakdown } from "./prefillDecodeCard";
 import { promptCacheCardModel, speculationCardModel, type ReuseCardModel } from "./reuseCards";
+import { renderRouteCards } from "./routeBadges";
 import { tokenCardModel } from "./tokenCard";
 
 function card(title: string, value: string, sub: string, evidence: string, tone = "", extra: Node | null = null): HTMLElement {
@@ -88,6 +94,10 @@ export function renderOverviewCards(
     const reuseCards = [renderReuseCard(promptCacheCardModel(m)), renderReuseCard(speculationCardModel(m))].filter(
         (c): c is HTMLElement => c !== null,
     );
+    const prefillDecode = prefillDecodeAt(events, visibleCount);
+    const routes = executionRouteAt(events, visibleCount);
+    const nodeGpus = nodeGpuMemoryAt(events, visibleCount);
+    const ttftTone = prefillDecode.ttft.latestClassification === "reload" ? "tone-warning" : "";
     byId("cards").replaceChildren(
         card(
             "Request latency",
@@ -102,9 +112,13 @@ export function renderOverviewCards(
             `p50 ${fmtMs(m.timeToFirstToken.p50Ms)}`,
             `p95 ${fmtMs(m.timeToFirstToken.p95Ms)}`,
             derived(m.timeToFirstToken.count, "requests with a first token"),
+            ttftTone,
+            renderTtftBreakdown(prefillDecode),
         ),
-        card("Token rate", tokenCard.value, tokenCard.sub, tokenCard.evidence),
+        card("Token rate", tokenCard.value, tokenCard.sub, tokenCard.evidence, "", renderPrefillDecodeSplit(prefillDecode)),
         ...reuseCards,
+        ...renderRouteCards(routes),
+        ...renderNodeGpuCards(nodeGpus),
         ...renderGpuCards(gpuMemoryAt(events, visibleCount)),
         card(
             "Errors",

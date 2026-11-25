@@ -3,8 +3,10 @@ import { renderInspector } from "../inspector/inspector";
 import type { ProducerEndpointInput } from "../ingest/live/manager";
 import type { ObservatoryEvent } from "../protocol/events";
 import { isErrorEvent, type EventClass } from "../query/classify";
+import { executionRouteAt } from "../query/executionRouteIndex";
 import type { Metrics } from "../query/metrics";
 import { metricsAt } from "../query/metricsIndex";
+import { prefillDecodeAt } from "../query/prefillDecodeIndex";
 import { stripSeries } from "../query/series";
 import { ReplayCursor } from "../replay/controller";
 import { streamKey } from "../replay/order";
@@ -560,7 +562,14 @@ export class ObservatoryApp {
             return;
         }
         this.stripStamp = stamp;
-        renderMetricStrip(byId("metric-strip"), stripItems(metrics, stripSeries(visible, metrics)));
+        const visibleCount = this.cursor.visibleCount();
+        renderMetricStrip(
+            byId("metric-strip"),
+            stripItems(metrics, stripSeries(visible, metrics), {
+                prefillDecode: prefillDecodeAt(this.cursor.events, visibleCount),
+                routes: executionRouteAt(this.cursor.events, visibleCount),
+            }),
+        );
     }
 
     private renderTimeline(m: Metrics): void {

@@ -4,10 +4,18 @@
  * activity. Values are the existing derived metrics; sparklines come from
  * src/query/series.ts. A metric without evidence shows "—" and says why.
  */
+import type { ExecutionRouteMetrics } from "../query/executionRoute";
 import type { Metrics } from "../query/metrics";
+import type { PrefillDecodeMetrics } from "../query/prefillDecode";
 import type { StripSeries } from "../query/series";
 import { h, svg } from "./dom";
 import { fmtMs, fmtRate } from "./format";
+import { stripRouteSummary } from "./routeBadges";
+
+export interface StripExtras {
+    prefillDecode?: PrefillDecodeMetrics;
+    routes?: ExecutionRouteMetrics;
+}
 
 export interface StripItem {
     id: string;
@@ -31,22 +39,38 @@ function trendWords(points: readonly number[]): string {
     return rel < 0.05 ? "flat" : d > 0 ? "rising" : "falling";
 }
 
+function tokenSub(m: Metrics, pd?: PrefillDecodeMetrics): string {
+    const t = m.tokens;
+    const prefillRate = pd?.prefill.rateTokPerSec ?? null;
+    const reloads = pd?.ttft.reload.count ?? 0;
+    const reloadTag = reloads > 0 ? ` · ${reloads} reload${reloads === 1 ? "" : "s"}` : "";
+    if (t.overallRate !== null) {
+        const prefillPart =
+            prefillRate !== null
+                ? ` · prefill ${fmtRate(prefillRate)} tok/s`
+                : pd && pd.prefill.fullCacheHitRequests > 0
+                  ? " · prefill 100% cached"
+                  : "";
+        return `decode rate${prefillPart}${reloadTag} · last ${t.windowMs / 1000} s ${fmtRate(t.recentRate)}`;
+    }
+    if (prefillRate !== null) {
+        return `prefill ${fmtRate(prefillRate)} tok/s${reloadTag} · ${t.chunks > 0 ? "chunks only; no decode tokens yet" : "no decode windows yet"}`;
+    }
+    return t.chunks > 0 ? "chunks only; no token count yet" : "no decode windows yet";
+}
+
 /** Pure model of the strip (unit-tested). */
-export function stripItems(m: Metrics, s: StripSeries): StripItem[] {
+export function stripItems(m: Metrics, s: StripSeries, extras?: StripExtras): StripItem[] {
     const t = m.tokens;
     const kv = s.kvLatest;
     const model = s.activeModel;
+    const routeSummary = extras?.routes ? stripRouteSummary(extras.routes) : null;
     return [
         {
             id: "tokens",
             title: "Tokens / sec",
             value: t.overallRate !== null ? fmtRate(t.overallRate) : "—",
-            sub:
-                t.overallRate !== null
-                    ? `decode rate · last ${t.windowMs / 1000} s ${fmtRate(t.recentRate)}`
-                    : t.chunks > 0
-                      ? "chunks only; no token count yet"
-                      : "no decode windows yet",
+            sub: tokenSub(m, extras?.prefillDecode),
             points: s.tokensPerSec,
             tone: "token",
             trend: `decode tokens per second over the session, ${trendWords(s.tokensPerSec)}`,
@@ -95,7 +119,9 @@ export function stripItems(m: Metrics, s: StripSeries): StripItem[] {
             id: "agents",
             title: "Agent activity",
             value: `${m.agents.active.length} active`,
-            sub: `${m.tools.active.length} tool call(s) running · ${m.agents.transitions} route/agent events`,
+            sub: routeSummary
+                ? `${routeSummary} · ${m.tools.active.length} tool call(s) running`
+                : `${m.tools.active.length} tool call(s) running · ${m.agents.transitions} route/agent events`,
             points: s.agentActivity,
             tone: "agent",
             trend: `agent, route and tool events per time slice, ${trendWords(s.agentActivity)}`,

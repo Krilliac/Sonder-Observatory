@@ -1,7 +1,17 @@
 import { describe, expect, it } from "vitest";
 import type { GpuMetrics } from "../../src/query/gpuMemory";
-import { deriveGpuMemory } from "../../src/query/gpuMemory";
-import { GPU_WARNING_EXPLANATIONS, gpuCardModels, gpuCardText, gpuChartPaths, gpuWarningExplanation, renderGpuCards } from "../../src/renderer/gpuCards";
+import { deriveGpuMemory, deriveNodeGpuMemory } from "../../src/query/gpuMemory";
+import {
+    GPU_WARNING_EXPLANATIONS,
+    gpuCardModels,
+    gpuCardText,
+    gpuChartPaths,
+    gpuClassLabel,
+    gpuWarningExplanation,
+    nodeGpuCardModels,
+    renderGpuCards,
+    renderNodeGpuCards,
+} from "../../src/renderer/gpuCards";
 import { at } from "../helpers";
 
 function metrics(overrides: Partial<GpuMetrics["backends"][number]> = {}): GpuMetrics {
@@ -119,5 +129,156 @@ describe("GPU cards", () => {
         expect(card.contextChanges).toHaveLength(8);
         expect(card.contextChangeCount).toBe(999);
         expect(card.latestWallTime).toBe(sample.wallTime);
+    });
+});
+
+class FakeDomNode {
+    readonly attrs: Record<string, string> = {};
+    textContent = "";
+    readonly children: (FakeDomNode | string)[] = [];
+    constructor(readonly tag: string) {}
+    set className(v: string) {
+        this.attrs.class = v;
+    }
+    setAttribute(k: string, v: string): void {
+        this.attrs[k] = v;
+    }
+    append(...kids: (FakeDomNode | string)[]): void {
+        this.children.push(...kids);
+    }
+}
+
+function withFakeDom<T>(fn: () => T): T {
+    const original = Object.getOwnPropertyDescriptor(globalThis, "document");
+    Object.defineProperty(globalThis, "document", {
+        configurable: true,
+        value: { createElement: (tag: string) => new FakeDomNode(tag) },
+    });
+    try {
+        return fn();
+    } finally {
+        if (original) Object.defineProperty(globalThis, "document", original);
+        else Reflect.deleteProperty(globalThis, "document");
+    }
+}
+
+describe("per-node multi-GPU VRAM cards", () => {
+    const MIB = 1024 * 1024;
+    const GIB = 1024 * MIB;
+    const node1 = { name: "sonder-inference", version: "0.4.0", node_id: "NODE1", instance_id: "tel-node1", synthetic: false };
+    const ws = { name: "sonder-inference", version: "0.4.0", node_id: "workstation", instance_id: "tel-ws", synthetic: false };
+
+    it("gates empty multi-GPU telemetry and labels discrete vs integrated UMA classes", () => {
+        expect(nodeGpuCardModels({ nodes: [] })).toEqual([]);
+        expect(renderNodeGpuCards({ nodes: [] })).toEqual([]);
+        expect(gpuClassLabel("discrete")).toBe("Discrete");
+        expect(gpuClassLabel("integrated-uma")).toBe("Integrated UMA");
+        expect(gpuClassLabel("unknown")).toBe("GPU");
+    });
+
+    it("renders dual-PC discrete vs integrated UMA VRAM breakdown and active combined pool indicator", () => {
+        const multi = deriveNodeGpuMemory([
+            at(10, "device.memory.sample", {
+                producer: ws,
+                device_id: "gpu:0",
+                attributes: {
+                    kind: "gpu",
+                    name: "NVIDIA GeForce RTX 5070 Ti",
+                    vendor: "nvidia",
+                    is_integrated_uma: false,
+                    backend_hint: "cuda",
+                    dedicated_total_bytes: 16 * GIB,
+                    dedicated_free_bytes: 4 * GIB,
+                    shared_total_bytes: 16 * GIB,
+                },
+            }),
+            at(15, "model.load.completed", {
+                producer: node1,
+                attributes: { model: "qwen3-80b-moe", resident: true, recommended_devices: ["Vulkan0", "Vulkan1"] },
+            }),
+            at(20, "device.memory.sample", {
+                producer: node1,
+                device_id: "gpu:0",
+                attributes: {
+                    kind: "gpu",
+                    name: "AMD Radeon RX 9060 XT",
+                    vendor: "amd",
+                    is_integrated_uma: false,
+                    backend_hint: "vulkan",
+                    dedicated_total_bytes: 16 * GIB,
+                    dedicated_free_bytes: 1 * GIB,
+                },
+            }),
+            at(25, "device.memory.sample", {
+                producer: node1,
+                device_id: "gpu:1",
+                attributes: {
+                    kind: "gpu",
+                    name: "AMD Radeon 780M Graphics",
+                    vendor: "amd",
+                    is_integrated_uma: true,
+                    backend_hint: "vulkan",
+                    dedicated_total_bytes: 512 * MIB,
+                    shared_total_bytes: 31 * GIB,
+                    effective_vram_mib: 512 + 31 * 1024,
+                    effective_free_vram_mib: 12 * 1024,
+                },
+            }),
+        ]);
+
+        const models = nodeGpuCardModels(multi);
+        expect(models).toHaveLength(2);
+
+        const wsCard = models.find((m) => m.nodeId === "workstation")!;
+        expect(wsCard.gpuMixLabel).toBe("1 GPU · Discrete");
+        expect(wsCard.combinedPool).toBeNull();
+        expect(wsCard.devices[0]!.classLabel).toBe("Discrete");
+        expect(wsCard.devices[0]!.usageText).toContain("12.0 GiB / 16.0 GiB VRAM");
+
+        const node1Card = models.find((m) => m.nodeId === "NODE1")!;
+        expect(node1Card.gpuMixLabel).toBe("2 GPUs · Discrete + UMA");
+        expect(node1Card.combinedPool).not.toBeNull();
+        expect(node1Card.combinedPool!.badge).toBe("Combined VRAM Pool Active");
+        expect(node1Card.combinedPool!.tone).toBe("active");
+        expect(node1Card.combinedPool!.bothCarryingWeights).toBe(true);
+        expect(node1Card.combinedPool!.activeDevices).toEqual(["Vulkan0", "Vulkan1"]);
+        expect(node1Card.combinedPool!.splitText).toContain("Discrete");
+        expect(node1Card.combinedPool!.splitText).toContain("UMA");
+        expect(node1Card.combinedPool!.splitText).toContain("both GPUs carrying weights");
+
+        const umaRow = node1Card.devices.find((d) => d.gpuClass === "integrated-uma")!;
+        expect(umaRow.classLabel).toBe("Integrated UMA");
+        expect(umaRow.usageText).toContain("UMA pool");
+        expect(umaRow.detailText).toContain("512.0 MiB carveout");
+        expect(umaRow.detailText).toContain("31.0 GiB shared GTT");
+
+        withFakeDom(() => {
+            const els = renderNodeGpuCards(multi) as unknown as FakeDomNode[];
+            expect(els).toHaveLength(2);
+            expect(els[0]!.attrs["data-testid"]).toBe("gpu-node-card");
+            expect(els[1]!.attrs["data-gpu-node"]).toBe("NODE1");
+        });
+    });
+
+    it("shows Hybrid Discrete + UMA Pool (non-active) when only one GPU carries weights and never invents zeros for missing readings", () => {
+        const multi = deriveNodeGpuMemory([
+            at(10, "device.memory.sample", {
+                producer: { ...node1, synthetic: true },
+                device_id: "gpu:0",
+                attributes: { kind: "gpu", name: "RX 9060 XT", is_integrated_uma: false, dedicated_total_bytes: 16 * GIB, dedicated_free_bytes: 4 * GIB },
+            }),
+            at(15, "device.memory.sample", {
+                producer: { ...node1, synthetic: true },
+                device_id: "gpu:1",
+                attributes: { kind: "gpu", name: "Radeon 780M", is_integrated_uma: true },
+            }),
+        ]);
+
+        const card = nodeGpuCardModels(multi)[0]!;
+        expect(card.synthetic).toBe(true);
+        expect(card.combinedPool!.badge).toBe("Hybrid Discrete + UMA Pool");
+        expect(card.combinedPool!.tone).toBe("hybrid");
+        expect(card.combinedPool!.summaryText).toContain("unavailable");
+        expect(card.devices[1]!.usageText).toBe("VRAM reading unavailable");
     });
 });
