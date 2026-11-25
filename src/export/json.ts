@@ -1,5 +1,5 @@
 /** JSON export of findings and metrics (machine-readable, stable key order). */
-import type { Report } from "./report";
+import type { Report, ReportGpuSummary } from "./report";
 
 export interface JsonExport {
     format: Report["format"];
@@ -8,6 +8,8 @@ export interface JsonExport {
     source: Report["source"];
     metrics: Report["metrics"];
     findings: Report["findings"];
+    /** Present when exported events include GPU/UMA device or backend GPU telemetry (Wave 2+). */
+    gpu?: ReportGpuSummary;
 }
 
 export function toJsonExportObject(report: Report): JsonExport {
@@ -18,6 +20,7 @@ export function toJsonExportObject(report: Report): JsonExport {
         source: report.source,
         metrics: report.metrics,
         findings: report.findings,
+        ...(report.gpu ? { gpu: report.gpu } : {}),
     };
 }
 

@@ -22,8 +22,17 @@ function haystack(e: ObservatoryEvent): string {
     return `${e.event_type} ${e.event_id} ${e.request_id ?? ""} ${e.agent_id ?? ""}`.toLowerCase();
 }
 
+function finiteBound(ns: number | null | undefined): number | null {
+    return typeof ns === "number" && Number.isFinite(ns) ? ns : null;
+}
+
 export function isFullRange(range: ExportRange = {}): boolean {
-    return (range.cls ?? "all") === "all" && (range.text ?? "").trim() === "" && range.fromNs == null && range.toNs == null;
+    return (
+        (range.cls ?? "all") === "all" &&
+        (range.text ?? "").trim() === "" &&
+        finiteBound(range.fromNs) === null &&
+        finiteBound(range.toNs) === null
+    );
 }
 
 /**
@@ -36,10 +45,11 @@ export function filterEvents(events: readonly ObservatoryEvent[], range: ExportR
     }
     const cls = range.cls ?? "all";
     const text = (range.text ?? "").trim().toLowerCase();
-    const from = range.fromNs ?? -Infinity;
-    const to = range.toNs ?? Infinity;
+    const from = finiteBound(range.fromNs) ?? -Infinity;
+    const to = finiteBound(range.toNs) ?? Infinity;
     return events.filter(
         (e) =>
+            Number.isFinite(e.mono_ns) &&
             e.mono_ns >= from &&
             e.mono_ns <= to &&
             (cls === "all" || classifyEvent(e) === cls) &&
@@ -52,6 +62,9 @@ export function describeRange(range: ExportRange, originNs: number): string {
     if (isFullRange(range)) {
         return "full session";
     }
+    const origin = Number.isFinite(originNs) ? originNs : 0;
+    const from = finiteBound(range.fromNs);
+    const to = finiteBound(range.toNs);
     const parts: string[] = [];
     if ((range.cls ?? "all") !== "all") {
         parts.push(`class=${range.cls}`);
@@ -59,9 +72,9 @@ export function describeRange(range: ExportRange, originNs: number): string {
     if ((range.text ?? "").trim() !== "") {
         parts.push(`text="${(range.text ?? "").trim()}"`);
     }
-    if (range.fromNs != null || range.toNs != null) {
-        const f = range.fromNs != null ? `${((range.fromNs - originNs) / 1e9).toFixed(3)} s` : "start";
-        const t = range.toNs != null ? `${((range.toNs - originNs) / 1e9).toFixed(3)} s` : "end";
+    if (from !== null || to !== null) {
+        const f = from !== null ? `${((from - origin) / 1e9).toFixed(3)} s` : "start";
+        const t = to !== null ? `${((to - origin) / 1e9).toFixed(3)} s` : "end";
         parts.push(`${f}–${t}`);
     }
     return parts.join(" · ");

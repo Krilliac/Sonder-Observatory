@@ -1,5 +1,6 @@
 import type { Detector } from "../types";
-import { findBursts, makeFinding, ms, str } from "../util";
+import { makeFinding, str } from "../util";
+import { findBurstsLinear, safeSpanMs } from "./shared";
 
 /**
  * Retry storms: `retryStorm.count` or more `retry.scheduled` events within
@@ -8,11 +9,11 @@ import { findBursts, makeFinding, ms, str } from "../util";
 export const detectRetryStorms: Detector = (events, config) => {
     const { count, windowMs } = config.retryStorm;
     const retries = events.filter((e) => e.event_type === "retry.scheduled");
-    return findBursts(retries, count, windowMs).map((burst) => {
+    return findBurstsLinear(retries, count, windowMs).map((burst) => {
         const targets = [
             ...new Set(burst.map((e) => str(e, "tool_call_id") ?? e.request_id ?? e.task_id ?? e.agent_id ?? "unscoped")),
         ];
-        const span = ms(burst[burst.length - 1]!.mono_ns - burst[0]!.mono_ns);
+        const span = safeSpanMs(burst[0]!.mono_ns, burst[burst.length - 1]!.mono_ns);
         return makeFinding(
             "retry-storm",
             burst.length >= count * 2 ? "critical" : "warning",

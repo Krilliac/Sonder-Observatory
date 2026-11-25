@@ -1,6 +1,5 @@
 /** Export of the selected event range back to a `.sobs` recording (NDJSON). */
 import type { ObservatoryEvent } from "../protocol/events";
-import { toNdjson } from "../recording/ndjson";
 import { buildManifest } from "../recording/sobs";
 import { filterEvents, type ExportRange } from "./filter";
 import { declaredCapturePolicy } from "./sensitivity";
@@ -26,7 +25,13 @@ export function renderSobs(
     options: SobsExportOptions = {},
 ): string {
     const selected = filterEvents(events, range);
-    const manifest = buildManifest(selected, createdAt);
+    const safeAt = createdAt instanceof Date && Number.isFinite(createdAt.getTime()) ? createdAt : new Date();
+    const manifest = buildManifest(selected, safeAt);
     manifest.capture_policy = options.capturePolicy ?? declaredCapturePolicy(events);
-    return toNdjson([manifest, ...selected]);
+    const lines = new Array<string>(selected.length + 1);
+    lines[0] = JSON.stringify(manifest);
+    for (let i = 0; i < selected.length; i += 1) {
+        lines[i + 1] = JSON.stringify(selected[i]);
+    }
+    return `${lines.join("\n")}\n`;
 }
