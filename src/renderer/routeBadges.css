@@ -1,0 +1,108 @@
+/* Execution-route, ensemble, and fanout telemetry badges.
+   Colours come from design/tokens.json variables only (no hex/rgb literals). */
+
+.route-card {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    min-width: 0;
+}
+
+.route-card-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+}
+
+.route-card-value {
+    font-size: var(--font-size-lg);
+}
+
+.route-mode-pills,
+.route-latest {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.route-latest-label {
+    font-size: var(--font-size-xs);
+    color: var(--color-muted);
+    font-weight: var(--font-weight-bold);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.route-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    border-radius: var(--radius-pill);
+    padding: 0 var(--space-3);
+    font-size: var(--font-size-xs);
+    font-weight: var(--font-weight-medium);
+    line-height: 1.6;
+    border: 1px solid var(--color-border);
+    background: var(--color-elevated);
+    color: var(--color-text);
+    max-width: 100%;
+    overflow-wrap: anywhere;
+}
+
+.route-mode-ensemble {
+    border-color: color-mix(in srgb, var(--semantic-attention) 62%, var(--color-border));
+    background: color-mix(in srgb, var(--semantic-attention) 15%, var(--color-surface));
+    color: var(--color-text);
+}
+
+.route-mode-fanout {
+    border-color: color-mix(in srgb, var(--semantic-activation) 62%, var(--color-border));
+    background: color-mix(in srgb, var(--semantic-activation) 14%, var(--color-surface));
+    color: var(--color-link);
+}
+
+.route-mode-agent {
+    border-color: color-mix(in srgb, var(--semantic-warning) 62%, var(--color-border));
+    background: color-mix(in srgb, var(--semantic-warning) 14%, var(--color-surface));
+    color: var(--color-textWarning);
+}
+
+.route-mode-single {
+    border-color: color-mix(in srgb, var(--semantic-token) 55%, var(--color-border));
+    background: color-mix(in srgb, var(--semantic-token) 12%, var(--color-surface));
+    color: var(--color-text);
+}
+
+.route-badge-score {
+    color: var(--color-muted);
+    font-size: var(--font-size-xs);
+}
+
+.route-recent-list {
+    list-style: none;
+    margin: var(--space-1) 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+}
+
+.route-recent-item {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    padding-top: var(--space-2);
+    border-top: 1px solid color-mix(in srgb, var(--color-border) 55%, transparent);
+    font-size: var(--font-size-xs);
+}
+
+.route-recent-id,
+.route-recent-reason {
+    color: var(--color-muted);
+    overflow-wrap: anywhere;
+}

@@ -1,0 +1,131 @@
+/* Prefill vs Decode tok/s split and TTFT steady-vs-reload breakdown.
+   Colours come from design/tokens.json variables only (no hex/rgb literals). */
+
+.pd-split-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    margin-top: var(--space-3);
+}
+
+.pd-split {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-2);
+}
+
+.pd-col {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--color-border);
+    background: color-mix(in srgb, var(--color-elevated) 68%, var(--color-surface));
+    min-width: 0;
+}
+
+.pd-prefill {
+    border-left: 3px solid var(--semantic-activation);
+}
+
+.pd-decode {
+    border-left: 3px solid var(--semantic-token);
+}
+
+.pd-label {
+    font-size: var(--font-size-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-muted);
+    font-weight: var(--font-weight-bold);
+}
+
+.pd-rate {
+    font-size: var(--font-size-md);
+    font-weight: var(--font-weight-bold);
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+}
+
+.pd-detail {
+    font-size: var(--font-size-xs);
+    color: var(--color-muted);
+    overflow-wrap: anywhere;
+}
+
+.pd-recent,
+.ttft-rows {
+    list-style: none;
+    margin: var(--space-1) 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+}
+
+.pd-recent-row,
+.ttft-row,
+.ttft-latest {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--font-size-xs);
+}
+
+.pd-recent-id {
+    color: var(--color-muted);
+}
+
+.pd-recent-rates,
+.ttft-latest-detail {
+    font-variant-numeric: tabular-nums;
+}
+
+.ttft-breakdown {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    margin-top: var(--space-3);
+    padding-top: var(--space-2);
+    border-top: 1px solid color-mix(in srgb, var(--color-border) 65%, transparent);
+}
+
+.ttft-row-summary {
+    color: var(--color-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.pd-pill {
+    display: inline-flex;
+    align-items: center;
+    border-radius: var(--radius-pill);
+    padding: 0 var(--space-2);
+    font-size: var(--font-size-xs);
+    font-weight: var(--font-weight-medium);
+    line-height: 1.5;
+    white-space: nowrap;
+    border: 1px solid var(--color-border);
+    background: var(--color-elevated);
+    color: var(--color-muted);
+}
+
+.pd-pill-ok {
+    color: var(--color-textSuccess);
+    border-color: color-mix(in srgb, var(--semantic-healthy) 55%, var(--color-border));
+    background: color-mix(in srgb, var(--semantic-healthy) 12%, var(--color-surface));
+}
+
+.pd-pill-warn {
+    color: var(--color-textWarning);
+    border-color: color-mix(in srgb, var(--semantic-warning) 65%, var(--color-border));
+    background: color-mix(in srgb, var(--semantic-warning) 14%, var(--color-surface));
+    font-weight: var(--font-weight-bold);
+}
+
+.pd-pill-info {
+    color: var(--color-link);
+    border-color: color-mix(in srgb, var(--semantic-activation) 55%, var(--color-border));
+    background: color-mix(in srgb, var(--semantic-activation) 12%, var(--color-surface));
+}

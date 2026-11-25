@@ -134,6 +134,182 @@
 
 .gpu-card-header > div { min-width: 0; }
 
+/* Per-node multi-GPU VRAM breakdown (discrete vs integrated UMA + combined pool).
+   Colours use design/tokens.json variables only (no hex/rgb literals). */
+
+.gpu-node-title-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.gpu-mix-pill,
+.gpu-device-pill,
+.gpu-class-badge,
+.gpu-weights-badge,
+.gpu-pool-badge {
+    display: inline-flex;
+    align-items: center;
+    border-radius: var(--radius-pill);
+    padding: 0 var(--space-2);
+    font-size: var(--font-size-xs);
+    font-weight: var(--font-weight-medium);
+    line-height: 1.5;
+    white-space: nowrap;
+    border: 1px solid var(--color-border);
+    background: var(--color-elevated);
+    color: var(--color-muted);
+}
+
+.gpu-class-discrete {
+    color: var(--color-link);
+    border-color: color-mix(in srgb, var(--semantic-token) 55%, var(--color-border));
+    background: color-mix(in srgb, var(--semantic-token) 12%, var(--color-elevated));
+}
+
+.gpu-class-integrated-uma {
+    color: var(--color-text);
+    border-color: color-mix(in srgb, var(--semantic-attention) 60%, var(--color-border));
+    background: color-mix(in srgb, var(--semantic-attention) 16%, var(--color-elevated));
+}
+
+.gpu-weights-badge {
+    color: var(--color-textSuccess);
+    border-color: color-mix(in srgb, var(--semantic-healthy) 55%, var(--color-border));
+    background: color-mix(in srgb, var(--semantic-healthy) 12%, var(--color-elevated));
+}
+
+.gpu-pool-banner {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--color-border);
+    background: color-mix(in srgb, var(--color-elevated) 72%, var(--color-surface));
+}
+
+.gpu-pool-active {
+    border-color: color-mix(in srgb, var(--semantic-healthy) 60%, var(--color-border));
+    background: color-mix(in srgb, var(--semantic-healthy) 9%, var(--color-surface));
+}
+
+.gpu-pool-hybrid {
+    border-color: color-mix(in srgb, var(--semantic-attention) 50%, var(--color-border));
+    background: color-mix(in srgb, var(--semantic-attention) 8%, var(--color-surface));
+}
+
+.gpu-pool-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.gpu-pool-badge-active {
+    color: var(--color-textSuccess);
+    border-color: color-mix(in srgb, var(--semantic-healthy) 60%, var(--color-border));
+    background: color-mix(in srgb, var(--semantic-healthy) 14%, var(--color-surface));
+    font-weight: var(--font-weight-bold);
+}
+
+.gpu-pool-badge-hybrid {
+    color: var(--color-text);
+    border-color: color-mix(in srgb, var(--semantic-attention) 60%, var(--color-border));
+    background: color-mix(in srgb, var(--semantic-attention) 16%, var(--color-surface));
+    font-weight: var(--font-weight-bold);
+}
+
+.gpu-pool-summary {
+    font-size: var(--font-size-md);
+    font-weight: var(--font-weight-bold);
+    font-variant-numeric: tabular-nums;
+}
+
+.gpu-pool-split,
+.gpu-device-detail {
+    font-size: var(--font-size-xs);
+    color: var(--color-muted);
+    overflow-wrap: anywhere;
+}
+
+.gpu-pool-bar,
+.gpu-vram-bar {
+    display: flex;
+    width: 100%;
+    height: 8px;
+    border-radius: var(--radius-pill);
+    background: color-mix(in srgb, var(--color-background) 70%, var(--color-elevated));
+    border: 1px solid var(--color-border);
+    overflow: hidden;
+}
+
+.gpu-pool-seg,
+.gpu-vram-fill {
+    display: block;
+    height: 100%;
+}
+
+.gpu-pool-seg-discrete,
+.gpu-vram-fill-discrete {
+    background: var(--semantic-token);
+}
+
+.gpu-pool-seg-uma,
+.gpu-vram-fill-integrated-uma {
+    background: var(--semantic-attention);
+}
+
+.gpu-vram-fill-unknown {
+    background: var(--color-muted);
+}
+
+.gpu-device-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+}
+
+.gpu-device-row {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding-top: var(--space-2);
+    border-top: 1px solid color-mix(in srgb, var(--color-border) 65%, transparent);
+}
+
+.gpu-device-row:first-child {
+    padding-top: 0;
+    border-top: none;
+}
+
+.gpu-device-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.gpu-device-name {
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-bold);
+    overflow-wrap: anywhere;
+}
+
+.gpu-device-id {
+    color: var(--color-muted);
+    font-size: var(--font-size-xs);
+}
+
+.gpu-device-usage {
+    font-size: var(--font-size-sm);
+    font-variant-numeric: tabular-nums;
+}
+
 @media (max-width: 700px) {
     .gpu-summary { align-items: flex-start; flex-direction: column; }
 }
