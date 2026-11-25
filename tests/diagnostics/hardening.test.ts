@@ -241,6 +241,45 @@ describe("latency-outlier hardening", () => {
         expect(f).toHaveLength(1);
         expect(f[0]!.facts.request_id).toBe("r_4999");
     });
+
+    it("matches exact sorted-window p95 across evictions and stays fast for large baselineSize", () => {
+        const e = syntheticStream("lat_fenwick");
+        // Exercise duplicate durations, sliding evictions, and exact p95 rank boundaries.
+        const durations = [100, 120, 100, 110, 130, 90, 600, 100, 100, 100, 100, 100, 500];
+        const parityEvents: ObservatoryEvent[] = [];
+        for (let i = 0; i < durations.length; i += 1) {
+            parityEvents.push(
+                e(i * 1000, "request.started", {}, { request_id: `p_${i}` }),
+                e(i * 1000 + durations[i]!, "request.completed", {}, { request_id: `p_${i}` }),
+            );
+        }
+        // With baselineSize=5, minBaseline=5:
+        // - index 6 (600ms): prior 5 are [120,100,110,130,90] -> sorted [90,100,110,120,130], rank=ceil(4.75)=5 -> p95=130 -> 600 > 130*3 -> outlier!
+        // - index 12 (500ms): prior 5 are [100,100,100,100,100] (600 evicted!) -> p95=100 -> 500 > 100*3 -> outlier!
+        const parityFindings = detect("latency-outlier", parityEvents, {
+            latency: { baselineSize: 5, minBaseline: 5, factor: 3, minExcessMs: 100 },
+        });
+        expect(parityFindings.map((x) => [x.facts.request_id, x.facts.baseline_p95_ms])).toEqual([
+            ["p_6", 130],
+            ["p_12", 100],
+        ]);
+
+        // Stress large baselineSize (10,000) where Array.prototype.splice was O(N * baselineSize).
+        const largeEvents: ObservatoryEvent[] = [];
+        for (let i = 0; i < 20_000; i += 1) {
+            const dur = i === 19_999 ? 5000 : 100 + ((i * 37) % 100);
+            largeEvents.push(
+                e(i * 1000, "request.started", {}, { request_id: `lg_${i}` }),
+                e(i * 1000 + dur, "request.completed", {}, { request_id: `lg_${i}` }),
+            );
+        }
+        const t0 = performance.now();
+        const largeFindings = detect("latency-outlier", largeEvents, { latency: { baselineSize: 10_000 } });
+        expect(performance.now() - t0).toBeLessThan(1000);
+        expect(largeFindings).toHaveLength(1);
+        expect(largeFindings[0]!.facts.request_id).toBe("lg_19999");
+        expect(largeFindings[0]!.facts.baseline_requests).toBe(10_000);
+    });
 });
 
 describe("model-churn hardening", () => {
