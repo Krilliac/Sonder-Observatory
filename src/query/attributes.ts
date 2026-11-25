@@ -11,11 +11,32 @@ import { producerStreamKey } from "./identity";
 
 export { producerInstance } from "./identity";
 
+const MIB = 1024 * 1024;
+
 function finite(value: unknown): number | null {
     return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-export type MemorySource = "used_bytes" | "available_bytes" | "used_fraction";
+function nonNegativeFinite(value: unknown): number | null {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function mibToSafeBytes(value: unknown): number | null {
+    const mib = nonNegativeFinite(value);
+    if (mib === null) {
+        return null;
+    }
+    const bytes = mib * MIB;
+    return Number.isFinite(bytes) && bytes <= Number.MAX_SAFE_INTEGER ? bytes : null;
+}
+
+export type MemorySource =
+    | "used_bytes"
+    | "available_bytes"
+    | "effective_vram_mib"
+    | "uma_bytes"
+    | "dedicated_bytes"
+    | "used_fraction";
 
 export interface MemoryUsage {
     usedBytes: number | null;
@@ -25,16 +46,34 @@ export interface MemoryUsage {
     source: MemorySource;
 }
 
+/** Canonical memory kind attribute (`cpu`, `gpu`, `vram`, `ram`, …) of a `device.memory.sample`, or null. */
+export function deviceMemoryKind(event: ObservatoryEvent): string | null {
+    const k = event.attributes.kind;
+    if (typeof k !== "string") {
+        return null;
+    }
+    const trimmed = k.trim();
+    return trimmed.length > 0 ? trimmed : null;
+}
+
 /**
  * Memory usage of a `device.memory.sample`, from (in order):
- * `used_bytes` + `total_bytes` (Observatory fixture), `total_bytes` +
- * `available_bytes` (Sonder-Inference: used = total - available), or
- * `used_fraction`.
+ * 1. `used_bytes` + `total_bytes` (Observatory fixture & discrete GPU samples),
+ * 2. `total_bytes` + `available_bytes` (Sonder-Inference: used = total - available),
+ * 3. `effective_vram_mib` + `effective_free_vram_mib` (Sonder-Inference integrated
+ *    UMA iGPU e.g. Radeon 780M and discrete GPUs omitting generic byte fields),
+ * 4. UMA byte fields (`is_integrated_uma: true` with `dedicated_total_bytes` +
+ *    `shared_total_bytes` and unified `dedicated_free_bytes`),
+ * 5. Discrete GPU `dedicated_total_bytes` + `dedicated_free_bytes`,
+ * 6. `used_fraction`.
+ *
+ * Anomalous readings (free > total, zero total, missing free count) never
+ * underflow or fabricate zero usage.
  */
 export function memoryUsage(event: ObservatoryEvent): MemoryUsage | null {
     const a = event.attributes;
     const total = finite(a.total_bytes);
-    const used = finite(a.used_bytes);
+    const used = nonNegativeFinite(a.used_bytes);
     if (used !== null && total !== null && total > 0) {
         return { usedBytes: used, totalBytes: total, fraction: used / total, source: "used_bytes" };
     }
@@ -42,6 +81,37 @@ export function memoryUsage(event: ObservatoryEvent): MemoryUsage | null {
     if (available !== null && total !== null && total > 0 && available >= 0 && available <= total) {
         const u = total - available;
         return { usedBytes: u, totalBytes: total, fraction: u / total, source: "available_bytes" };
+    }
+    const effectiveTotal = mibToSafeBytes(a.effective_vram_mib);
+    const effectiveFree = mibToSafeBytes(a.effective_free_vram_mib);
+    if (effectiveTotal !== null && effectiveTotal > 0 && effectiveFree !== null && effectiveFree <= effectiveTotal) {
+        const u = effectiveTotal - effectiveFree;
+        return { usedBytes: u, totalBytes: effectiveTotal, fraction: u / effectiveTotal, source: "effective_vram_mib" };
+    }
+    const dedicatedTotal = nonNegativeFinite(a.dedicated_total_bytes);
+    const dedicatedFree = nonNegativeFinite(a.dedicated_free_bytes);
+    const sharedTotal = nonNegativeFinite(a.shared_total_bytes);
+    if (a.is_integrated_uma === true) {
+        // Integrated UMA free spans BIOS carveout (dedicated) + GTT (shared).
+        const umaTotal =
+            effectiveTotal ??
+            (dedicatedTotal !== null && sharedTotal !== null
+                ? dedicatedTotal + sharedTotal
+                : (sharedTotal ?? dedicatedTotal));
+        if (
+            umaTotal !== null &&
+            umaTotal > 0 &&
+            Number.isFinite(umaTotal) &&
+            umaTotal <= Number.MAX_SAFE_INTEGER &&
+            dedicatedFree !== null &&
+            dedicatedFree <= umaTotal
+        ) {
+            const u = umaTotal - dedicatedFree;
+            return { usedBytes: u, totalBytes: umaTotal, fraction: u / umaTotal, source: "uma_bytes" };
+        }
+    } else if (dedicatedTotal !== null && dedicatedTotal > 0 && dedicatedFree !== null && dedicatedFree <= dedicatedTotal) {
+        const u = dedicatedTotal - dedicatedFree;
+        return { usedBytes: u, totalBytes: dedicatedTotal, fraction: u / dedicatedTotal, source: "dedicated_bytes" };
     }
     const fraction = finite(a.used_fraction);
     return fraction === null ? null : { usedBytes: null, totalBytes: null, fraction, source: "used_fraction" };
