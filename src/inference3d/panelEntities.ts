@@ -38,7 +38,10 @@ export function buildEntityRows(
             kind: "stage",
             label: s.label,
             where: "pipeline",
-            state: `${s.requests} ${s.id === "output" ? "finished" : "in flight"}`,
+            state:
+                s.id === "output"
+                    ? `${s.requests} finished${s.cancelledRequests ? ` (${s.cancelledRequests} cancelled)` : ""}`
+                    : `${s.requests} in flight`,
             measures: `${s.events} events · ${fmtRate(s.ratePerSec)}`,
             evidence: s.evidence,
         });
@@ -79,12 +82,17 @@ export function buildEntityRows(
                 : r.promptTokens !== null
                   ? `${r.promptTokens} prompt tokens`
                   : "tokens not reported yet";
+        const stageLabel = STAGES.find((s) => s.id === r.stage)!.label;
+        const fromLabel =
+            r.state === "cancelled" && r.lastActiveStage
+                ? ` (from ${STAGES.find((s) => s.id === r.lastActiveStage)?.label ?? r.lastActiveStage})`
+                : "";
         add({
             id: r.id,
             kind: r.role === "runtime" ? "runtime turn" : "request",
             label: r.requestId,
             where: `${r.model} @ ${r.nodeId}`,
-            state: `${r.state} · ${STAGES.find((s) => s.id === r.stage)!.label}`,
+            state: `${r.state}${fromLabel} · ${stageLabel}`,
             measures: `${tokens} · ${r.outputEvents} output events · started ${relativeTime(r.startNs)}`,
             evidence: r.evidence,
         });

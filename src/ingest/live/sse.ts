@@ -19,10 +19,19 @@ export interface SseMessage {
  */
 export const MAX_LINE_CHARS = 512 * 1024;
 
+/**
+ * Largest `id:` or `event:` field value retained by SseParser (4 Ki chars).
+ * Keeps Last-Event-ID bounded so reconnect headers cannot grow to 512 KiB
+ * and trigger HTTP 431 Request Header Fields Too Large.
+ */
+export const MAX_SSE_FIELD_CHARS = 4096;
+
 export interface SseHandlers {
     onMessage(message: SseMessage): void;
     /** Reconnection time requested by the server via a `retry:` field. */
     onRetry?(ms: number): void;
+    /** Comment line (`:` prefix stripped, plus one optional leading space). */
+    onComment?(comment: string): void;
     /** A line or event exceeded the size limit and was discarded. */
     onOversize?(reason: string): void;
 }
@@ -35,6 +44,8 @@ export class SseParser {
     private skippingLine = false;
     /** Discarding the current event up to its blank line. */
     private skippingEvent = false;
+    /** True when the current line inside a discarded event had any non-empty content. */
+    private discardedLineNonEmpty = false;
     private dataChars = 0;
     private data: string[] = [];
     private eventType = "";
@@ -42,11 +53,14 @@ export class SseParser {
     private sawData = false;
     private first = true;
     private pendingCr = false;
+    private readonly maxLineChars: number;
 
     constructor(
         private readonly handlers: SseHandlers,
-        private readonly maxLineChars: number = MAX_LINE_CHARS,
-    ) {}
+        maxLineChars: number = MAX_LINE_CHARS,
+    ) {
+        this.maxLineChars = Number.isFinite(maxLineChars) ? Math.max(1, Math.floor(maxLineChars)) : MAX_LINE_CHARS;
+    }
 
     /** Id carried over across reconnects, per spec. */
     get currentLastEventId(): string {
@@ -82,6 +96,12 @@ export class SseParser {
             this.hold(text.slice(start, i));
             if (this.skippingLine) {
                 this.skippingLine = false;
+            } else if (this.skippingEvent) {
+                if (!this.discardedLineNonEmpty) {
+                    this.skippingEvent = false;
+                    this.eventType = "";
+                }
+                this.discardedLineNonEmpty = false;
             } else {
                 const line = this.parts.length === 1 ? this.parts[0]! : this.parts.join("");
                 this.parts = [];
@@ -108,6 +128,7 @@ export class SseParser {
         this.partChars = 0;
         this.skippingLine = false;
         this.skippingEvent = false;
+        this.discardedLineNonEmpty = false;
         this.dataChars = 0;
         this.data = [];
         this.eventType = "";
@@ -118,6 +139,10 @@ export class SseParser {
     /** Buffers part of the current line, or drops the line once it is too long. */
     private hold(text: string): void {
         if (this.skippingLine || text.length === 0) {
+            return;
+        }
+        if (this.skippingEvent) {
+            this.discardedLineNonEmpty = true;
             return;
         }
         if (this.partChars + text.length > this.maxLineChars) {
@@ -137,6 +162,7 @@ export class SseParser {
         this.dataChars = 0;
         this.sawData = false;
         this.skippingEvent = true;
+        this.discardedLineNonEmpty = false;
         this.handlers.onOversize?.(reason);
     }
 
@@ -154,7 +180,12 @@ export class SseParser {
             return;
         }
         if (line.startsWith(":")) {
-            return; // comment / heartbeat
+            let comment = line.slice(1);
+            if (comment.startsWith(" ")) {
+                comment = comment.slice(1);
+            }
+            this.handlers.onComment?.(comment);
+            return; // comment / heartbeat / control notice
         }
         const colon = line.indexOf(":");
         let field: string;
@@ -180,10 +211,14 @@ export class SseParser {
                 this.sawData = true;
                 break;
             case "event":
-                this.eventType = value;
+                if (value.length <= MAX_SSE_FIELD_CHARS) {
+                    this.eventType = value;
+                } else {
+                    this.oversize(`SSE event name exceeds the ${MAX_SSE_FIELD_CHARS}-character limit`);
+                }
                 break;
             case "id":
-                if (!value.includes("\u0000")) {
+                if (!value.includes("\u0000") && value.length <= MAX_SSE_FIELD_CHARS) {
                     this.lastEventId = value;
                 }
                 break;
@@ -232,11 +267,13 @@ export class LineSplitter {
     private partChars = 0;
     /** Discarding an oversized line up to its terminator. */
     private skipping = false;
+    private first = true;
     private readonly maxLineChars: number;
     private readonly onOversize: ((reason: string) => void) | undefined;
 
     constructor(options: LineSplitterOptions = {}) {
-        this.maxLineChars = options.maxLineChars ?? MAX_LINE_CHARS;
+        const rawMax = options.maxLineChars ?? MAX_LINE_CHARS;
+        this.maxLineChars = Number.isFinite(rawMax) ? Math.max(1, Math.floor(rawMax)) : MAX_LINE_CHARS;
         this.onOversize = options.onOversize;
     }
 
@@ -246,6 +283,12 @@ export class LineSplitter {
     }
 
     feed(chunk: string): string[] {
+        if (this.first && chunk.length > 0) {
+            this.first = false;
+            if (chunk.charCodeAt(0) === 0xfeff) {
+                chunk = chunk.slice(1);
+            }
+        }
         const lines: string[] = [];
         let start = 0;
         for (;;) {
@@ -269,11 +312,14 @@ export class LineSplitter {
 
     /** Returns the trailing unterminated line, if any. */
     flush(): string[] {
-        const rest = this.parts.join("");
+        let rest = this.parts.join("");
         const skipped = this.skipping;
         this.parts = [];
         this.partChars = 0;
         this.skipping = false;
+        if (rest.endsWith("\r")) {
+            rest = rest.slice(0, -1);
+        }
         return skipped || rest.trim() === "" ? [] : [rest];
     }
 

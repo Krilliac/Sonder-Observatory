@@ -37,6 +37,8 @@ export interface StageSummary {
     label: string;
     /** Requests currently in this stage at the cursor (for `output`: finished requests). */
     requests: number;
+    /** Cancelled requests counted in this stage (populated on `output`). */
+    cancelledRequests?: number;
     /** Events of this stage up to the cursor. */
     events: number;
     /** Events of this stage per second over the trailing window ending at the cursor. */
@@ -86,6 +88,10 @@ export interface RequestEntity {
     parentRequestId: string | null;
     /** Stage-entry times (mono_ns) actually observed. */
     stageEntries: Partial<Record<StageId, number>>;
+    /** Last non-output stage observed before a terminal outcome (e.g. decode when cancelled mid-decode). */
+    lastActiveStage?: StageId | null;
+    /** Ordered per-request stage transitions observed (never mixes distinct request_ids). */
+    transitions?: { stage: StageId; monoNs: number; eventType: string }[];
     evidence: string[];
     lastEventId: string;
     synthetic: boolean;

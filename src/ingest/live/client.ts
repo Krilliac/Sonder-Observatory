@@ -74,6 +74,10 @@ export interface LiveIngestStatus {
     bufferCapacity: number;
     /** Number of sink.append calls. */
     batches: number;
+    /** Cumulative per-subscriber drops announced by the producer (`: dropped <n>`). */
+    serverDropped?: number;
+    /** Count of `: resume-gap <from>-<to>` notices announced by the producer. */
+    resumeGaps?: number;
     lastError: string | null;
 }
 
@@ -202,6 +206,7 @@ export class LiveIngestClient {
     private readonly listeners = new Set<(s: LiveIngestStatus) => void>();
     private readonly statusValue: LiveIngestStatus;
     private handle: TransportHandle | null = null;
+    private discoveryAbort: AbortController | null = null;
     private kind: TransportKind | null = null;
     /** Discovery URL for base/discovery URLs; null for stream URLs. */
     private readonly discoveryUrl: string | null;
@@ -230,13 +235,16 @@ export class LiveIngestClient {
             sizeOf: estimateEventBytes,
         });
         this.backoff = new Backoff(options.backoff);
-        this.batchSize = Math.max(1, options.batchSize ?? 1000);
-        this.flushIntervalMs = Math.max(0, options.flushIntervalMs ?? 50);
+        const rawBatch = options.batchSize ?? 1000;
+        this.batchSize = Number.isFinite(rawBatch) ? Math.max(1, Math.floor(rawBatch)) : 1000;
+        const rawFlush = options.flushIntervalMs ?? 50;
+        this.flushIntervalMs = Number.isFinite(rawFlush) ? Math.max(0, rawFlush) : 50;
         this.highWater = Math.max(1, Math.floor(capacity * 0.75));
         this.lowWater = Math.floor(capacity * 0.25);
-        this.highWaterBytes = Math.max(1, Math.floor(maxBytes * 0.75));
-        this.lowWaterBytes = Math.floor(maxBytes * 0.25);
-        this.maxLimitViolations = Math.max(1, Math.floor(options.maxLimitViolations ?? DEFAULT_MAX_LIMIT_VIOLATIONS));
+        this.highWaterBytes = Number.isFinite(maxBytes) ? Math.max(1, Math.floor(maxBytes * 0.75)) : Number.POSITIVE_INFINITY;
+        this.lowWaterBytes = Number.isFinite(maxBytes) ? Math.floor(maxBytes * 0.25) : Number.POSITIVE_INFINITY;
+        const rawViolations = options.maxLimitViolations ?? DEFAULT_MAX_LIMIT_VIOLATIONS;
+        this.maxLimitViolations = Number.isFinite(rawViolations) ? Math.max(1, Math.floor(rawViolations)) : DEFAULT_MAX_LIMIT_VIOLATIONS;
         this.discoveryUrl = discoveryUrlFor(options);
         const endpoint = checkedEndpoint(options);
         this.kind = this.discoveryUrl === null ? endpoint.kind : null;
@@ -258,6 +266,8 @@ export class LiveIngestClient {
             buffered: 0,
             bufferCapacity: capacity,
             batches: 0,
+            serverDropped: 0,
+            resumeGaps: 0,
             lastError: endpoint.ok ? null : (endpoint.message ?? "invalid endpoint"),
         };
         if (options.onStatus) {
@@ -304,6 +314,7 @@ export class LiveIngestClient {
         this.stopped = true;
         this.generation += 1;
         this.clearRetry();
+        this.abortDiscovery();
         const handle = this.handle;
         this.handle = null;
         handle?.close();
@@ -360,7 +371,17 @@ export class LiveIngestClient {
     private async discover(generation: number, lastEventId: string | null): Promise<void> {
         const discoveryUrl = this.discoveryUrl!;
         const token = bearerToken(this.options.headers);
-        const fetched = await fetchDiscovery(discoveryUrl, { token, fetch: this.options.fetch });
+        this.abortDiscovery();
+        const controller = new AbortController();
+        this.discoveryAbort = controller;
+        const fetched = await fetchDiscovery(discoveryUrl, {
+            token,
+            fetch: this.options.fetch,
+            signal: controller.signal,
+        });
+        if (this.discoveryAbort === controller) {
+            this.discoveryAbort = null;
+        }
         if (generation !== this.generation || this.stopped) {
             return;
         }
@@ -431,6 +452,17 @@ export class LiveIngestClient {
                     this.serverRetryMs = clampRetryHint(ms);
                 }
             },
+            onServerNotice: (notice) => {
+                if (!current()) {
+                    return;
+                }
+                if (notice.kind === "dropped") {
+                    this.statusValue.serverDropped = (this.statusValue.serverDropped ?? 0) + notice.count;
+                } else {
+                    this.statusValue.resumeGaps = (this.statusValue.resumeGaps ?? 0) + 1;
+                }
+                this.emit();
+            },
             onClose: (reason, failed) => {
                 if (!current()) {
                     return;
@@ -493,11 +525,69 @@ export class LiveIngestClient {
         }
     }
 
+    private abortDiscovery(): void {
+        if (this.discoveryAbort !== null) {
+            this.discoveryAbort.abort();
+            this.discoveryAbort = null;
+        }
+    }
+
     // --- decoding --------------------------------------------------------------
 
-    private *decode(text: string): Generator<{ event: ObservatoryEvent } | { cursor: string | null }> {
-        let start = 0;
+    private *decodeLine(raw: string): Generator<{ event: ObservatoryEvent } | { cursor: string | null }> {
         const adapter = this.options.adapter;
+        const line = ++this.lineCounter;
+        let value: unknown;
+        try {
+            value = JSON.parse(raw);
+        } catch (error) {
+            this.reject({ line, reason: `invalid JSON: ${(error as Error).message}`, raw });
+            return;
+        }
+        // Capture producer identity before an adapter can rewrite or fan out the event.
+        const source = validateEvent(value);
+        const cursor = source.ok ? source.event.event_id : null;
+        let values: unknown[];
+        try {
+            values = adapter ? normalizeAdapted(adapter(value)) : [value];
+        } catch (error) {
+            this.reject({ line, reason: `adapter error: ${(error as Error).message}`, raw });
+            return;
+        }
+        for (const candidate of values) {
+            const result = !adapter && candidate === value ? source : validateEvent(candidate);
+            if (!result.ok) {
+                const reason = formatIssues(result.issues);
+                this.reject({ line, reason, raw });
+                if (isLimitViolation(result.issues) && this.recordLimitViolation(reason)) {
+                    return;
+                }
+                continue;
+            }
+            yield { event: result.event };
+        }
+        // Reaching this marker means every output of this source line was consumed.
+        yield { cursor };
+    }
+
+    private *decode(text: string, allowWholeJson = false): Generator<{ event: ObservatoryEvent } | { cursor: string | null }> {
+        if (allowWholeJson && text.includes("\n")) {
+            const whole = text.trim();
+            if (whole.startsWith("{") && whole.endsWith("}")) {
+                let parsedWhole = false;
+                try {
+                    const value: unknown = JSON.parse(whole);
+                    parsedWhole = typeof value === "object" && value !== null && !Array.isArray(value);
+                } catch {
+                    // Multi-line SSE payload may be batched NDJSON; fall through to line-by-line decoding.
+                }
+                if (parsedWhole) {
+                    yield* this.decodeLine(whole);
+                    return;
+                }
+            }
+        }
+        let start = 0;
         while (start <= text.length) {
             let end = text.indexOf("\n", start);
             if (end === -1) {
@@ -508,38 +598,10 @@ export class LiveIngestClient {
             if (raw === "") {
                 continue;
             }
-            const line = ++this.lineCounter;
-            let value: unknown;
-            try {
-                value = JSON.parse(raw);
-            } catch (error) {
-                this.reject({ line, reason: `invalid JSON: ${(error as Error).message}`, raw });
-                continue;
+            yield* this.decodeLine(raw);
+            if (this.stopped) {
+                return;
             }
-            // Capture producer identity before an adapter can rewrite or fan out the event.
-            const source = validateEvent(value);
-            const cursor = source.ok ? source.event.event_id : null;
-            let values: unknown[];
-            try {
-                values = adapter ? normalizeAdapted(adapter(value)) : [value];
-            } catch (error) {
-                this.reject({ line, reason: `adapter error: ${(error as Error).message}`, raw });
-                continue;
-            }
-            for (const candidate of values) {
-                const result = !adapter && candidate === value ? source : validateEvent(candidate);
-                if (!result.ok) {
-                    const reason = formatIssues(result.issues);
-                    this.reject({ line, reason, raw });
-                    if (isLimitViolation(result.issues) && this.recordLimitViolation(reason)) {
-                        return;
-                    }
-                    continue;
-                }
-                yield { event: result.event };
-            }
-            // Reaching this marker means every output of this source line was consumed.
-            yield { cursor };
         }
     }
 
@@ -566,7 +628,7 @@ export class LiveIngestClient {
     }
 
     private ingest(text: string, sseId: string | null, trackSourceCursor: boolean): void {
-        for (const part of this.decode(text)) {
+        for (const part of this.decode(text, sseId !== null || this.statusValue.transport === "sse")) {
             if (this.stopped) {
                 return;
             }
@@ -585,7 +647,7 @@ export class LiveIngestClient {
 
     /** A single HTTP chunk or adapter result can exceed the whole queue. */
     private async ingestHttp(text: string, sseId: string | null, current: () => boolean): Promise<void> {
-        for (const part of this.decode(text)) {
+        for (const part of this.decode(text, sseId !== null || this.statusValue.transport === "sse")) {
             if (!current()) {
                 return;
             }
@@ -596,9 +658,10 @@ export class LiveIngestClient {
                 }
                 continue;
             }
-            if (this.isAboveHighWater()) {
+            const eventBytes = estimateEventBytes(part.event);
+            while (this.needsBackpressure(eventBytes)) {
                 this.scheduleFlush();
-                await this.waitForCapacity();
+                await this.waitForCapacity(eventBytes);
                 if (!current()) {
                     return;
                 }
@@ -627,6 +690,7 @@ export class LiveIngestClient {
         this.stopped = true;
         this.generation += 1;
         this.clearRetry();
+        this.abortDiscovery();
         const handle = this.handle;
         this.handle = null;
         handle?.close();
@@ -642,6 +706,19 @@ export class LiveIngestClient {
 
     private isAboveHighWater(): boolean {
         return this.buffer.size >= this.highWater || this.buffer.bytes >= this.highWaterBytes;
+    }
+
+    /** True when accepting `eventBytes` should pause first to avoid dropping in HTTP pause mode. */
+    private needsBackpressure(eventBytes: number): boolean {
+        if (this.isAboveHighWater()) {
+            return true;
+        }
+        return (
+            this.buffer.size > 0 &&
+            Number.isFinite(this.buffer.maxBytes) &&
+            eventBytes <= this.buffer.maxBytes &&
+            this.buffer.bytes + eventBytes > this.buffer.maxBytes
+        );
     }
 
     private isAtOrBelowLowWater(): boolean {
@@ -672,21 +749,25 @@ export class LiveIngestClient {
             const rejected = this.pendingRejected;
             this.pendingRejected = [];
             if (rejected.length > 0) {
-                this.options.sink.addRejected?.(rejected);
+                try {
+                    this.options.sink.addRejected?.(rejected);
+                } catch (error) {
+                    this.statusValue.lastError = `sink error: ${(error as Error).message}`;
+                }
             }
             const batch = this.buffer.drain(this.batchSize);
             if (batch.length > 0) {
                 try {
                     await this.options.sink.append(batch);
+                    this.statusValue.appended += batch.length;
+                    this.statusValue.batches += 1;
                 } catch (error) {
                     this.statusValue.lastError = `sink error: ${(error as Error).message}`;
                 }
-                this.statusValue.appended += batch.length;
-                this.statusValue.batches += 1;
             }
             this.statusValue.buffered = this.buffer.size;
             this.statusValue.dropped = this.buffer.dropped;
-            if (this.isAtOrBelowLowWater()) {
+            if (this.isAtOrBelowLowWater() || this.buffer.size === 0) {
                 this.releaseWaiters();
             }
             this.emit();
@@ -697,11 +778,11 @@ export class LiveIngestClient {
         return this.flushing;
     }
 
-    private waitForCapacity(): Promise<void> {
+    private waitForCapacity(nextEventBytes = 0): Promise<void> {
         if (
             this.stopped ||
             this.options.httpBackpressure === "drop" ||
-            !this.isAboveHighWater()
+            !this.needsBackpressure(nextEventBytes)
         ) {
             return Promise.resolve();
         }

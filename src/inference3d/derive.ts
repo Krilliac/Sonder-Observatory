@@ -42,6 +42,7 @@ export const MAX_TOKENS = 40;
 export const MAX_FINISHED = 120;
 const MAX_EVIDENCE = 60;
 const EVIDENCE_HEAD = 5;
+const MAX_STAGE_TRANSITIONS = 64;
 
 export interface DeriveOptions {
     /** Replay cursor (mono_ns). Defaults to the last event. */
@@ -108,6 +109,7 @@ export function stageOfEvent(e: ObservatoryEvent, runtime: boolean): { stage: St
         case "scheduler.prefill.chunk":
         case "scheduler.prefill.completed":
         case "inference.prefill.started":
+        case "inference.prefill.chunk":
         case "kv.allocated":
         case "kv.reused":
             return { stage: "prefill", move: true };
@@ -168,7 +170,10 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
     const windowStart = nowNs === null ? 0 : nowNs - RATE_WINDOW_MS * 1e6;
 
     const facts = new Map<string, StreamFacts>();
+    /** All request entities by canonical entity id (including distinct generations of a reused request_id). */
     const requests = new Map<string, RequestWork>();
+    /** Latest entity id for each canonical (stream, request_id) base key. */
+    const latestRequestByBase = new Map<string, { id: string; generation: number }>();
     const sessionModel = new Map<string, string>();
     const instanceModel = new Map<string, string>();
     /** Text capture policy per producer stream and session (a policy never crosses streams). */
@@ -383,15 +388,29 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
         const relevant = rid !== null && (staged !== null || t.startsWith("request.") || t.startsWith("kv.") || t.startsWith("scheduler."));
         let requestKey: string | null = null;
         if (relevant) {
-            const key = scopedRequestKey(stream, rid);
-            requestKey = key;
-            let w = requests.get(key);
+            const baseKey = scopedRequestKey(stream, rid);
+            const latest = latestRequestByBase.get(baseKey);
+            let activeKey = latest ? latest.id : baseKey;
+            let w = requests.get(activeKey);
+            const startsFresh =
+                (t === "request.started" || t === "request.queued" || t === "scheduler.enqueued") &&
+                w !== undefined &&
+                w.entity.state !== "active";
+            if (startsFresh) {
+                const nextGen = (latest?.generation ?? 0) + 1;
+                activeKey = tupleKey("request-gen", stream, rid, String(nextGen));
+                latestRequestByBase.set(baseKey, { id: activeKey, generation: nextGen });
+                w = undefined;
+            }
+            requestKey = activeKey;
             // A request is born by a stage-moving event; facts and KV events alone do not create one.
             if (!w && staged?.move) {
                 f.requests += 1;
+                const initialState = t in TERMINAL ? TERMINAL[t]! : "active";
+                const initialActiveStage = staged.stage === "output" ? null : staged.stage;
                 w = {
                     entity: {
-                        id: key,
+                        id: activeKey,
                         requestId: rid,
                         stream,
                         producer: e.producer.name,
@@ -400,23 +419,25 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
                         nodeId: e.producer.node_id,
                         model: "",
                         stage: staged.stage,
-                        state: "active",
+                        state: initialState,
                         kind: null,
                         completionTokens: null,
                         promptTokens: null,
                         outputEvents: 0,
                         startNs: e.mono_ns,
                         lastNs: e.mono_ns,
-                        endNs: null,
+                        endNs: initialState === "active" ? null : e.mono_ns,
                         parentRequestId: null,
                         stageEntries: { [staged.stage]: e.mono_ns },
+                        lastActiveStage: initialActiveStage,
+                        transitions: [{ stage: staged.stage, monoNs: e.mono_ns, eventType: t }],
                         evidence: [],
                         lastEventId: e.event_id,
                         synthetic: f.synthetic,
                     },
                     routeModel: null,
                     requestedModel: null,
-                    outcomeModel: null,
+                    outcomeModel: initialState === "active" ? null : str(e.attributes.model),
                     sessionId: e.session_id,
                     modelInstanceId: e.model_instance_id ?? null,
                     deviceId: e.device_id ?? null,
@@ -424,7 +445,10 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
                     runId: null,
                     runConflict: false,
                 };
-                requests.set(key, w);
+                requests.set(activeKey, w);
+                if (!latest) {
+                    latestRequestByBase.set(baseKey, { id: activeKey, generation: 0 });
+                }
             }
         }
         const rw = requestKey !== null ? requests.get(requestKey) : undefined;
@@ -469,17 +493,33 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
             if (completion !== null && (t === "inference.decode.completed" || e.attributes.token_counts_from_backend === true || runtime)) {
                 r.completionTokens = completion;
             }
-            if (t in TERMINAL) {
+            // Terminal states are sticky: a straggler request.completed/failed after
+            // request.cancelled never overwrites the cancelled state or endNs.
+            if (t in TERMINAL && r.state === "active") {
                 r.state = TERMINAL[t]!;
                 r.endNs = e.mono_ns;
                 w.outcomeModel = str(e.attributes.model) ?? w.outcomeModel;
-            }
-            if (staged && staged.move && r.stage !== "output") {
+                if (r.stage !== "output") {
+                    r.stageEntries.output = e.mono_ns;
+                    r.stage = "output";
+                    r.transitions?.push({ stage: "output", monoNs: e.mono_ns, eventType: t });
+                    if (r.transitions && r.transitions.length > MAX_STAGE_TRANSITIONS) {
+                        r.transitions.splice(1, r.transitions.length - MAX_STAGE_TRANSITIONS);
+                    }
+                }
+            } else if (staged && staged.move && r.state === "active" && r.stage !== "output") {
                 if (STAGE_ORDER[staged.stage] >= STAGE_ORDER[r.stage] || t === "scheduler.preempted") {
                     if (r.stage !== staged.stage) {
                         r.stageEntries[staged.stage] = e.mono_ns;
+                        r.stage = staged.stage;
+                        if (staged.stage !== "output") {
+                            r.lastActiveStage = staged.stage;
+                        }
+                        r.transitions?.push({ stage: staged.stage, monoNs: e.mono_ns, eventType: t });
+                        if (r.transitions && r.transitions.length > MAX_STAGE_TRANSITIONS) {
+                            r.transitions.splice(1, r.transitions.length - MAX_STAGE_TRANSITIONS);
+                        }
                     }
-                    r.stage = staged.stage;
                 }
             }
         }
@@ -493,7 +533,7 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
             } else {
                 f.tokenUnitEvents += 1;
             }
-            const reqKey = rid ? scopedRequestKey(stream, rid!) : null;
+            const reqKey = rid ? (latestRequestByBase.get(scopedRequestKey(stream, rid!))?.id ?? scopedRequestKey(stream, rid!)) : null;
             const req = reqKey ? requests.get(reqKey) : undefined;
             if (req) {
                 req.entity.outputEvents += 1;
@@ -539,7 +579,7 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
             const alternatives = readAlternatives(e.attributes.candidates, captureAllowsText(policy));
             if (alternatives !== null) {
                 f.alternativeEvents += 1;
-                const reqKey = rid ? scopedRequestKey(stream, rid!) : null;
+                const reqKey = rid ? (latestRequestByBase.get(scopedRequestKey(stream, rid!))?.id ?? scopedRequestKey(stream, rid!)) : null;
                 const token = tokenFor(e, reqKey, (reqKey ? requests.get(reqKey)?.entity.id : undefined) ?? null);
                 token.alternatives = alternatives;
                 token.candidatesEventId = e.event_id;
@@ -620,8 +660,12 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
 
     // ----- stage summaries
     const inStage = new Map<StageId, number>();
+    let cancelledTotal = 0;
     for (const r of allRequests) {
         inStage.set(r.stage, (inStage.get(r.stage) ?? 0) + 1);
+        if (r.state === "cancelled") {
+            cancelledTotal += 1;
+        }
     }
     const hasLayers = layers.size > 0;
     const stages: StageSummary[] = STAGES.filter((s) => s.id !== "layers" || hasLayers).map((s) => {
@@ -630,6 +674,7 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
             id: s.id,
             label: s.label,
             requests: inStage.get(s.id) ?? 0,
+            ...(s.id === "output" && cancelledTotal > 0 ? { cancelledRequests: cancelledTotal } : {}),
             events: ev.count,
             ratePerSec: ev.recent / (RATE_WINDOW_MS / 1000),
             evidence: ev.evidence,

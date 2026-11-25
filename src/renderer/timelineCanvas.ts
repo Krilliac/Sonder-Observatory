@@ -37,6 +37,7 @@ export interface TimelinePalette {
     evidence: string;
     span: string;
     spanFailed: string;
+    spanCancelled?: string;
     /** Colour per TRACKS entry. */
     tracks: readonly string[];
 }
@@ -51,6 +52,7 @@ export const DEFAULT_PALETTE: TimelinePalette = {
     evidence: "#f59e0b",
     span: "#3b82f6",
     spanFailed: "#ef4444",
+    spanCancelled: "#f59e0b",
     tracks: ["#8a9ab3", "#3b82f6", "#22d3ee", "#a855f7", "#10b981", "#f59e0b", "#ef4444", "#c0c8d6", "#6b7a90"],
 };
 
@@ -132,7 +134,12 @@ export function drawTimeline(ctx: TimelineContext, input: DrawTimelineInput): Dr
         }
         lastX = px;
         lastOutcome = r.outcome;
-        const color = r.outcome === "failed" ? p.spanFailed : p.span;
+        const color =
+            r.outcome === "failed"
+                ? p.spanFailed
+                : r.outcome === "cancelled"
+                  ? (p.spanCancelled ?? p.evidence)
+                  : p.span;
         const y = rowY(reqRow) + 4;
         const w = Math.max(x2 - x1, 1);
         ctx.globalAlpha = 0.35;
@@ -140,7 +147,7 @@ export function drawTimeline(ctx: TimelineContext, input: DrawTimelineInput): Dr
         ctx.fillRect(x1, y, w, g.rowH - 8);
         ctx.globalAlpha = 1;
         ctx.strokeStyle = color;
-        ctx.setLineDash(r.outcome === "open" ? [3, 2] : []);
+        ctx.setLineDash(r.outcome === "open" ? [3, 2] : r.outcome === "cancelled" ? [2, 2] : []);
         ctx.strokeRect(x1, y, w, g.rowH - 8);
         stats.spanRects += 1;
     }

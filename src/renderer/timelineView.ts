@@ -190,6 +190,7 @@ export class TimelineView {
             evidence: v("--semantic-warning", d.evidence),
             span: v("--semantic-token", d.span),
             spanFailed: v("--semantic-error", d.spanFailed),
+            spanCancelled: v("--semantic-warning", d.spanCancelled ?? d.evidence),
             tracks: [
                 v("--color-muted", d.tracks[0]!),
                 v("--semantic-token", d.tracks[1]!),

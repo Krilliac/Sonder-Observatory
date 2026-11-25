@@ -1,5 +1,7 @@
 import type { ObservatoryEvent } from "../../protocol/events";
+import { scopedRequestKey } from "../../query/identity";
 import { percentile } from "../../query/metrics";
+import { streamKey } from "../../replay/order";
 import type { Detector, Finding } from "../types";
 import { makeFinding, ms } from "../util";
 
@@ -29,16 +31,17 @@ export const detectLatencyOutliers: Detector = (events, config) => {
         if (!rid) {
             continue;
         }
+        const key = scopedRequestKey(streamKey(e), rid);
         if (e.event_type === "request.started") {
-            starts.set(rid, e);
+            starts.set(key, e);
         } else if (e.event_type === "request.completed" || e.event_type === "request.failed") {
-            const start = starts.get(rid);
+            const start = starts.get(key);
             if (start) {
                 spans.push({ requestId: rid, start, end: e, durationMs: (e.mono_ns - start.mono_ns) / 1e6 });
-                starts.delete(rid);
+                starts.delete(key);
             }
         } else if (e.event_type === "request.cancelled") {
-            starts.delete(rid);
+            starts.delete(key);
         }
     }
 

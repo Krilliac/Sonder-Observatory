@@ -168,7 +168,10 @@ export function renderStageRail(
     for (const s of model.stages) {
         const def = STAGES.find((d) => d.id === s.id)!;
         const id = `stage:${s.id}`;
-        const holding = s.id === "output" ? `${s.requests} finished` : `${s.requests} in flight`;
+        const holding =
+            s.id === "output"
+                ? `${s.requests} finished${s.cancelledRequests ? ` (${s.cancelledRequests} cancelled)` : ""}`
+                : `${s.requests} in flight`;
         const btn = h(
             "button",
             { type: "button", class: "i3d-stage-btn", "data-entity": id, "aria-pressed": selected === id ? "true" : "false" },

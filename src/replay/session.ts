@@ -8,6 +8,7 @@ import {
 } from "../recording/limits";
 import type { RejectedLine } from "../recording/ndjson";
 import { isSyntheticProducer, type RecordingManifest } from "../recording/sobs";
+import { deriveRequestLifecycles, type RequestLifecycle } from "./lifecycle";
 import { markOrdered, notifyPrefixExtended } from "./lookup";
 import { compareEvents, streamKey, type SequenceGap } from "./order";
 
@@ -111,8 +112,8 @@ export class SessionStore {
     private seen = new Set<string>();
     private streams = new Map<string, StreamSequences>();
     private gapsCache: SequenceGap[] | null = [];
-    /** Last event evicted by retention; older arrivals are dropped too. */
-    private evictedUpTo: ObservatoryEvent | null = null;
+    /** Ordering watermark of the last event evicted by retention (never holds event attributes). */
+    private evictedUpTo: { mono_ns: number; sequence: number; event_id: string } | null = null;
 
     constructor(options: SessionStoreOptions = {}) {
         this.maxLiveEvents = Math.max(1, Math.floor(options.maxLiveEvents ?? DEFAULT_MAX_LIVE_EVENTS));
@@ -177,7 +178,10 @@ export class SessionStore {
                 this.duplicates += 1;
                 continue;
             }
-            if (this.evictedUpTo !== null && compareEvents(e, this.evictedUpTo) <= 0) {
+            if (
+                this.evictedUpTo !== null &&
+                compareEvents(e, this.evictedUpTo as ObservatoryEvent) <= 0
+            ) {
                 // Older than the retained window: keeping it would reopen
                 // history that was already dropped from the view.
                 this.droppedByRetention += 1;
@@ -347,6 +351,25 @@ export class SessionStore {
     }
 
     /**
+     * Per-request lifecycle snapshots over the retained events (keyed per
+     * `(producer stream, request_id)` and terminal-restart generation so
+     * cancelled and back-to-back active requests never blur together).
+     */
+    get requestLifecycles(): readonly RequestLifecycle[] {
+        return deriveRequestLifecycles(this.events);
+    }
+
+    /** Currently active (non-terminal) requests in the retained window. */
+    get activeRequests(): RequestLifecycle[] {
+        return this.requestLifecycles.filter((r) => r.status === "active");
+    }
+
+    /** Requests terminated via `request.cancelled` in the retained window. */
+    get cancelledRequests(): RequestLifecycle[] {
+        return this.requestLifecycles.filter((r) => r.cancelled);
+    }
+
+    /**
      * Text capture policy declared at session start, if any
      * (`session.started` or Sonder-Inference's `session.created`).
      */
@@ -397,7 +420,12 @@ export class SessionStore {
             this.seen.delete(events[k]!.event_id);
             removedBytes += sizes[k]!;
         }
-        this.evictedUpTo = events[drop - 1]!;
+        const watermark = events[drop - 1]!;
+        this.evictedUpTo = {
+            mono_ns: watermark.mono_ns,
+            sequence: watermark.sequence,
+            event_id: watermark.event_id,
+        };
         this.droppedByRetention += drop;
         return {
             events: events.slice(drop),

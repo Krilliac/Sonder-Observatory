@@ -28,19 +28,26 @@ export class Backoff {
     attempt = 0;
 
     constructor(options: BackoffOptions = {}) {
-        this.initialMs = Math.max(0, options.initialMs ?? 250);
-        this.maxMs = Math.max(this.initialMs, options.maxMs ?? 10_000);
-        this.factor = Math.max(1, options.factor ?? 2);
-        this.jitter = Math.min(1, Math.max(0, options.jitter ?? 0.3));
+        const rawInitial = options.initialMs ?? 250;
+        this.initialMs = Number.isFinite(rawInitial) ? Math.max(0, rawInitial) : 250;
+        const rawMax = options.maxMs ?? 10_000;
+        this.maxMs = Number.isFinite(rawMax) ? Math.max(this.initialMs, rawMax) : Math.max(this.initialMs, 10_000);
+        const rawFactor = options.factor ?? 2;
+        this.factor = Number.isFinite(rawFactor) ? Math.max(1, rawFactor) : 2;
+        const rawJitter = options.jitter ?? 0.3;
+        this.jitter = Number.isFinite(rawJitter) ? Math.min(1, Math.max(0, rawJitter)) : 0.3;
         this.random = options.random ?? Math.random;
     }
 
     /** Returns the next delay in ms and advances the attempt counter. */
     next(): number {
-        const base = Math.min(this.maxMs, this.initialMs * this.factor ** this.attempt);
+        const scaled = this.initialMs === 0 ? 0 : this.initialMs * this.factor ** this.attempt;
+        const base = Math.min(this.maxMs, Number.isFinite(scaled) ? scaled : this.maxMs);
         this.attempt += 1;
         const spread = base * this.jitter;
-        return Math.round(base - spread + this.random() * spread);
+        const rawRand = this.random();
+        const rand = Number.isFinite(rawRand) ? Math.min(1, Math.max(0, rawRand)) : 0;
+        return Math.round(base - spread + rand * spread);
     }
 
     reset(): void {
