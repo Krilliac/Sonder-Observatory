@@ -52,13 +52,16 @@ function preexisting(m: Metrics, events: readonly ObservatoryEvent[]): unknown {
     }
     const omit = (o: object, keys: readonly string[]) => Object.fromEntries(Object.entries(o).filter(([k]) => !keys.includes(k)));
     return {
-        ...omit(m, ["promptCache", "speculation"]),
+        ...omit(m, ["promptCache", "speculation", "executionRoutes", "orchestration"]),
         requests: m.requests.map((span) => {
             const source = starts.get(startKey(span.streamKey, span.requestId, span.startNs, span.sessionId));
             expect(source).toBeDefined();
             const stream = sourceStream(source!);
             expect(span.streamKey).toBe(stream.canonical);
-            return { ...omit(span, ["sessionId", "model", "promptCache", "speculation"]), streamKey: stream.legacy };
+            return {
+                ...omit(span, ["sessionId", "model", "promptCache", "speculation", "requestKind", "startSource", "executionRoute"]),
+                streamKey: stream.legacy,
+            };
         }),
     };
 }
@@ -98,7 +101,9 @@ describe("existing metrics are unchanged on streams without the new fields", () 
             })).toEqual(prefixes);
             expect(m.promptCache.requests).toBe(0);
             expect(m.speculation.requests).toBe(0);
-            expect(m.requests.every((r) => r.promptCache === null && r.speculation === null)).toBe(true);
+            expect(m.executionRoutes.total).toBe(0);
+            expect(m.orchestration.spans).toEqual([]);
+            expect(m.requests.every((r) => r.promptCache === null && r.speculation === null && r.executionRoute === null && r.startSource === "started")).toBe(true);
         });
     }
 });

@@ -29,7 +29,8 @@ function nonEmpty(value: unknown): string | null {
 export const REQUEST_OUTCOMES = ["request.completed", "request.failed", "request.cancelled"] as const;
 
 export function isRequestOutcome(event: ObservatoryEvent): boolean {
-    return (REQUEST_OUTCOMES as readonly string[]).includes(event.event_type);
+    const t = event.event_type;
+    return t === "request.completed" || t === "request.failed" || t === "request.cancelled";
 }
 
 /**
