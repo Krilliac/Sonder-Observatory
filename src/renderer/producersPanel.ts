@@ -11,16 +11,21 @@
  * connection id, built once and patched in place, so buttons stay the same
  * elements (focus and a slow mouse click survive) while counters change.
  */
+import type { HealthGpuDevice } from "../ingest/live/health";
 import { producerState, type ProducerState } from "../ingest/live/status";
 import type { ProducerConnection } from "../ingest/live/manager";
 import { connectionAdvice } from "./connectionPanel";
 import { h } from "./dom";
+import { fmtBytes } from "./format";
 import { redactUrlSecrets } from "./params";
+import "./routeBadges.css";
 
 export const RATE_WINDOW_MS = 5_000;
 const MIN_RATE_SPAN_MS = 1_000;
 const SAMPLE_BUCKET_MS = 250;
 const RATE_REFRESH_MS = 1_000;
+const MAX_INLINE_GPUS = 4;
+const MAX_INLINE_CAPS = 4;
 
 export interface EventRateSnapshot {
     /** Recent valid events per second over the rolling window. */
@@ -31,11 +36,43 @@ export interface EventRateSnapshot {
     active: boolean;
 }
 
+export interface ProducerGpuChip {
+    id: string;
+    name: string;
+    gpuClass: "discrete" | "integrated-uma" | "unknown";
+    backendHint: string | null;
+    effectiveVramMib: number | null;
+    effectiveFreeVramMib: number | null;
+    dedicatedTotalMib: number | null;
+    sharedTotalMib: number | null;
+}
+
+export interface ProducerNodeSummary {
+    source: "node" | "health";
+    platform: string | null;
+    gpuCount: number;
+    discreteCount: number;
+    umaCount: number;
+    hybridPoolAvailable: boolean;
+    combinedVramMib: number | null;
+    combinedFreeVramMib: number | null;
+    recommendedDevices: string[];
+    llamaArgDevice: string | null;
+    gpus: ProducerGpuChip[];
+    modelCount: number;
+    modelNames: string[];
+    availableBackends: number;
+    totalBackends: number;
+    activeCapabilities: string[];
+    topologyLabel: string;
+    residencyLabel: string | null;
+}
+
 export interface ProducerCardModel {
     id: string;
     /** producer.name once known (discovery or first event), else "". */
     producer: string;
-    /** producer.node_id once known (discovery or first event), else null. */
+    /** producer.node_id once known (discovery, node snapshot, or first event), else null. */
     nodeId: string | null;
     title: string;
     role: string;
@@ -50,6 +87,8 @@ export interface ProducerCardModel {
     lastError: string | null;
     advice: string | null;
     synthetic: boolean;
+    /** Optional hardware/hybrid-GPU topology and residency summary from `/v1/sonder/node` or `/v1/sonder/health`. */
+    nodeHardware: ProducerNodeSummary | null;
     /** Card actions, by state. */
     actions: ("disconnect" | "reconnect" | "edit" | "remove")[];
 }
@@ -225,6 +264,123 @@ function normalizeNodeId(nodeId: string | null | undefined): string | null {
     return trimmed !== "" ? trimmed : null;
 }
 
+function validMib(value: number | null | undefined): number | null {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function formatMib(mib: number): string {
+    return fmtBytes(mib * 1024 * 1024);
+}
+
+function gpuChipOf(g: HealthGpuDevice): ProducerGpuChip {
+    const gpuClass: ProducerGpuChip["gpuClass"] =
+        g.isIntegratedUma === true ? "integrated-uma" : g.isIntegratedUma === false ? "discrete" : "unknown";
+    return {
+        id: g.id,
+        name: g.name,
+        gpuClass,
+        backendHint: g.backendHint,
+        effectiveVramMib: validMib(g.effectiveVramMib),
+        effectiveFreeVramMib: validMib(g.effectiveFreeVramMib),
+        dedicatedTotalMib: validMib(g.dedicatedTotalMib),
+        sharedTotalMib: validMib(g.sharedTotalMib),
+    };
+}
+
+/** Builds a compact hardware, hybrid-GPU pool, and residency summary from `/v1/sonder/node` (or GPU-enriched health). */
+export function producerNodeSummary(c: ProducerConnection): ProducerNodeSummary | null {
+    const node = c.node ?? null;
+    const health = c.health;
+    const hasHealthHardware =
+        health !== null &&
+        ((health.gpus !== undefined && health.gpus.length > 0) ||
+            health.gpuPool != null ||
+            health.combinedGpuVramMib != null);
+    if (!node && !hasHealthHardware) {
+        return null;
+    }
+
+    const source: "node" | "health" = node ? "node" : "health";
+    const gpus = (node ? node.gpus : (health?.gpus ?? [])).map(gpuChipOf);
+    const pool = node?.gpuPool ?? health?.gpuPool ?? null;
+    const discreteCount = pool?.discreteGpuCount ?? gpus.filter((g) => g.gpuClass === "discrete").length;
+    const umaCount = pool?.integratedUmaGpuCount ?? gpus.filter((g) => g.gpuClass === "integrated-uma").length;
+    const gpuCount = gpus.length > 0 ? gpus.length : discreteCount + umaCount;
+    const combinedVramMib = validMib(node?.combinedGpuVramMib ?? health?.combinedGpuVramMib ?? pool?.combinedGpuVramMib);
+    const combinedFreeVramMib = validMib(pool?.combinedFreeGpuVramMib);
+    const hybridPoolAvailable = pool?.hybridVulkanPoolAvailable === true;
+    const recommendedDevices = pool ? [...pool.recommendedDevices] : [];
+    const llamaArgDevice = pool?.llamaArgDevice ?? null;
+
+    const backends = node && node.backends.length > 0 ? node.backends : (health?.backends ?? []);
+    const models = node && node.models.length > 0 ? node.models : (health?.models ?? []);
+    const availableBackends = backends.filter((b) => b.available !== false).length;
+    const totalBackends = backends.length;
+    const modelCount = models.length;
+    const modelNames = models.map((m) => m.id);
+    const platform = node?.platform ?? null;
+
+    const activeCapabilities = node
+        ? Object.entries(node.capabilities)
+              .filter(([, enabled]) => enabled === true)
+              .map(([key]) => key)
+              .sort((a, b) => a.localeCompare(b))
+        : [];
+
+    const mixParts: string[] = [];
+    if (discreteCount > 0) {
+        mixParts.push(`${discreteCount} discrete`);
+    }
+    if (umaCount > 0) {
+        mixParts.push(`${umaCount} UMA`);
+    }
+    const topoParts: string[] = [];
+    if (gpuCount === 0) {
+        topoParts.push("CPU-only (0 GPUs)");
+    } else {
+        topoParts.push(`${gpuCount} GPU${gpuCount === 1 ? "" : "s"}${mixParts.length > 0 ? ` (${mixParts.join(" + ")})` : ""}`);
+    }
+    if (combinedVramMib !== null) {
+        topoParts.push(`${formatMib(combinedVramMib)} VRAM`);
+    }
+
+    const resParts: string[] = [];
+    if (modelCount > 0 || source === "node") {
+        resParts.push(`${modelCount} ${modelCount === 1 ? "model" : "models"}`);
+    }
+    if (totalBackends > 0) {
+        resParts.push(`${availableBackends}/${totalBackends} backend${totalBackends === 1 ? "" : "s"}`);
+    }
+    const deviceSpec = llamaArgDevice ?? (recommendedDevices.length > 0 ? recommendedDevices.join(",") : null);
+    if (deviceSpec) {
+        resParts.push(deviceSpec);
+    }
+    if (platform) {
+        resParts.push(platform);
+    }
+
+    return {
+        source,
+        platform,
+        gpuCount,
+        discreteCount,
+        umaCount,
+        hybridPoolAvailable,
+        combinedVramMib,
+        combinedFreeVramMib,
+        recommendedDevices,
+        llamaArgDevice,
+        gpus,
+        modelCount,
+        modelNames,
+        availableBackends,
+        totalBackends,
+        activeCapabilities,
+        topologyLabel: topoParts.join(" · "),
+        residencyLabel: resParts.length > 0 ? resParts.join(" · ") : null,
+    };
+}
+
 /**
  * Card model for a connection. `closed` marks a connection the user
  * disconnected (kept in the list with its final counters).
@@ -243,11 +399,11 @@ export function producerCardModel(c: ProducerConnection, closed = false): Produc
     return {
         id: c.id,
         producer: identity?.name ?? "",
-        nodeId: normalizeNodeId(identity?.node_id),
+        nodeId: normalizeNodeId(identity?.node_id) ?? normalizeNodeId(c.node?.nodeId),
         title: identity?.name ?? c.label ?? hostOf(c.url),
         role: identity?.role ?? "role unknown",
-        version: identity?.version ?? "—",
-        instance: shortInstance(identity?.instance_id),
+        version: identity?.version ?? c.node?.version ?? "—",
+        instance: shortInstance(identity?.instance_id ?? c.node?.instanceId),
         transport: s.transport ?? "—",
         url: redactUrlSecrets(c.streamUrl ?? c.url),
         state,
@@ -262,7 +418,8 @@ export function producerCardModel(c: ProducerConnection, closed = false): Produc
         ],
         lastError: error,
         advice: error && (state === "failed" || state === "reconnecting") ? connectionAdvice(error, c.hasToken) : null,
-        synthetic: identity?.synthetic === true,
+        synthetic: identity?.synthetic === true || c.node?.synthetic === true,
+        nodeHardware: producerNodeSummary(c),
         actions,
     };
 }
@@ -299,6 +456,12 @@ interface CardParts {
     instance: HTMLElement;
     metaTail: Text;
     url: HTMLElement;
+    hwBox: HTMLElement;
+    hwTopology: HTMLElement;
+    hwHybrid: HTMLElement;
+    hwGpus: HTMLUListElement;
+    hwResidency: HTMLElement;
+    hwCaps: HTMLElement;
     counters: HTMLElement;
     counterValues: Map<string, HTMLElement>;
     rateRow: HTMLElement;
@@ -404,6 +567,24 @@ export class ProducersPanel {
         const instance = h("span", { class: "mono" });
         const metaTail = document.createTextNode("");
         const url = h("p", { class: "producer-url mono" });
+        const hwTopology = h("span", { class: "producer-hw-topology", "data-testid": "producer-hw-topology" });
+        const hwHybrid = h("span", {
+            class: "producer-hw-pill producer-hw-hybrid",
+            "data-testid": "producer-hw-hybrid",
+            text: "Hybrid Vulkan",
+            hidden: true,
+        });
+        const hwGpus = h("ul", { class: "producer-hw-gpus", "data-testid": "producer-hw-gpus" });
+        const hwResidency = h("p", { class: "producer-hw-meta", "data-testid": "producer-hw-residency", hidden: true });
+        const hwCaps = h("div", { class: "producer-hw-caps", "data-testid": "producer-hw-caps", hidden: true });
+        const hwBox = h(
+            "div",
+            { class: "producer-node-hw", "data-testid": "producer-node-hw", hidden: true },
+            h("div", { class: "producer-hw-head" }, hwTopology, hwHybrid),
+            hwGpus,
+            hwResidency,
+            hwCaps,
+        );
         const rateValue = h("dd", {
             class: "mono producer-rate",
             "data-testid": "producer-rate",
@@ -421,6 +602,7 @@ export class ProducersPanel {
             h("div", { class: "producer-head" }, title, node, synthetic, state),
             h("p", { class: "producer-meta" }, metaHead, instance, metaTail),
             url,
+            hwBox,
             counters,
             error,
             advice,
@@ -437,6 +619,12 @@ export class ProducersPanel {
             instance,
             metaTail,
             url,
+            hwBox,
+            hwTopology,
+            hwHybrid,
+            hwGpus,
+            hwResidency,
+            hwCaps,
             counters,
             counterValues: new Map(),
             rateRow,
@@ -477,6 +665,7 @@ export class ProducersPanel {
         setText(p.metaTail, ` · ${m.transport}`);
         setText(p.url, m.url);
         setAttr(p.url, "title", m.url);
+        this.patchNodeHardware(p, m.nodeHardware);
         for (const [name, value] of m.counters) {
             let dd = p.counterValues.get(name);
             if (!dd) {
@@ -494,6 +683,80 @@ export class ProducersPanel {
         if (actionsKey !== p.actionsKey) {
             p.actionsKey = actionsKey;
             this.renderActions(p, m);
+        }
+    }
+
+    private patchNodeHardware(p: CardParts, hw: ProducerNodeSummary | null): void {
+        if (!hw) {
+            p.hwBox.hidden = true;
+            p.hwGpus.replaceChildren();
+            p.hwCaps.replaceChildren();
+            return;
+        }
+        p.hwBox.hidden = false;
+        setAttr(p.hwBox, "data-source", hw.source);
+        setText(p.hwTopology, hw.topologyLabel);
+        p.hwHybrid.hidden = !hw.hybridPoolAvailable;
+        if (hw.hybridPoolAvailable) {
+            const devTip = hw.llamaArgDevice ?? hw.recommendedDevices.join(",");
+            setAttr(p.hwHybrid, "title", devTip ? `Hybrid discrete + UMA Vulkan pool (${devTip})` : "Hybrid discrete + UMA Vulkan pool available");
+        } else {
+            p.hwHybrid.removeAttribute("title");
+        }
+
+        const shownGpus = hw.gpus.slice(0, MAX_INLINE_GPUS);
+        const gpuItems = shownGpus.map((gpu) => {
+            const clsTag = gpu.gpuClass === "integrated-uma" ? "UMA" : gpu.gpuClass === "discrete" ? "dGPU" : "GPU";
+            const vramText =
+                gpu.effectiveVramMib !== null
+                    ? gpu.effectiveFreeVramMib !== null && gpu.effectiveFreeVramMib <= gpu.effectiveVramMib
+                        ? `${formatMib(gpu.effectiveFreeVramMib)} free / ${formatMib(gpu.effectiveVramMib)}`
+                        : formatMib(gpu.effectiveVramMib)
+                    : gpu.dedicatedTotalMib !== null
+                      ? formatMib(gpu.dedicatedTotalMib)
+                      : null;
+            const tipParts = [gpu.name, gpu.id, clsTag];
+            if (gpu.backendHint) {
+                tipParts.push(gpu.backendHint);
+            }
+            if (gpu.gpuClass === "integrated-uma" && gpu.dedicatedTotalMib !== null && gpu.sharedTotalMib !== null) {
+                tipParts.push(`${formatMib(gpu.dedicatedTotalMib)} carveout + ${formatMib(gpu.sharedTotalMib)} shared`);
+            } else if (vramText) {
+                tipParts.push(vramText);
+            }
+            return h(
+                "li",
+                { class: "producer-hw-gpu", "data-gpu-class": gpu.gpuClass, title: tipParts.join(" · ") },
+                h("span", { class: "producer-hw-gpu-name", text: gpu.name }),
+                h("span", { class: `producer-hw-pill producer-hw-class-${gpu.gpuClass}`, text: clsTag }),
+                gpu.backendHint ? h("span", { class: "producer-hw-pill mono", text: gpu.backendHint }) : null,
+                vramText ? h("span", { class: "producer-hw-vram mono", text: vramText }) : null,
+            );
+        });
+        if (hw.gpus.length > MAX_INLINE_GPUS) {
+            gpuItems.push(h("li", { class: "producer-hw-more muted", text: `+${hw.gpus.length - MAX_INLINE_GPUS} more GPUs` }));
+        }
+        p.hwGpus.hidden = gpuItems.length === 0;
+        p.hwGpus.replaceChildren(...gpuItems);
+
+        p.hwResidency.hidden = !hw.residencyLabel;
+        setText(p.hwResidency, hw.residencyLabel ?? "");
+        if (hw.modelNames.length > 0) {
+            setAttr(p.hwResidency, "title", `Models: ${hw.modelNames.slice(0, 8).join(", ")}${hw.modelNames.length > 8 ? ` (+${hw.modelNames.length - 8} more)` : ""}`);
+        } else {
+            p.hwResidency.removeAttribute("title");
+        }
+
+        const shownCaps = hw.activeCapabilities.slice(0, MAX_INLINE_CAPS);
+        p.hwCaps.hidden = shownCaps.length === 0;
+        if (shownCaps.length > 0) {
+            const capEls = shownCaps.map((cap) => h("span", { class: "producer-hw-pill mono", text: cap }));
+            if (hw.activeCapabilities.length > MAX_INLINE_CAPS) {
+                capEls.push(h("span", { class: "producer-hw-pill", text: `+${hw.activeCapabilities.length - MAX_INLINE_CAPS}` }));
+            }
+            p.hwCaps.replaceChildren(...capEls);
+        } else {
+            p.hwCaps.replaceChildren();
         }
     }
 

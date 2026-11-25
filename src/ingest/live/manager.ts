@@ -33,6 +33,8 @@ import {
     fetchProducerNode,
     healthUrl,
     nodeUrl,
+    type HealthGpuDevice,
+    type HealthGpuPool,
     type ProducerHealth,
     type ProducerNode,
 } from "./health";
@@ -88,6 +90,8 @@ export interface ProbeResult {
     streamUrl: string | null;
     error: string | null;
     corsSuspected: boolean;
+    /** Optional `/v1/sonder/node` snapshot when advertised by `links.node` and policy-allowed. */
+    node?: ProducerNode | null;
 }
 
 export interface ProbeOptions {
@@ -294,7 +298,19 @@ export async function probeProducer(url: string, opts: ProbeOptions = {}): Promi
     if (!selected.ok) {
         return fail(selected.message ?? "no usable stream", false, fetched.discovery);
     }
-    return { ok: true, discovery: fetched.discovery, streamUrl: selected.url, error: null, corsSuspected: false };
+    const resolvedNode = nodeUrl(classified.discoveryUrl!, fetched.discovery.links?.node);
+    const node =
+        resolvedNode !== null
+            ? await fetchProducerNode(resolvedNode, { token, fetch: opts.fetch, timeoutMs: opts.timeoutMs })
+            : null;
+    return {
+        ok: true,
+        discovery: fetched.discovery,
+        streamUrl: selected.url,
+        error: null,
+        corsSuspected: false,
+        ...(node !== null ? { node } : {}),
+    };
 }
 
 interface Entry {
@@ -304,10 +320,42 @@ interface Entry {
     removed: boolean;
 }
 
+function cloneGpu(g: HealthGpuDevice): HealthGpuDevice {
+    return { ...g };
+}
+
+function cloneGpuPool(p: HealthGpuPool): HealthGpuPool {
+    return { ...p, recommendedDevices: [...p.recommendedDevices] };
+}
+
+function cloneHealth(h: ProducerHealth): ProducerHealth {
+    return {
+        backends: h.backends.map((b) => ({ ...b, capabilities: [...b.capabilities] })),
+        models: h.models.map((m) => ({ ...m })),
+        telemetryLevel: h.telemetryLevel,
+        ...(h.gpus !== undefined ? { gpus: h.gpus.map(cloneGpu) } : {}),
+        ...(h.gpuPool !== undefined ? { gpuPool: h.gpuPool ? cloneGpuPool(h.gpuPool) : null } : {}),
+        ...(h.combinedGpuVramMib !== undefined ? { combinedGpuVramMib: h.combinedGpuVramMib } : {}),
+    };
+}
+
+function cloneNode(n: ProducerNode): ProducerNode {
+    return {
+        ...n,
+        gpus: n.gpus.map(cloneGpu),
+        gpuPool: n.gpuPool ? cloneGpuPool(n.gpuPool) : null,
+        capabilities: { ...n.capabilities },
+        backends: n.backends.map((b) => ({ ...b, capabilities: [...b.capabilities] })),
+        models: n.models.map((m) => ({ ...m })),
+    };
+}
+
 function snapshot(connection: ProducerConnection): ProducerConnection {
     return {
         ...connection,
         identity: connection.identity ? { ...connection.identity } : null,
+        health: connection.health ? cloneHealth(connection.health) : null,
+        ...(connection.node !== undefined ? { node: connection.node ? cloneNode(connection.node) : null } : {}),
         status: { ...connection.status },
     };
 }
