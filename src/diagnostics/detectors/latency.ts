@@ -11,20 +11,6 @@ interface Span {
     durationMs: number;
 }
 
-function lowerBound(sorted: readonly number[], target: number): number {
-    let lo = 0;
-    let hi = sorted.length;
-    while (lo < hi) {
-        const mid = (lo + hi) >>> 1;
-        if (sorted[mid]! < target) {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    return lo;
-}
-
 /**
  * Request latency outliers against a rolling baseline.
  *
@@ -91,12 +77,52 @@ export const detectLatencyOutliers: Detector = (events, config) => {
     }
 
     const findings: Finding[] = [];
-    const sortedWindow: number[] = [];
+    if (spans.length === 0) {
+        return findings;
+    }
+
+    // Coordinate-compress span durations once and maintain the rolling baseline
+    // in a Fenwick tree so insert, eviction, and exact p95 rank queries run in
+    // O(log U) without O(baselineSize) Array.prototype.splice shifts.
+    const uniqueDurations = Array.from(new Set(spans.map((s) => s.durationMs))).sort((a, b) => a - b);
+    const uniqueCount = uniqueDurations.length;
+    const rankByDuration = new Map<number, number>();
+    for (let u = 0; u < uniqueCount; u += 1) {
+        rankByDuration.set(uniqueDurations[u]!, u + 1);
+    }
+    const spanRanks = new Int32Array(spans.length);
+    for (let i = 0; i < spans.length; i += 1) {
+        spanRanks[i] = rankByDuration.get(spans[i]!.durationMs)!;
+    }
+    const bit = new Int32Array(uniqueCount + 1);
+    let maxPow2 = 1;
+    while (maxPow2 <= (uniqueCount >>> 1)) {
+        maxPow2 <<= 1;
+    }
+    const addRank = (idx: number, delta: number): void => {
+        for (let i = idx; i <= uniqueCount; i += i & -i) {
+            bit[i] = bit[i]! + delta;
+        }
+    };
+    const kthDuration = (k: number): number => {
+        let pos = 0;
+        let acc = 0;
+        for (let step = maxPow2; step > 0; step >>>= 1) {
+            const next = pos + step;
+            if (next <= uniqueCount && acc + bit[next]! < k) {
+                pos = next;
+                acc += bit[next]!;
+            }
+        }
+        return uniqueDurations[pos]!;
+    };
+
+    let windowSize = 0;
     for (let i = 0; i < spans.length; i += 1) {
         const span = spans[i]!;
-        if (sortedWindow.length >= minBaseline) {
-            const rank = Math.ceil(0.95 * sortedWindow.length);
-            const p95 = sortedWindow[Math.min(Math.max(rank, 1), sortedWindow.length) - 1]!;
+        if (windowSize >= minBaseline) {
+            const rank = Math.min(Math.max(Math.ceil(0.95 * windowSize), 1), windowSize);
+            const p95 = kthDuration(rank);
             if (span.durationMs > p95 * cfg.factor && span.durationMs - p95 >= cfg.minExcessMs) {
                 const ratio = p95 > 0 ? span.durationMs / p95 : Infinity;
                 findings.push(
@@ -104,26 +130,23 @@ export const detectLatencyOutliers: Detector = (events, config) => {
                         "latency-outlier",
                         span.durationMs > p95 * cfg.factor * 2 ? "critical" : "warning",
                         [span.start, span.end],
-                        `Request ${span.requestId} took ${Math.round(span.durationMs)} ms, ${Number.isFinite(ratio) ? `${ratio.toFixed(1)}x` : "far above"} the rolling p95 of ${Math.round(p95)} ms over the previous ${sortedWindow.length} request(s).`,
+                        `Request ${span.requestId} took ${Math.round(span.durationMs)} ms, ${Number.isFinite(ratio) ? `${ratio.toFixed(1)}x` : "far above"} the rolling p95 of ${Math.round(p95)} ms over the previous ${windowSize} request(s).`,
                         {
                             request_id: span.requestId,
                             duration_ms: ms(span.end.mono_ns - span.start.mono_ns),
                             baseline_p95_ms: Math.round(p95),
-                            baseline_requests: sortedWindow.length,
+                            baseline_requests: windowSize,
                             outcome: span.end.event_type === "request.failed" ? "failed" : "completed",
                         },
                     ),
                 );
             }
         }
-        const insertAt = lowerBound(sortedWindow, span.durationMs);
-        sortedWindow.splice(insertAt, 0, span.durationMs);
-        if (sortedWindow.length > baselineSize) {
-            const expired = spans[i - baselineSize]!.durationMs;
-            const removeAt = lowerBound(sortedWindow, expired);
-            if (removeAt < sortedWindow.length && sortedWindow[removeAt] === expired) {
-                sortedWindow.splice(removeAt, 1);
-            }
+        addRank(spanRanks[i]!, 1);
+        windowSize += 1;
+        if (windowSize > baselineSize) {
+            addRank(spanRanks[i - baselineSize]!, -1);
+            windowSize -= 1;
         }
     }
     return findings;

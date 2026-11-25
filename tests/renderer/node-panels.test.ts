@@ -806,4 +806,49 @@ describe("Wave 3 live /v1/sonder/node and Wave 2 metrics UI integration", () => 
         expect(card.latestBadge).toBeNull();
         expect(card.orchestrationSpans[0]!.durationText).toBe("in flight");
     });
+
+    it("rejects overflowing MiB values whose byte conversion is not a safe integer", () => {
+        const overflowMib = Number.MAX_SAFE_INTEGER; // * 1024 * 1024 exceeds MAX_SAFE_INTEGER
+        const maxValMib = Number.MAX_VALUE; // * 1024 * 1024 overflows to Infinity
+        const badNode: ProducerNode = {
+            ...HYBRID_NODE,
+            combinedGpuVramMib: overflowMib,
+            gpuPool: {
+                ...HYBRID_NODE.gpuPool!,
+                discreteVramMib: maxValMib,
+                integratedUmaVramMib: 1e12,
+                combinedGpuVramMib: overflowMib,
+                combinedFreeGpuVramMib: overflowMib,
+            },
+            gpus: [
+                {
+                    ...HYBRID_NODE.gpus[0]!,
+                    effectiveVramMib: overflowMib,
+                    effectiveFreeVramMib: maxValMib,
+                    dedicatedTotalMib: 1e12,
+                    dedicatedFreeMib: maxValMib,
+                    sharedTotalMib: 16384,
+                },
+            ],
+        };
+        const conn = makeConnection({ node: badNode });
+        const summary = producerNodeSummary(conn)!;
+        expect(summary.combinedVramMib).toBeNull();
+        expect(summary.combinedFreeVramMib).toBeNull();
+        expect(summary.gpus[0]!.effectiveVramMib).toBeNull();
+        expect(summary.gpus[0]!.effectiveFreeVramMib).toBeNull();
+        expect(summary.gpus[0]!.dedicatedTotalMib).toBeNull();
+        expect(summary.gpus[0]!.sharedTotalMib).toBe(16384);
+
+        const snap = liveNodeSnapshotOf(conn)!;
+        const [model] = liveNodeCardModels([snap]);
+        expect(model!.pool!.summaryText).not.toContain("Infinity");
+        expect(model!.pool!.summaryText).not.toContain("NaN");
+        expect(model!.pool!.splitText).toBeNull();
+        expect(model!.gpus[0]!.usageText).toBe("VRAM capacity unavailable");
+        expect(model!.gpus[0]!.usageText).not.toContain("Infinity");
+        const rendered = renderLiveNodeCards([snap])[0] as unknown as FakeElement;
+        expect(rendered.textContent).not.toContain("Infinity");
+        expect(rendered.textContent).not.toContain("NaN");
+    });
 });

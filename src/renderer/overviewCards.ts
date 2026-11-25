@@ -92,7 +92,12 @@ export interface LiveNodeCardModel {
 }
 
 function validMib(value: number | null | undefined): number | null {
-    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+    return typeof value === "number" &&
+        Number.isFinite(value) &&
+        value >= 0 &&
+        Number.isSafeInteger(value * 1024 * 1024)
+        ? value
+        : null;
 }
 
 function fmtMib(mib: number): string {
