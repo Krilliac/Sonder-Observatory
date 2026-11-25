@@ -91,7 +91,7 @@ function code(s: string, inTable = false): string {
     const clean = stripUnsafeControls(s)
         .replace(/\r\n|\r|\n/g, " ")
         .replace(/`/g, "'");
-    return `\`${inTable ? clean.replace(/\|/g, "\\|") : clean}\``;
+    return `\`${inTable ? clean.replace(/\\/g, "\\\\").replace(/\|/g, "\\|") : clean}\``;
 }
 
 function secs(s: number | null): string {

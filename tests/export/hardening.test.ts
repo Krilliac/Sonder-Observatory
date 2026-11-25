@@ -141,7 +141,7 @@ describe("Markdown export hardening", () => {
         report.title = "Report <script>alert(1)</script>";
         report.source.sessionIds = ["ses\n</details>\nfake_line\u202E"];
         report.generatedAt = "2026-09-26T12:00:00Z</sub><img src=x>";
-        (report.findings[0] as { kind: string }).kind = "kind|break\n|row|";
+        (report.findings[0] as { kind: string }).kind = "kind\\|break\n|row|";
         (report.findings[0] as { severity: string }).severity = "toString";
         report.findings[0]!.id = "f1\n</details>\ninjected";
         report.findings[0]!.evidence[0]!.eventId = "evt\r\n</details>\rbad";
@@ -150,8 +150,8 @@ describe("Markdown export hardening", () => {
         // Prototype key "toString" must not render native function source.
         expect(md).not.toContain("[native code]");
         expect(md).toContain("| toString |");
-        // Pipe inside table code span is escaped; no raw newlines inside table cells or code spans.
-        expect(md).toContain("`kind\\|break \\|row\\|`");
+        // Backslash and pipe inside table code span are both escaped so `\|` cannot break out of a cell.
+        expect(md).toContain("`kind\\\\\\|break \\|row\\|`");
         expect(md).toContain("**Session** `ses </details> fake_line`");
         // No unescaped HTML tags in non-code contexts or injected </details> block lines.
         expect(md).not.toContain("<script>");
