@@ -18,21 +18,28 @@
  */
 import type { ObservatoryEvent } from "../protocol/events";
 import { isOrdered, onPrefixExtended } from "../replay/lookup";
-import { streamKey } from "../replay/order";
 import { backendEvalMs, backendTokenCount, outputTokenCount } from "./attributes";
 import { isErrorEvent } from "./classify";
-import { scopedRequestKey } from "./identity";
+import { isExecutionRouteEvent, parseExecutionRoute } from "./executionRoute";
+import { createIdentityKeys } from "./identity";
 import {
     assembleMetrics,
     cloneCounters,
+    isEmbeddingRequestEvent,
+    isOrchestrationEvent,
+    mergeRequestExecutionRoute,
     newCounters,
     noteSpanReports,
+    reportedRequestDurationMs,
+    requestKindOf,
+    requestRouteFromRecord,
     sessionCreatedModel,
-    sessionModelKey,
     stepCounters,
     type Metrics,
     type PromptCacheUse,
+    type RequestExecutionRoute,
     type RequestSpan,
+    type RequestStartSource,
     type SessionCounters,
     type SpanWork,
     type SpeculationUse,
@@ -117,13 +124,16 @@ class TokenList {
     }
 }
 
-/** One `request.started` of a span key, and everything deriveMetrics attributes to it. */
+/** One started (or fallback embed) instance of a span key, and everything deriveMetrics attributes to it. */
 interface SpanInstance {
     startIdx: number;
     requestId: string;
     streamKey: string;
     producer: string;
     startNs: number;
+    startSource: RequestStartSource;
+    requestKind: string | null;
+    endRequestKind: string | null;
     /** First outcome event (-1: none yet) and what it reported. */
     endIdx: number;
     endNs: number;
@@ -152,6 +162,11 @@ interface SpanInstance {
     cache: PromptCacheUse[];
     specIdx: number[];
     spec: SpeculationUse[];
+    /** Initial execution route inherited when this instance opened (pre-start route or upgraded queued embed span). */
+    initialRoute: RequestExecutionRoute | null;
+    /** Cumulative merged execution route reports arriving at or after startIdx. */
+    routeIdx: number[];
+    route: RequestExecutionRoute[];
 }
 
 interface SpanKeyEntry {
@@ -170,7 +185,8 @@ export class MetricsIndex {
     processed = 0;
     private readonly counters = newCounters();
     private readonly checkpoints: SessionCounters[] = [];
-    private readonly keys = new Map<string, SpanKeyEntry>();
+    private readonly keysByStream = new Map<string, Map<string, SpanKeyEntry>>();
+    private readonly preStartRoutes = new Map<string, Map<string, RequestExecutionRoute>>();
     /** Span keys in order of their first start (the Map insertion order of deriveMetrics), with that position. */
     private readonly keyOrder: SpanKeyEntry[] = [];
     private readonly keyFirstIdx: number[] = [];
@@ -179,6 +195,11 @@ export class MetricsIndex {
     private readonly errorIdx: number[] = [];
     private readonly errorIds: string[] = [];
     private readonly errorTypes: string[] = [];
+    /** Sparse execution_route and orchestration event positions and references. */
+    private readonly routeEventIdx: number[] = [];
+    private readonly routeEvents: ObservatoryEvent[] = [];
+    private readonly orchEventIdx: number[] = [];
+    private readonly orchEvents: ObservatoryEvent[] = [];
     /** First session.created model per stream and session, with its position. */
     private readonly sessionModels = new Map<string, { idx: number; model: string }>();
     /**
@@ -198,33 +219,121 @@ export class MetricsIndex {
     extendTo(target: number): void {
         const end = Math.min(target, this.events.length);
         const events = this.events;
+        const idKeys = createIdentityKeys();
         for (let i = this.processed; i < end; i += 1) {
             if (i % METRICS_CHECKPOINT === 0) {
                 this.checkpoints[i / METRICS_CHECKPOINT] = cloneCounters(this.counters);
             }
             const e = events[i]!;
-            this.index(e, i);
+            this.index(e, i, idKeys);
             stepCounters(this.counters, e);
         }
         this.processed = Math.max(this.processed, end);
     }
 
+    private lookupEntry(stream: string, rid: string): SpanKeyEntry | undefined {
+        return this.keysByStream.get(stream)?.get(rid);
+    }
+
+    private takePreStartRoute(stream: string, rid: string): RequestExecutionRoute | null {
+        const byRid = this.preStartRoutes.get(stream);
+        if (!byRid) {
+            return null;
+        }
+        const route = byRid.get(rid) ?? null;
+        if (route !== null) {
+            byRid.delete(rid);
+        }
+        return route;
+    }
+
+    private pushInstance(stream: string, rid: string, entry: SpanKeyEntry | undefined, inst: SpanInstance, i: number): SpanInstance {
+        if (entry) {
+            entry.instances.push(inst);
+        } else {
+            const created: SpanKeyEntry = { instances: [inst] };
+            let byRid = this.keysByStream.get(stream);
+            if (!byRid) {
+                byRid = new Map<string, SpanKeyEntry>();
+                this.keysByStream.set(stream, byRid);
+            }
+            byRid.set(rid, created);
+            this.keyOrder.push(created);
+            this.keyFirstIdx.push(i);
+        }
+        return inst;
+    }
+
     /** Mirrors the span, token and error part of deriveMetrics' per-event loop. */
-    private index(e: ObservatoryEvent, i: number): void {
+    private index(e: ObservatoryEvent, i: number, idKeys: ReturnType<typeof createIdentityKeys>): void {
         const t = e.event_type;
         const rid = e.request_id ?? null;
-        const stream = rid ? streamKey(e) : "";
-        const spanKey = rid ? scopedRequestKey(stream, rid) : "";
-        const entry = rid ? this.keys.get(spanKey) : undefined;
-        const current = entry?.instances[entry.instances.length - 1];
+        const stream = rid ? idKeys.stream(e) : "";
+        const entry = rid ? this.lookupEntry(stream, rid) : undefined;
+        let current = entry?.instances[entry.instances.length - 1];
 
-        if (t === "request.started" && rid) {
+        if (t === "request.queued" && rid && isEmbeddingRequestEvent(e)) {
+            if (!current || current.endIdx >= 0) {
+                const initialRoute = !entry ? this.takePreStartRoute(stream, rid) : null;
+                const inst: SpanInstance = {
+                    startIdx: i,
+                    requestId: rid,
+                    streamKey: stream,
+                    producer: e.producer.name,
+                    startNs: e.mono_ns,
+                    startSource: "queued",
+                    requestKind: "embed",
+                    endRequestKind: null,
+                    endIdx: -1,
+                    endNs: 0,
+                    outcome: "open",
+                    backendTokens: null,
+                    totalMs: null,
+                    ttftMs: null,
+                    evalIdx: [],
+                    evalMs: [],
+                    evalNs: [],
+                    tokens: new TokenList(),
+                    chunkIdx: [],
+                    firstOutIdx: -1,
+                    firstOutNs: 0,
+                    sessionId: e.session_id,
+                    envModel: typeof e.model_instance_id === "string" && e.model_instance_id !== "" ? e.model_instance_id : null,
+                    sessionKey: idKeys.session(stream, e.session_id),
+                    attrModelIdx: -1,
+                    attrModel: null,
+                    cacheIdx: [],
+                    cache: [],
+                    specIdx: [],
+                    spec: [],
+                    initialRoute,
+                    routeIdx: [],
+                    route: [],
+                };
+                current = this.pushInstance(stream, rid, entry, inst, i);
+            }
+        } else if (t === "request.started" && rid) {
+            const upgradedPrev = current !== undefined && current.startSource === "queued" && current.endIdx < 0 ? current : null;
+            const prevRoute = upgradedPrev !== null
+                ? (upgradedPrev.route.at(-1) ?? upgradedPrev.initialRoute)
+                : !entry
+                  ? this.takePreStartRoute(stream, rid)
+                  : null;
+            const envModel =
+                typeof e.model_instance_id === "string" && e.model_instance_id !== ""
+                    ? e.model_instance_id
+                    : upgradedPrev !== null
+                      ? upgradedPrev.envModel
+                      : null;
             const inst: SpanInstance = {
                 startIdx: i,
                 requestId: rid,
                 streamKey: stream,
                 producer: e.producer.name,
                 startNs: e.mono_ns,
+                startSource: "started",
+                requestKind: requestKindOf(e) ?? (upgradedPrev !== null ? upgradedPrev.requestKind : null),
+                endRequestKind: null,
                 endIdx: -1,
                 endNs: 0,
                 outcome: "open",
@@ -239,31 +348,71 @@ export class MetricsIndex {
                 firstOutIdx: -1,
                 firstOutNs: 0,
                 sessionId: e.session_id,
-                envModel: typeof e.model_instance_id === "string" && e.model_instance_id !== "" ? e.model_instance_id : null,
-                sessionKey: sessionModelKey(stream, e.session_id),
-                attrModelIdx: -1,
-                attrModel: null,
+                envModel,
+                sessionKey: idKeys.session(stream, e.session_id),
+                attrModelIdx: upgradedPrev !== null ? upgradedPrev.attrModelIdx : -1,
+                attrModel: upgradedPrev !== null ? upgradedPrev.attrModel : null,
                 cacheIdx: [],
                 cache: [],
                 specIdx: [],
                 spec: [],
+                initialRoute: prevRoute,
+                routeIdx: [],
+                route: [],
             };
-            if (entry) {
-                entry.instances.push(inst);
-            } else {
-                const created = { instances: [inst] };
-                this.keys.set(spanKey, created);
-                this.keyOrder.push(created);
-                this.keyFirstIdx.push(i);
-            }
+            current = this.pushInstance(stream, rid, entry, inst, i);
         } else if ((t === "request.completed" || t === "request.failed" || t === "request.cancelled") && rid) {
+            const outcome: RequestSpan["outcome"] =
+                t === "request.completed" ? "completed" : t === "request.failed" ? "failed" : "cancelled";
             if (current && current.endIdx < 0) {
                 current.endIdx = i;
                 current.endNs = e.mono_ns;
-                current.outcome = t === "request.completed" ? "completed" : t === "request.failed" ? "failed" : "cancelled";
+                current.outcome = outcome;
                 current.backendTokens = backendTokenCount(e);
+                current.endRequestKind = requestKindOf(e);
                 current.totalMs = numberAttr(e, "total_ms");
                 current.ttftMs = numberAttr(e, "ttft_ms");
+            } else if (!current && isEmbeddingRequestEvent(e)) {
+                const reportedMs = reportedRequestDurationMs(e);
+                const startNs = reportedMs !== null ? Math.max(0, e.mono_ns - Math.round(reportedMs * 1e6)) : e.mono_ns;
+                const startSource: RequestStartSource = reportedMs !== null ? "reported-duration" : "outcome-only";
+                const initialRoute = this.takePreStartRoute(stream, rid);
+                const inst: SpanInstance = {
+                    startIdx: i,
+                    requestId: rid,
+                    streamKey: stream,
+                    producer: e.producer.name,
+                    startNs,
+                    startSource,
+                    requestKind: "embed",
+                    endRequestKind: null,
+                    endIdx: i,
+                    endNs: e.mono_ns,
+                    outcome,
+                    backendTokens: backendTokenCount(e),
+                    totalMs: numberAttr(e, "total_ms"),
+                    ttftMs: numberAttr(e, "ttft_ms"),
+                    evalIdx: [],
+                    evalMs: [],
+                    evalNs: [],
+                    tokens: new TokenList(),
+                    chunkIdx: [],
+                    firstOutIdx: -1,
+                    firstOutNs: 0,
+                    sessionId: e.session_id,
+                    envModel: typeof e.model_instance_id === "string" && e.model_instance_id !== "" ? e.model_instance_id : null,
+                    sessionKey: idKeys.session(stream, e.session_id),
+                    attrModelIdx: -1,
+                    attrModel: null,
+                    cacheIdx: [],
+                    cache: [],
+                    specIdx: [],
+                    spec: [],
+                    initialRoute,
+                    routeIdx: [],
+                    route: [],
+                };
+                current = this.pushInstance(stream, rid, entry, inst, i);
             }
         } else if (t === "inference.decode.completed" && rid) {
             const evalMs = backendEvalMs(e);
@@ -292,29 +441,55 @@ export class MetricsIndex {
             }
         }
 
+        if (isExecutionRouteEvent(e)) {
+            this.routeEventIdx.push(i);
+            this.routeEvents.push(e);
+            if (rid) {
+                const parsedRoute = parseExecutionRoute(e);
+                if (parsedRoute) {
+                    const reqRoute = requestRouteFromRecord(parsedRoute);
+                    if (current) {
+                        const prev = current.route.at(-1) ?? current.initialRoute;
+                        current.routeIdx.push(i);
+                        current.route.push(mergeRequestExecutionRoute(prev, reqRoute));
+                    } else {
+                        let byRid = this.preStartRoutes.get(stream);
+                        if (!byRid) {
+                            byRid = new Map<string, RequestExecutionRoute>();
+                            this.preStartRoutes.set(stream, byRid);
+                        }
+                        byRid.set(rid, mergeRequestExecutionRoute(byRid.get(rid) ?? null, reqRoute));
+                    }
+                }
+            }
+        }
+        if (isOrchestrationEvent(e)) {
+            this.orchEventIdx.push(i);
+            this.orchEvents.push(e);
+        }
+
         if (rid && t !== "inference.token.generated") {
-            // After the chain: a request.started reports for the span it opened.
-            const reports = noteSpanReports(e);
-            const target = reports ? this.keys.get(spanKey)?.instances.at(-1) : undefined;
-            if (target && reports) {
-                if (target.attrModelIdx < 0 && reports.model !== null) {
-                    target.attrModelIdx = i;
-                    target.attrModel = reports.model;
+            // After the chain: a request.started / embed fallback reports for the span it opened.
+            const reports = current ? noteSpanReports(e) : null;
+            if (current && reports) {
+                if (current.attrModelIdx < 0 && reports.model !== null) {
+                    current.attrModelIdx = i;
+                    current.attrModel = reports.model;
                 }
                 if (reports.cache) {
-                    target.cacheIdx.push(i);
-                    target.cache.push(reports.cache);
+                    current.cacheIdx.push(i);
+                    current.cache.push(reports.cache);
                 }
                 if (reports.spec) {
-                    target.specIdx.push(i);
-                    target.spec.push(reports.spec);
+                    current.specIdx.push(i);
+                    current.spec.push(reports.spec);
                 }
             }
         }
         if (t === "session.created") {
             const model = sessionCreatedModel(e);
             if (model !== null) {
-                const key = sessionModelKey(streamKey(e), e.session_id);
+                const key = idKeys.session(idKeys.stream(e), e.session_id);
                 if (!this.sessionModels.has(key)) {
                     this.sessionModels.set(key, { idx: i, model });
                 }
@@ -380,6 +555,7 @@ export class MetricsIndex {
             const nEval = countBelow(inst.evalIdx, c);
             const nCache = countBelow(inst.cacheIdx, c);
             const nSpec = countBelow(inst.specIdx, c);
+            const nRoute = countBelow(inst.routeIdx, c);
             const sessionModel = this.sessionModels.get(inst.sessionKey);
             const span: RequestSpan = {
                 requestId: inst.requestId,
@@ -401,6 +577,9 @@ export class MetricsIndex {
                     inst.envModel,
                 promptCache: nCache > 0 ? inst.cache[nCache - 1]! : null,
                 speculation: nSpec > 0 ? inst.spec[nSpec - 1]! : null,
+                requestKind: inst.requestKind ?? (ended ? inst.endRequestKind : null),
+                startSource: inst.startSource,
+                executionRoute: nRoute > 0 ? inst.route[nRoute - 1]! : inst.initialRoute,
             };
             requests.push(span);
             work.set(span, {
@@ -419,6 +598,9 @@ export class MetricsIndex {
             errorsByType[t] = (errorsByType[t] ?? 0) + 1;
         }
 
+        const nRouteEv = countBelow(this.routeEventIdx, c);
+        const nOrchEv = countBelow(this.orchEventIdx, c);
+
         return assembleMetrics({
             eventCount: c,
             requests,
@@ -430,6 +612,8 @@ export class MetricsIndex {
             errorsByType,
             errorIds: this.errorIds.slice(0, nErr),
             counters,
+            routeEvents: nRouteEv > 0 ? this.routeEvents.slice(0, nRouteEv) : undefined,
+            orchestrationEvents: nOrchEv > 0 ? this.orchEvents.slice(0, nOrchEv) : undefined,
         });
     }
 }

@@ -27,9 +27,17 @@ export function isLimitViolation(issues: readonly ValidationIssue[]): boolean {
     return issues.some((issue) => issue.code === "limit");
 }
 
+const REQUIRED_STRING_FIELDS = ["event_id", "event_type", "session_id"] as const;
+const REQUIRED_INT_FIELDS = ["sequence", "mono_ns"] as const;
+const PRODUCER_OPTIONAL_ENTRIES = Object.entries(PRODUCER_OPTIONAL_FIELDS) as readonly [
+    keyof typeof PRODUCER_OPTIONAL_FIELDS,
+    (typeof PRODUCER_OPTIONAL_FIELDS)[keyof typeof PRODUCER_OPTIONAL_FIELDS],
+][];
+
 // RFC 3339 date-time as required by JSON Schema "format": "date-time".
 const DATE_TIME =
     /^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
+let lastValidDateTime = "";
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -44,91 +52,156 @@ function isNonNegativeInteger(value: unknown): value is number {
 }
 
 export function isValidDateTime(value: string): boolean {
+    if (value === lastValidDateTime && value.length > 0) {
+        return true;
+    }
     if (!DATE_TIME.test(value)) {
         return false;
     }
-    return !Number.isNaN(Date.parse(value));
+    if (Number.isNaN(Date.parse(value))) {
+        return false;
+    }
+    if (value.length <= 64) {
+        lastValidDateTime = value;
+    }
+    return true;
 }
 
-function validateAttributes(attributes: Record<string, unknown>, issues: ValidationIssue[]): void {
-    let nodes = 0;
-    const walk = (value: unknown, path: string, depth: number): boolean => {
-        if (typeof value === "string") {
-            if (value.length > MAX_ATTRIBUTE_STRING_LENGTH) {
-                issues.push({
-                    path,
-                    message: `string exceeds maximum length of ${MAX_ATTRIBUTE_STRING_LENGTH} characters`,
-                    code: "limit",
-                });
-                return true;
-            }
-            return false;
+const HAS_OWN = Object.prototype.hasOwnProperty;
+
+/** Returns the first attribute structural limit violation, or null when valid. Zero path strings allocated on the valid fast path. */
+function findAttributeLimitIssue(
+    value: unknown,
+    depth: number,
+    state: { nodes: number },
+    segments: (string | number)[],
+): ValidationIssue | null {
+    const buildPath = (): string => {
+        let p = "attributes";
+        for (let i = 0; i < segments.length; i += 1) {
+            const seg = segments[i]!;
+            p += typeof seg === "number" ? `[${seg}]` : `.${seg}`;
         }
-        if (value === null || typeof value !== "object") {
-            return false;
-        }
-        if (depth > MAX_ATTRIBUTE_DEPTH) {
-            issues.push({
-                path,
-                message: `exceeds maximum nesting depth of ${MAX_ATTRIBUTE_DEPTH}`,
+        return p;
+    };
+    if (typeof value === "string") {
+        if (value.length > MAX_ATTRIBUTE_STRING_LENGTH) {
+            return {
+                path: buildPath(),
+                message: `string exceeds maximum length of ${MAX_ATTRIBUTE_STRING_LENGTH} characters`,
                 code: "limit",
-            });
-            return true;
+            };
         }
-        if (Array.isArray(value)) {
-            if (value.length > MAX_ATTRIBUTE_ARRAY_LENGTH) {
-                issues.push({
-                    path,
-                    message: `array exceeds maximum length of ${MAX_ATTRIBUTE_ARRAY_LENGTH}`,
-                    code: "limit",
-                });
-                return true;
-            }
-            for (let i = 0; i < value.length; i += 1) {
-                nodes += 1;
-                if (nodes > MAX_ATTRIBUTE_NODES) {
-                    issues.push({
-                        path: "attributes",
-                        message: `exceeds maximum of ${MAX_ATTRIBUTE_NODES} attribute nodes`,
-                        code: "limit",
-                    });
-                    return true;
-                }
-                if (walk(value[i], `${path}[${i}]`, depth + 1)) {
-                    return true;
-                }
-            }
-            return false;
+        return null;
+    }
+    if (value === null || typeof value !== "object") {
+        return null;
+    }
+    if (depth > MAX_ATTRIBUTE_DEPTH) {
+        return {
+            path: buildPath(),
+            message: `exceeds maximum nesting depth of ${MAX_ATTRIBUTE_DEPTH}`,
+            code: "limit",
+        };
+    }
+    if (Array.isArray(value)) {
+        if (value.length > MAX_ATTRIBUTE_ARRAY_LENGTH) {
+            return {
+                path: buildPath(),
+                message: `array exceeds maximum length of ${MAX_ATTRIBUTE_ARRAY_LENGTH}`,
+                code: "limit",
+            };
         }
-        const obj = value as Record<string, unknown>;
-        for (const key in obj) {
-            if (!Object.prototype.hasOwnProperty.call(obj, key)) {
-                continue;
-            }
-            nodes += 1;
-            if (nodes > MAX_ATTRIBUTE_NODES) {
-                issues.push({
+        for (let i = 0; i < value.length; i += 1) {
+            state.nodes += 1;
+            if (state.nodes > MAX_ATTRIBUTE_NODES) {
+                return {
                     path: "attributes",
                     message: `exceeds maximum of ${MAX_ATTRIBUTE_NODES} attribute nodes`,
                     code: "limit",
-                });
-                return true;
+                };
             }
-            if (key.length > MAX_ATTRIBUTE_STRING_LENGTH) {
-                issues.push({
-                    path: `${path}.${key.slice(0, 64)}`,
-                    message: `property name exceeds maximum length of ${MAX_ATTRIBUTE_STRING_LENGTH} characters`,
-                    code: "limit",
-                });
-                return true;
-            }
-            if (walk(obj[key], `${path}.${key}`, depth + 1)) {
-                return true;
+            const elem = value[i];
+            if (typeof elem === "string") {
+                if (elem.length > MAX_ATTRIBUTE_STRING_LENGTH) {
+                    segments.push(i);
+                    const issue: ValidationIssue = {
+                        path: buildPath(),
+                        message: `string exceeds maximum length of ${MAX_ATTRIBUTE_STRING_LENGTH} characters`,
+                        code: "limit",
+                    };
+                    segments.pop();
+                    return issue;
+                }
+            } else if (elem !== null && typeof elem === "object") {
+                segments.push(i);
+                const issue = findAttributeLimitIssue(elem, depth + 1, state, segments);
+                segments.pop();
+                if (issue) {
+                    return issue;
+                }
             }
         }
-        return false;
-    };
-    walk(attributes, "attributes", 0);
+        return null;
+    }
+    const obj = value as Record<string, unknown>;
+    for (const key in obj) {
+        if (!HAS_OWN.call(obj, key)) {
+            continue;
+        }
+        state.nodes += 1;
+        if (state.nodes > MAX_ATTRIBUTE_NODES) {
+            return {
+                path: "attributes",
+                message: `exceeds maximum of ${MAX_ATTRIBUTE_NODES} attribute nodes`,
+                code: "limit",
+            };
+        }
+        if (key.length > MAX_ATTRIBUTE_STRING_LENGTH) {
+            segments.push(key.slice(0, 64));
+            const issue: ValidationIssue = {
+                path: buildPath(),
+                message: `property name exceeds maximum length of ${MAX_ATTRIBUTE_STRING_LENGTH} characters`,
+                code: "limit",
+            };
+            segments.pop();
+            return issue;
+        }
+        const prop = obj[key];
+        if (typeof prop === "string") {
+            if (prop.length > MAX_ATTRIBUTE_STRING_LENGTH) {
+                segments.push(key);
+                const issue: ValidationIssue = {
+                    path: buildPath(),
+                    message: `string exceeds maximum length of ${MAX_ATTRIBUTE_STRING_LENGTH} characters`,
+                    code: "limit",
+                };
+                segments.pop();
+                return issue;
+            }
+        } else if (prop !== null && typeof prop === "object") {
+            segments.push(key);
+            const issue = findAttributeLimitIssue(prop, depth + 1, state, segments);
+            segments.pop();
+            if (issue) {
+                return issue;
+            }
+        }
+    }
+    return null;
+}
+
+const ATTR_SEGMENTS: (string | number)[] = [];
+const ATTR_STATE = { nodes: 0 };
+
+function validateAttributes(attributes: Record<string, unknown>): ValidationIssue | null {
+    ATTR_STATE.nodes = 0;
+    ATTR_SEGMENTS.length = 0;
+    try {
+        return findAttributeLimitIssue(attributes, 0, ATTR_STATE, ATTR_SEGMENTS);
+    } finally {
+        ATTR_SEGMENTS.length = 0;
+    }
 }
 
 /**
@@ -137,24 +210,32 @@ function validateAttributes(attributes: Record<string, unknown>, issues: Validat
  * original object is returned untouched so recordings stay lossless.
  */
 export function validateEvent(value: unknown): ValidationResult {
-    const issues: ValidationIssue[] = [];
     if (!isPlainObject(value)) {
         return { ok: false, issues: [{ path: "", message: "event must be a JSON object" }] };
     }
+    let issues: ValidationIssue[] | null = null;
+    const addIssue = (issue: ValidationIssue): void => {
+        if (issues === null) {
+            issues = [issue];
+        } else {
+            issues.push(issue);
+        }
+    };
 
     if (!("schema" in value)) {
-        issues.push({ path: "schema", message: "is required" });
+        addIssue({ path: "schema", message: "is required" });
     } else if (value.schema !== SCHEMA_ID) {
-        issues.push({ path: "schema", message: `must equal "${SCHEMA_ID}"` });
+        addIssue({ path: "schema", message: `must equal "${SCHEMA_ID}"` });
     }
 
-    for (const key of ["event_id", "event_type", "session_id"] as const) {
+    for (let i = 0; i < REQUIRED_STRING_FIELDS.length; i += 1) {
+        const key = REQUIRED_STRING_FIELDS[i]!;
         if (!(key in value)) {
-            issues.push({ path: key, message: "is required" });
+            addIssue({ path: key, message: "is required" });
         } else if (!isNonEmptyString(value[key])) {
-            issues.push({ path: key, message: "must be a non-empty string" });
+            addIssue({ path: key, message: "must be a non-empty string" });
         } else if (value[key].length > MAX_ATTRIBUTE_STRING_LENGTH) {
-            issues.push({
+            addIssue({
                 path: key,
                 message: `string exceeds maximum length of ${MAX_ATTRIBUTE_STRING_LENGTH} characters`,
                 code: "limit",
@@ -162,56 +243,66 @@ export function validateEvent(value: unknown): ValidationResult {
         }
     }
 
-    for (const key of ["sequence", "mono_ns"] as const) {
+    for (let i = 0; i < REQUIRED_INT_FIELDS.length; i += 1) {
+        const key = REQUIRED_INT_FIELDS[i]!;
         if (!(key in value)) {
-            issues.push({ path: key, message: "is required" });
+            addIssue({ path: key, message: "is required" });
         } else if (!isNonNegativeInteger(value[key])) {
-            issues.push({ path: key, message: "must be an integer >= 0" });
+            addIssue({ path: key, message: "must be an integer >= 0" });
         }
     }
 
     if (!("wall_time" in value)) {
-        issues.push({ path: "wall_time", message: "is required" });
+        addIssue({ path: "wall_time", message: "is required" });
     } else if (typeof value.wall_time !== "string" || !isValidDateTime(value.wall_time)) {
-        issues.push({ path: "wall_time", message: "must be an RFC 3339 date-time string" });
+        addIssue({ path: "wall_time", message: "must be an RFC 3339 date-time string" });
     }
 
-    for (const key of NULLABLE_ID_FIELDS) {
-        if (key in value && value[key] !== null && typeof value[key] !== "string") {
-            issues.push({ path: key, message: "must be a string or null" });
-        } else if (typeof value[key] === "string" && value[key].length > MAX_ATTRIBUTE_STRING_LENGTH) {
-            issues.push({
-                path: key,
-                message: `string exceeds maximum length of ${MAX_ATTRIBUTE_STRING_LENGTH} characters`,
-                code: "limit",
-            });
+    for (let i = 0; i < NULLABLE_ID_FIELDS.length; i += 1) {
+        const key = NULLABLE_ID_FIELDS[i]!;
+        const field = value[key];
+        if (field !== undefined && field !== null) {
+            if (typeof field !== "string") {
+                addIssue({ path: key, message: "must be a string or null" });
+            } else if (field.length > MAX_ATTRIBUTE_STRING_LENGTH) {
+                addIssue({
+                    path: key,
+                    message: `string exceeds maximum length of ${MAX_ATTRIBUTE_STRING_LENGTH} characters`,
+                    code: "limit",
+                });
+            }
+        } else if (field === undefined && key in value) {
+            addIssue({ path: key, message: "must be a string or null" });
         }
     }
 
     if (!("producer" in value)) {
-        issues.push({ path: "producer", message: "is required" });
+        addIssue({ path: "producer", message: "is required" });
     } else if (!isPlainObject(value.producer)) {
-        issues.push({ path: "producer", message: "must be an object" });
+        addIssue({ path: "producer", message: "must be an object" });
     } else {
-        for (const key of PRODUCER_REQUIRED_FIELDS) {
-            if (!(key in value.producer)) {
-                issues.push({ path: `producer.${key}`, message: "is required" });
-            } else if (typeof value.producer[key] !== "string") {
-                issues.push({ path: `producer.${key}`, message: "must be a string" });
+        const producer = value.producer;
+        for (let i = 0; i < PRODUCER_REQUIRED_FIELDS.length; i += 1) {
+            const key = PRODUCER_REQUIRED_FIELDS[i]!;
+            if (!(key in producer)) {
+                addIssue({ path: `producer.${key}`, message: "is required" });
+            } else if (typeof producer[key] !== "string") {
+                addIssue({ path: `producer.${key}`, message: "must be a string" });
             }
         }
-        for (const [key, type] of Object.entries(PRODUCER_OPTIONAL_FIELDS)) {
-            if (!(key in value.producer)) {
+        for (let i = 0; i < PRODUCER_OPTIONAL_ENTRIES.length; i += 1) {
+            const [key, type] = PRODUCER_OPTIONAL_ENTRIES[i]!;
+            if (!(key in producer)) {
                 continue;
             }
-            const field = value.producer[key];
+            const field = producer[key];
             if (field === null) {
                 continue; // "not stated"
             }
             if (typeof field !== type) {
-                issues.push({ path: `producer.${key}`, message: `must be a ${type} or null` });
+                addIssue({ path: `producer.${key}`, message: `must be a ${type} or null` });
             } else if (key === "instance_id" && field === "") {
-                issues.push({ path: `producer.${key}`, message: "must be a non-empty string" });
+                addIssue({ path: `producer.${key}`, message: "must be a non-empty string" });
             }
         }
     }
@@ -219,32 +310,35 @@ export function validateEvent(value: unknown): ValidationResult {
     if ("sampling" in value) {
         const sampling = value.sampling;
         if (!isPlainObject(sampling)) {
-            issues.push({ path: "sampling", message: "must be an object" });
+            addIssue({ path: "sampling", message: "must be an object" });
         } else {
             if (
                 "level" in sampling &&
                 !(SAMPLING_LEVELS as readonly unknown[]).includes(sampling.level)
             ) {
-                issues.push({
+                addIssue({
                     path: "sampling.level",
                     message: `must be one of ${SAMPLING_LEVELS.join(", ")}`,
                 });
             }
             if ("sampled" in sampling && typeof sampling.sampled !== "boolean") {
-                issues.push({ path: "sampling.sampled", message: "must be a boolean" });
+                addIssue({ path: "sampling.sampled", message: "must be a boolean" });
             }
         }
     }
 
     if (!("attributes" in value)) {
-        issues.push({ path: "attributes", message: "is required" });
+        addIssue({ path: "attributes", message: "is required" });
     } else if (!isPlainObject(value.attributes)) {
-        issues.push({ path: "attributes", message: "must be an object" });
+        addIssue({ path: "attributes", message: "must be an object" });
     } else {
-        validateAttributes(value.attributes, issues);
+        const attrIssue = validateAttributes(value.attributes);
+        if (attrIssue !== null) {
+            addIssue(attrIssue);
+        }
     }
 
-    if (issues.length > 0) {
+    if (issues !== null) {
         return { ok: false, issues };
     }
     return { ok: true, event: value as ObservatoryEvent };

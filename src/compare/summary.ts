@@ -13,9 +13,10 @@ import { runDiagnostics, type Finding } from "../diagnostics";
 import type { ObservatoryEvent } from "../protocol/events";
 import { outputTokenCount } from "../query/attributes";
 import { isErrorEvent } from "../query/classify";
-import { deriveMetrics, percentile, type DecodeWindow } from "../query/metrics";
+import { deriveMetrics, type DecodeWindow } from "../query/metrics";
 import { isSyntheticProducer } from "../recording/sobs";
-import { orderEvents } from "../replay/order";
+import { isOrdered, markOrdered } from "../replay/lookup";
+import { compareEvents } from "../replay/order";
 import { deriveTopology, type TopologyGraph } from "../topology";
 import {
     budgetPressureFraction,
@@ -107,98 +108,184 @@ function str(value: unknown): string | null {
     return typeof value === "string" && value !== "" ? value : null;
 }
 
-function sumOrNull(values: readonly (number | null)[]): number | null {
-    const present = values.filter((v): v is number => v !== null);
-    return present.length === 0 ? null : present.reduce((a, b) => a + b, 0);
+function percentileSorted(sorted: readonly number[], p: number): number {
+    const rank = Math.ceil((p / 100) * sorted.length);
+    return sorted[Math.min(Math.max(rank, 1), sorted.length) - 1]!;
 }
 
-function maxOrNull(values: readonly (number | null)[]): number | null {
-    // A loop, not Math.max(...values): spreading throws RangeError past ~125k values.
-    let max: number | null = null;
-    for (const v of values) {
-        if (v !== null && (max === null || v > max)) {
-            max = v;
+interface UnitAccumulator {
+    firstNs: number;
+    events: number;
+    requests: number;
+    failedRequests: number;
+    ttfts: number[] | null;
+    decodeTokens: number;
+    decodeSeconds: number;
+    promptSum: number;
+    hasPrompt: boolean;
+    completionSum: number;
+    hasCompletion: boolean;
+    costSum: number;
+    hasCost: boolean;
+    budgetPeak: number | null;
+    retries: number;
+    hits: number;
+    misses: number;
+    errors: number;
+}
+
+function createAccumulator(): UnitAccumulator {
+    return {
+        firstNs: Number.POSITIVE_INFINITY,
+        events: 0,
+        requests: 0,
+        failedRequests: 0,
+        ttfts: null,
+        decodeTokens: 0,
+        decodeSeconds: 0,
+        promptSum: 0,
+        hasPrompt: false,
+        completionSum: 0,
+        hasCompletion: false,
+        costSum: 0,
+        hasCost: false,
+        budgetPeak: null,
+        retries: 0,
+        hits: 0,
+        misses: 0,
+        errors: 0,
+    };
+}
+
+function getOrCreateAcc(map: Map<string, UnitAccumulator>, key: string): UnitAccumulator {
+    let acc = map.get(key);
+    if (!acc) {
+        acc = createAccumulator();
+        map.set(key, acc);
+    }
+    return acc;
+}
+
+function addEventToAcc(
+    acc: UnitAccumulator,
+    monoNs: number,
+    retry: number,
+    hit: number,
+    miss: number,
+    err: number,
+    budgetPressure: number | null,
+): void {
+    if (acc.events === 0) {
+        acc.firstNs = monoNs;
+    }
+    acc.events += 1;
+    acc.retries += retry;
+    acc.hits += hit;
+    acc.misses += miss;
+    acc.errors += err;
+    if (budgetPressure !== null && (acc.budgetPeak === null || budgetPressure > acc.budgetPeak)) {
+        acc.budgetPeak = budgetPressure;
+    }
+}
+
+function addRequestToAcc(acc: UnitAccumulator, r: RequestFacts): void {
+    acc.requests += 1;
+    acc.firstNs = Math.min(acc.firstNs, r.startNs);
+    if (r.outcome === "failed") {
+        acc.failedRequests += 1;
+    }
+    if (r.ttftMs !== null) {
+        if (!acc.ttfts) {
+            acc.ttfts = [r.ttftMs];
+        } else {
+            acc.ttfts.push(r.ttftMs);
         }
     }
-    return max;
-}
-
-/** Token-weighted decode rate over requests: sum(tokens) / sum(decode seconds). */
-function aggregateDecodeRate(requests: readonly RequestFacts[]): number | null {
-    let tokens = 0;
-    let seconds = 0;
-    for (const r of requests) {
-        if (r.decodeTokPerSec === null) {
-            continue;
-        }
+    if (r.decodeTokPerSec !== null) {
         const n = r.completionTokens ?? r.streamedTokens;
         if (n > 0) {
-            tokens += n;
-            seconds += n / r.decodeTokPerSec;
+            acc.decodeTokens += n;
+            acc.decodeSeconds += n / r.decodeTokPerSec;
         }
     }
-    return seconds > 0 ? tokens / seconds : null;
+    if (r.promptTokens !== null) {
+        acc.hasPrompt = true;
+        acc.promptSum += r.promptTokens;
+    }
+    if (r.completionTokens !== null) {
+        acc.hasCompletion = true;
+        acc.completionSum += r.completionTokens;
+    }
+    if (r.costUsd !== null) {
+        acc.hasCost = true;
+        acc.costSum += r.costUsd;
+    }
 }
 
-function statsFor(key: string, label: string, requests: readonly RequestFacts[], events: readonly ObservatoryEvent[]): UnitStats {
-    const ttfts = requests.map((r) => r.ttftMs).filter((v): v is number => v !== null);
-    let retries = 0;
-    let hits = 0;
-    let misses = 0;
-    let errors = 0;
-    const budget: (number | null)[] = [];
-    for (const e of events) {
-        if (isRetry(e)) {
-            retries += 1;
+function finalizeUnit(key: string, label: string, acc: UnitAccumulator): UnitStats {
+    let ttftMs: number | null = null;
+    let ttftP95Ms: number | null = null;
+    const ttfts = acc.ttfts;
+    if (ttfts !== null && ttfts.length > 0) {
+        if (ttfts.length === 1) {
+            ttftMs = ttfts[0]!;
+            ttftP95Ms = ttfts[0]!;
+        } else {
+            ttfts.sort((a, b) => a - b);
+            ttftMs = percentileSorted(ttfts, 50);
+            ttftP95Ms = percentileSorted(ttfts, 95);
         }
-        const lookup = cacheLookup(e);
-        if (lookup === "hit") {
-            hits += 1;
-        } else if (lookup === "miss") {
-            misses += 1;
-        }
-        if (isErrorEvent(e)) {
-            errors += 1;
-        }
-        budget.push(budgetPressureFraction(e));
-    }
-    let firstNs = events.length > 0 ? events[0]!.mono_ns : Number.POSITIVE_INFINITY;
-    for (const request of requests) {
-        firstNs = Math.min(firstNs, request.startNs);
     }
     return {
         key,
         label,
-        firstNs: Number.isFinite(firstNs) ? firstNs : 0,
-        events: events.length,
-        requests: requests.length,
-        failedRequests: requests.filter((r) => r.outcome === "failed").length,
-        ttftMs: percentile(ttfts, 50),
-        ttftP95Ms: percentile(ttfts, 95),
-        decodeTokPerSec: aggregateDecodeRate(requests),
-        promptTokens: sumOrNull(requests.map((r) => r.promptTokens)),
-        completionTokens: sumOrNull(requests.map((r) => r.completionTokens)),
-        costUsd: sumOrNull(requests.map((r) => r.costUsd)),
+        firstNs: Number.isFinite(acc.firstNs) ? acc.firstNs : 0,
+        events: acc.events,
+        requests: acc.requests,
+        failedRequests: acc.failedRequests,
+        ttftMs,
+        ttftP95Ms,
+        decodeTokPerSec: acc.decodeSeconds > 0 ? acc.decodeTokens / acc.decodeSeconds : null,
+        promptTokens: acc.hasPrompt ? acc.promptSum : null,
+        completionTokens: acc.hasCompletion ? acc.completionSum : null,
+        costUsd: acc.hasCost ? acc.costSum : null,
         costBudgetFraction: null,
-        budgetPeakFraction: maxOrNull(budget),
-        retries,
-        cacheHits: hits,
-        cacheMisses: misses,
-        cacheHitRate: hits + misses > 0 ? hits / (hits + misses) : null,
-        errors,
+        budgetPeakFraction: acc.budgetPeak,
+        retries: acc.retries,
+        cacheHits: acc.hits,
+        cacheMisses: acc.misses,
+        cacheHitRate: acc.hits + acc.misses > 0 ? acc.hits / (acc.hits + acc.misses) : null,
+        errors: acc.errors,
     };
 }
 
-/** Request facts in request start order (events must be in replay order). */
-export function requestFacts(events: readonly ObservatoryEvent[]): RequestFacts[] {
+function sortUnitsIfNeeded(units: UnitStats[]): UnitStats[] {
+    for (let i = 1; i < units.length; i += 1) {
+        const a = units[i - 1]!;
+        const b = units[i]!;
+        if (a.firstNs > b.firstNs || (a.firstNs === b.firstNs && a.key > b.key)) {
+            units.sort((x, y) => x.firstNs - y.firstNs || (x.key < y.key ? -1 : x.key > y.key ? 1 : 0));
+            break;
+        }
+    }
+    return units;
+}
+
+function buildRequestFacts(events: readonly ObservatoryEvent[]): {
+    requests: RequestFacts[];
+    indexById: Map<string, number>;
+} {
     const spans = deriveMetrics(events).requests;
-    const byId = new Map<string, RequestFacts>();
-    const spanDecode = new Map<string, DecodeWindow>();
-    for (const s of spans) {
+    const requests: RequestFacts[] = [];
+    const indexById = new Map<string, number>();
+    let spanDecode: Map<string, DecodeWindow> | null = null;
+    for (let i = 0; i < spans.length; i += 1) {
+        const s = spans[i]!;
         if (s.decode) {
+            spanDecode ??= new Map();
             spanDecode.set(s.requestId, s.decode);
         }
-        byId.set(s.requestId, {
+        const fact: RequestFacts = {
             requestId: s.requestId,
             runId: null,
             turn: null,
@@ -214,16 +301,25 @@ export function requestFacts(events: readonly ObservatoryEvent[]): RequestFacts[
             promptTokens: null,
             completionTokens: null,
             costUsd: null,
-        });
+        };
+        const existingIdx = indexById.get(s.requestId);
+        if (existingIdx !== undefined) {
+            requests[existingIdx] = fact;
+        } else {
+            indexById.set(s.requestId, requests.length);
+            requests.push(fact);
+        }
     }
-    const reportedRate = new Map<string, number>();
-    const cost = new Map<string, number>();
-    for (const e of events) {
+    let reportedRate: Map<string, number> | null = null;
+    let cost: Map<string, number> | null = null;
+    for (let i = 0; i < events.length; i += 1) {
+        const e = events[i]!;
         const rid = str(e.request_id);
-        const r = rid ? byId.get(rid) : undefined;
-        if (!r) {
+        const idx = rid !== null ? indexById.get(rid) : undefined;
+        if (idx === undefined) {
             continue;
         }
+        const r = requests[idx]!;
         r.runId ??= str(e.run_id);
         r.turn ??= turnId(e);
         const p = promptTokens(e);
@@ -235,12 +331,14 @@ export function requestFacts(events: readonly ObservatoryEvent[]): RequestFacts[
         }
         const rate = reportedDecodeRate(e);
         if (rate !== null) {
+            reportedRate ??= new Map();
             reportedRate.set(r.requestId, rate);
         }
         if (isRequestOutcome(e)) {
             r.completionTokens ??= reportedCompletionTokens(e);
             const c = costUsd(e);
             if (c !== null) {
+                cost ??= new Map();
                 cost.set(r.requestId, (cost.get(r.requestId) ?? 0) + c);
             }
             const ttft = e.attributes.ttft_ms;
@@ -250,19 +348,21 @@ export function requestFacts(events: readonly ObservatoryEvent[]): RequestFacts[
             }
         }
     }
-    for (const r of byId.values()) {
-        r.costUsd = cost.get(r.requestId) ?? null;
+    let sorted = true;
+    for (let i = 0; i < requests.length; i += 1) {
+        const r = requests[i]!;
+        r.costUsd = cost !== null ? (cost.get(r.requestId) ?? null) : null;
         if (r.completionTokens === null && r.streamedTokens > 0) {
             r.completionTokens = r.streamedTokens;
         }
-        const reported = reportedRate.get(r.requestId);
+        const reported = reportedRate !== null ? reportedRate.get(r.requestId) : undefined;
         if (reported !== undefined) {
             r.decodeTokPerSec = reported;
             r.decodeSource = "reported";
         } else if (r.firstTokenNs !== null && r.lastTokenNs !== null && r.streamedTokens >= 2 && r.lastTokenNs > r.firstTokenNs) {
             r.decodeTokPerSec = (r.streamedTokens - 1) / ((r.lastTokenNs - r.firstTokenNs) / 1e9);
             r.decodeSource = "derived";
-        } else {
+        } else if (spanDecode !== null) {
             // Chunk-streamed output (no per-token events): the backend count over
             // the request's decode window (query/metrics.ts), never the chunk count.
             const d = spanDecode.get(r.requestId);
@@ -271,95 +371,239 @@ export function requestFacts(events: readonly ObservatoryEvent[]): RequestFacts[
                 r.decodeSource = "derived";
             }
         }
+        if (sorted && i > 0) {
+            const prev = requests[i - 1]!;
+            if (prev.startNs > r.startNs || (prev.startNs === r.startNs && prev.requestId > r.requestId)) {
+                sorted = false;
+            }
+        }
     }
-    return [...byId.values()].sort((a, b) => a.startNs - b.startNs || (a.requestId < b.requestId ? -1 : 1));
+    if (!sorted) {
+        requests.sort((a, b) => a.startNs - b.startNs || (a.requestId < b.requestId ? -1 : 1));
+        indexById.clear();
+        for (let i = 0; i < requests.length; i += 1) {
+            indexById.set(requests[i]!.requestId, i);
+        }
+    }
+    return { requests, indexById };
 }
 
-function groupUnits(
-    mode: AlignMode,
-    events: readonly ObservatoryEvent[],
-    requests: readonly RequestFacts[],
-): UnitGroup {
-    const reqById = new Map(requests.map((r) => [r.requestId, r]));
-    const anyTurn = requests.some((r) => r.turn !== null) || events.some((e) => turnId(e) !== null);
-    const keySource: UnitGroup["keySource"] = mode === "turn" && !anyTurn ? "inferred" : "reported";
-    const inferredTurn = new Map(requests.map((r, i) => [r.requestId, `#${i + 1}`]));
+/** Request facts in request start order (events must be in replay order). */
+export function requestFacts(events: readonly ObservatoryEvent[]): RequestFacts[] {
+    return buildRequestFacts(events).requests;
+}
 
-    const requestKey = (r: RequestFacts): string | null => {
-        if (mode === "request") {
-            return r.requestId;
-        }
-        if (mode === "run") {
-            return r.runId;
-        }
-        return keySource === "inferred" ? (inferredTurn.get(r.requestId) ?? null) : r.turn;
-    };
-    const eventKey = (e: ObservatoryEvent): string | null => {
-        const rid = str(e.request_id);
-        const r = rid ? reqById.get(rid) : undefined;
-        if (mode === "request") {
-            return r ? r.requestId : null;
-        }
-        if (mode === "run") {
-            return str(e.run_id) ?? (r ? r.runId : null);
-        }
-        if (keySource === "reported") {
-            return turnId(e) ?? (r ? r.turn : null);
-        }
-        return r ? (inferredTurn.get(r.requestId) ?? null) : null;
-    };
-
-    const unitEvents = new Map<string, ObservatoryEvent[]>();
-    const unitRequests = new Map<string, RequestFacts[]>();
-    let unattributed = 0;
-    for (const e of events) {
-        const key = eventKey(e);
-        if (key === null) {
-            unattributed += 1;
+/**
+ * Deduplicates by event_id (first occurrence wins) and sorts into replay order
+ * without paying for findSequenceGaps (unused by SessionAnalysis).
+ * Already-ordered immutable session arrays are reused directly.
+ */
+function orderForAnalysis(input: readonly ObservatoryEvent[]): readonly ObservatoryEvent[] {
+    if (isOrdered(input)) {
+        return input;
+    }
+    const len = input.length;
+    if (len === 0) {
+        const empty: ObservatoryEvent[] = [];
+        markOrdered(empty);
+        return empty;
+    }
+    const seen = new Set<string>();
+    const events: ObservatoryEvent[] = [];
+    let sorted = true;
+    let prev: ObservatoryEvent | null = null;
+    for (let i = 0; i < len; i += 1) {
+        const event = input[i]!;
+        if (seen.has(event.event_id)) {
             continue;
         }
-        const list = unitEvents.get(key) ?? [];
-        list.push(e);
-        unitEvents.set(key, list);
-    }
-    for (const r of requests) {
-        const key = requestKey(r);
-        if (key === null) {
-            continue;
+        seen.add(event.event_id);
+        if (sorted && prev !== null && compareEvents(prev, event) > 0) {
+            sorted = false;
         }
-        const list = unitRequests.get(key) ?? [];
-        list.push(r);
-        unitRequests.set(key, list);
+        prev = event;
+        events.push(event);
     }
-    const keys = new Set([...unitEvents.keys(), ...unitRequests.keys()]);
-    const label = (key: string): string => (mode === "turn" && keySource === "reported" ? `turn ${key}` : key);
-    const units = [...keys]
-        .map((key) => statsFor(key, label(key), unitRequests.get(key) ?? [], unitEvents.get(key) ?? []))
-        .sort((a, b) => a.firstNs - b.firstNs || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-    return { mode, keySource, units, unattributedEvents: unattributed };
+    if (!sorted) {
+        events.sort(compareEvents);
+    }
+    markOrdered(events);
+    return events;
 }
 
 /** Analyzes one session (events in any order; ordered here with the replay order rules). */
 export function analyzeSession(input: readonly ObservatoryEvent[]): SessionAnalysis {
-    const events = orderEvents(input).events;
-    const requests = requestFacts(events);
-    const totals = statsFor("session", "Session", requests, events);
-    let budget: number | null = null;
-    for (const e of events) {
-        budget = costBudgetUsd(e) ?? budget;
+    const events = orderForAnalysis(input);
+    const { requests, indexById } = buildRequestFacts(events);
+    const nReq = requests.length;
+
+    let anyTurn = false;
+    for (let i = 0; i < nReq; i += 1) {
+        if (requests[i]!.turn !== null) {
+            anyTurn = true;
+            break;
+        }
     }
+    if (!anyTurn) {
+        for (let i = 0; i < events.length; i += 1) {
+            if (turnId(events[i]!) !== null) {
+                anyTurn = true;
+                break;
+            }
+        }
+    }
+    const turnKeySource: UnitGroup["keySource"] = anyTurn ? "reported" : "inferred";
+
+    const totalsAcc = createAccumulator();
+    const runAccs = new Map<string, UnitAccumulator>();
+    const turnAccs = new Map<string, UnitAccumulator>();
+    // Compact typed arrays for per-request event counters avoid allocating N intermediate
+    // UnitAccumulator objects (each request unit has exactly one RequestFacts entry).
+    const reqFirstNs = new Float64Array(nReq);
+    reqFirstNs.fill(Number.POSITIVE_INFINITY);
+    const reqEvents = new Int32Array(nReq);
+    const reqRetries = new Int32Array(nReq);
+    const reqHits = new Int32Array(nReq);
+    const reqMisses = new Int32Array(nReq);
+    const reqErrors = new Int32Array(nReq);
+    let reqBudgetPeak: Map<number, number> | null = null;
+
+    let runUnattributed = 0;
+    let reqUnattributed = 0;
+    let turnUnattributed = 0;
+    let budget: number | null = null;
+    let synthetic = false;
+    const sessionIdsSet = new Set<string>();
+
+    // Single pass over events builds session totals, metadata, and all three alignment groups.
+    for (let i = 0; i < events.length; i += 1) {
+        const e = events[i]!;
+        const b = costBudgetUsd(e);
+        if (b !== null) {
+            budget = b;
+        }
+        if (!synthetic && isSyntheticProducer(e.producer)) {
+            synthetic = true;
+        }
+        sessionIdsSet.add(e.session_id);
+
+        const retry = isRetry(e) ? 1 : 0;
+        const lookup = cacheLookup(e);
+        const hit = lookup === "hit" ? 1 : 0;
+        const miss = lookup === "miss" ? 1 : 0;
+        const err = isErrorEvent(e) ? 1 : 0;
+        const bp = budgetPressureFraction(e);
+
+        addEventToAcc(totalsAcc, e.mono_ns, retry, hit, miss, err, bp);
+
+        const rid = str(e.request_id);
+        const rIdx = rid !== null ? indexById.get(rid) : undefined;
+        const r = rIdx !== undefined ? requests[rIdx]! : undefined;
+
+        if (rIdx !== undefined) {
+            if (reqEvents[rIdx] === 0) {
+                reqFirstNs[rIdx] = e.mono_ns;
+            }
+            reqEvents[rIdx] = reqEvents[rIdx]! + 1;
+            reqRetries[rIdx] = reqRetries[rIdx]! + retry;
+            reqHits[rIdx] = reqHits[rIdx]! + hit;
+            reqMisses[rIdx] = reqMisses[rIdx]! + miss;
+            reqErrors[rIdx] = reqErrors[rIdx]! + err;
+            if (bp !== null) {
+                reqBudgetPeak ??= new Map();
+                const prevBp = reqBudgetPeak.get(rIdx);
+                if (prevBp === undefined || bp > prevBp) {
+                    reqBudgetPeak.set(rIdx, bp);
+                }
+            }
+        } else {
+            reqUnattributed += 1;
+        }
+
+        const runKey = str(e.run_id) ?? (r ? r.runId : null);
+        if (runKey !== null) {
+            addEventToAcc(getOrCreateAcc(runAccs, runKey), e.mono_ns, retry, hit, miss, err, bp);
+        } else {
+            runUnattributed += 1;
+        }
+
+        const turnKey =
+            turnKeySource === "reported"
+                ? (turnId(e) ?? (r ? r.turn : null))
+                : rIdx !== undefined
+                  ? `#${rIdx + 1}`
+                  : null;
+        if (turnKey !== null) {
+            addEventToAcc(getOrCreateAcc(turnAccs, turnKey), e.mono_ns, retry, hit, miss, err, bp);
+        } else {
+            turnUnattributed += 1;
+        }
+    }
+
+    // Single pass over requests completes request-level stats for totals, run, turn, and builds request units directly.
+    const reqUnits = new Array<UnitStats>(nReq);
+    for (let i = 0; i < nReq; i += 1) {
+        const r = requests[i]!;
+        addRequestToAcc(totalsAcc, r);
+        if (r.runId !== null) {
+            addRequestToAcc(getOrCreateAcc(runAccs, r.runId), r);
+        }
+        const turnKey = turnKeySource === "inferred" ? `#${i + 1}` : r.turn;
+        if (turnKey !== null) {
+            addRequestToAcc(getOrCreateAcc(turnAccs, turnKey), r);
+        }
+
+        const firstNs = Math.min(reqFirstNs[i]!, r.startNs);
+        const hits = reqHits[i]!;
+        const misses = reqMisses[i]!;
+        const decodeTok = r.decodeTokPerSec !== null && (r.completionTokens ?? r.streamedTokens) > 0 ? r.decodeTokPerSec : null;
+        reqUnits[i] = {
+            key: r.requestId,
+            label: r.requestId,
+            firstNs: Number.isFinite(firstNs) ? firstNs : 0,
+            events: reqEvents[i]!,
+            requests: 1,
+            failedRequests: r.outcome === "failed" ? 1 : 0,
+            ttftMs: r.ttftMs,
+            ttftP95Ms: r.ttftMs,
+            decodeTokPerSec: decodeTok,
+            promptTokens: r.promptTokens,
+            completionTokens: r.completionTokens,
+            costUsd: r.costUsd,
+            costBudgetFraction: null,
+            budgetPeakFraction: reqBudgetPeak !== null ? (reqBudgetPeak.get(i) ?? null) : null,
+            retries: reqRetries[i]!,
+            cacheHits: hits,
+            cacheMisses: misses,
+            cacheHitRate: hits + misses > 0 ? hits / (hits + misses) : null,
+            errors: reqErrors[i]!,
+        };
+    }
+
+    const totals = finalizeUnit("session", "Session", totalsAcc);
     totals.costBudgetFraction = budget !== null && totals.costUsd !== null ? totals.costUsd / budget : null;
+
+    const runUnits: UnitStats[] = [];
+    for (const [key, acc] of runAccs) {
+        runUnits.push(finalizeUnit(key, key, acc));
+    }
+    const turnUnits: UnitStats[] = [];
+    for (const [key, acc] of turnAccs) {
+        const label = turnKeySource === "reported" ? `turn ${key}` : key;
+        turnUnits.push(finalizeUnit(key, label, acc));
+    }
+
     return {
         eventCount: events.length,
-        synthetic: events.some((e) => isSyntheticProducer(e.producer)),
-        sessionIds: [...new Set(events.map((e) => e.session_id))],
+        synthetic,
+        sessionIds: [...sessionIdsSet],
         requests,
         totals,
         costBudgetUsd: budget,
         groups: {
-            run: groupUnits("run", events, requests),
-            request: groupUnits("request", events, requests),
-            turn: groupUnits("turn", events, requests),
+            run: { mode: "run", keySource: "reported", units: sortUnitsIfNeeded(runUnits), unattributedEvents: runUnattributed },
+            request: { mode: "request", keySource: "reported", units: sortUnitsIfNeeded(reqUnits), unattributedEvents: reqUnattributed },
+            turn: { mode: "turn", keySource: turnKeySource, units: sortUnitsIfNeeded(turnUnits), unattributedEvents: turnUnattributed },
         },
         findings: runDiagnostics(events),
         topology: deriveTopology(events),
