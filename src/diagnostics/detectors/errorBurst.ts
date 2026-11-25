@@ -1,6 +1,7 @@
 import type { ObservatoryEvent } from "../../protocol/events";
 import type { Detector } from "../types";
-import { findBursts, makeFinding, ms } from "../util";
+import { makeFinding } from "../util";
+import { findBurstsLinear, safeSpanMs } from "./shared";
 
 /** Failure events: `*.failed` and `*.error` (retries/guards are other detectors). */
 export function isFailureEvent(e: ObservatoryEvent): boolean {
@@ -14,14 +15,14 @@ export function isFailureEvent(e: ObservatoryEvent): boolean {
 export const detectErrorBursts: Detector = (events, config) => {
     const { count, windowMs } = config.errorBurst;
     const failures = events.filter(isFailureEvent);
-    return findBursts(failures, count, windowMs).map((burst) => {
-        const byType: Record<string, number> = {};
+    return findBurstsLinear(failures, count, windowMs).map((burst) => {
+        const byType = new Map<string, number>();
         for (const e of burst) {
-            byType[e.event_type] = (byType[e.event_type] ?? 0) + 1;
+            byType.set(e.event_type, (byType.get(e.event_type) ?? 0) + 1);
         }
-        const span = ms(burst[burst.length - 1]!.mono_ns - burst[0]!.mono_ns);
-        const breakdown = Object.entries(byType)
-            .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        const span = safeSpanMs(burst[0]!.mono_ns, burst[burst.length - 1]!.mono_ns);
+        const breakdown = [...byType.entries()]
+            .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
             .map(([t, n]) => `${n}x ${t}`)
             .join(", ");
         return makeFinding(

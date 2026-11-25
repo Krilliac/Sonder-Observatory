@@ -1,6 +1,8 @@
 import type { ObservatoryEvent } from "../../protocol/events";
+import { createIdentityKeys } from "../../query/identity";
 import type { Detector, Finding } from "../types";
-import { NS_PER_MS, findBursts, groupBy, makeFinding, pct } from "../util";
+import { NS_PER_MS, groupBy, makeFinding, pct } from "../util";
+import { findBurstsLinear, safeSpanMs } from "./shared";
 
 interface Window {
     index: number;
@@ -27,52 +29,67 @@ function cacheScope(e: ObservatoryEvent): string {
 export const detectCacheThrash: Detector = (events, config) => {
     const cfg = config.cacheThrash;
     const findings: Finding[] = [];
-    const lookups = events.filter((e) => e.event_type === "kv.reused" || e.event_type === "kv.allocated");
+    const validWindow = Number.isFinite(cfg.windowMs) && cfg.windowMs > 0;
+    const validMinLookups = Number.isFinite(cfg.minLookups) && cfg.minLookups >= 1;
+    const validRates = Number.isFinite(cfg.baselineHitRate) && Number.isFinite(cfg.dropRatio) && cfg.dropRatio >= 0;
 
-    for (const [scope, list] of groupBy(lookups, cacheScope)) {
-        const t0 = list[0]!.mono_ns;
+    if (validWindow && validMinLookups && validRates) {
+        const minLookups = Math.ceil(cfg.minLookups);
         const windowNs = cfg.windowMs * NS_PER_MS;
-        const windows = new Map<number, Window>();
-        for (const e of list) {
-            const index = Math.floor((e.mono_ns - t0) / windowNs);
-            const w = windows.get(index) ?? { index, hits: [], misses: [] };
-            (e.event_type === "kv.reused" ? w.hits : w.misses).push(e);
-            windows.set(index, w);
-        }
-        const qualifying = [...windows.values()]
-            .filter((w) => w.hits.length + w.misses.length >= cfg.minLookups)
-            .sort((a, b) => a.index - b.index);
-        for (let i = 1; i < qualifying.length; i++) {
-            const prior = qualifying.slice(Math.max(0, i - 3), i);
-            const rate = (w: Window) => w.hits.length / (w.hits.length + w.misses.length);
-            const baseline = prior.reduce((s, w) => s + rate(w), 0) / prior.length;
-            const cur = qualifying[i]!;
-            const current = rate(cur);
-            if (baseline >= cfg.baselineHitRate && current <= baseline * cfg.dropRatio) {
-                const evidence = [...prior, cur].flatMap((w) => [...w.hits, ...w.misses]);
-                findings.push(
-                    makeFinding(
-                        "cache-thrash",
-                        current === 0 ? "critical" : "warning",
-                        evidence,
-                        `KV hit rate in ${scope} fell to ${pct(current)} (${cur.hits.length}/${cur.hits.length + cur.misses.length} lookups) from a baseline of ${pct(baseline)} over the previous ${prior.length} window(s) of ${cfg.windowMs} ms.`,
-                        { scope, hit_rate: current, baseline_hit_rate: baseline, lookups: cur.hits.length + cur.misses.length },
-                        "derived",
-                        `hitrate:${cur.hits[0]?.event_id ?? cur.misses[0]!.event_id}`,
-                    ),
-                );
+        const lookups = events.filter(
+            (e) => (e.event_type === "kv.reused" || e.event_type === "kv.allocated") && Number.isFinite(e.mono_ns),
+        );
+
+        const idKeys = createIdentityKeys();
+        for (const [, list] of groupBy(lookups, (e) => `${idKeys.stream(e)}\0${cacheScope(e)}`)) {
+            const scope = cacheScope(list[0]!);
+            const t0 = list[0]!.mono_ns;
+            const windows = new Map<number, Window>();
+            for (const e of list) {
+                const index = Math.floor((e.mono_ns - t0) / windowNs);
+                if (!Number.isFinite(index)) {
+                    continue;
+                }
+                const w = windows.get(index) ?? { index, hits: [], misses: [] };
+                (e.event_type === "kv.reused" ? w.hits : w.misses).push(e);
+                windows.set(index, w);
+            }
+            const qualifying = [...windows.values()]
+                .filter((w) => w.hits.length + w.misses.length >= minLookups)
+                .sort((a, b) => a.index - b.index);
+            for (let i = 1; i < qualifying.length; i += 1) {
+                const prior = qualifying.slice(Math.max(0, i - 3), i);
+                const rate = (w: Window) => w.hits.length / (w.hits.length + w.misses.length);
+                const baseline = prior.reduce((s, w) => s + rate(w), 0) / prior.length;
+                const cur = qualifying[i]!;
+                const current = rate(cur);
+                if (baseline >= cfg.baselineHitRate && current <= baseline * cfg.dropRatio) {
+                    const evidence = [...prior, cur].flatMap((w) => [...w.hits, ...w.misses]);
+                    findings.push(
+                        makeFinding(
+                            "cache-thrash",
+                            current === 0 ? "critical" : "warning",
+                            evidence,
+                            `KV hit rate in ${scope} fell to ${pct(current)} (${cur.hits.length}/${cur.hits.length + cur.misses.length} lookups) from a baseline of ${pct(baseline)} over the previous ${prior.length} window(s) of ${cfg.windowMs} ms.`,
+                            { scope, hit_rate: current, baseline_hit_rate: baseline, lookups: cur.hits.length + cur.misses.length },
+                            "derived",
+                            `hitrate:${cur.hits[0]?.event_id ?? cur.misses[0]!.event_id}`,
+                        ),
+                    );
+                }
             }
         }
     }
 
     const evictions = events.filter((e) => e.event_type === "kv.evicted");
-    for (const burst of findBursts(evictions, cfg.evictionCount, cfg.windowMs)) {
+    for (const burst of findBurstsLinear(evictions, cfg.evictionCount, cfg.windowMs)) {
+        const span = safeSpanMs(burst[0]!.mono_ns, burst[burst.length - 1]!.mono_ns);
         findings.push(
             makeFinding(
                 "cache-thrash",
                 burst.length >= cfg.evictionCount * 2 ? "critical" : "warning",
                 burst,
-                `${burst.length} KV evictions within ${Math.round((burst[burst.length - 1]!.mono_ns - burst[0]!.mono_ns) / NS_PER_MS)} ms (threshold ${cfg.evictionCount} per ${cfg.windowMs} ms).`,
+                `${burst.length} KV evictions within ${span} ms (threshold ${cfg.evictionCount} per ${cfg.windowMs} ms).`,
                 { evictions: burst.length },
                 "derived",
                 `evictions:${burst[0]!.event_id}`,

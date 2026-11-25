@@ -51,15 +51,22 @@ export function browserDownloadHost(): DownloadHost {
 
 /** Filesystem-safe name: `observatory-<session>-<stamp>.<ext>`. */
 export function suggestedFileName(format: ExportFormat, sessionId: string | undefined, at: Date = new Date()): string {
-    const session = (sessionId ?? "session").replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 64) || "session";
-    const stamp = at.toISOString().replace(/\.\d+Z$/, "Z").replace(/[:]/g, "-");
+    const cleaned = (sessionId ?? "session").replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 64);
+    const session = /[A-Za-z0-9]/.test(cleaned) ? cleaned : "session";
+    const safeAt = at instanceof Date && Number.isFinite(at.getTime()) ? at : new Date();
+    const stamp = safeAt.toISOString().replace(/\.\d+Z$/, "Z").replace(/[:]/g, "-");
     const suffix = format === "markdown" ? "-summary" : format === "json" ? "-findings" : format === "html" ? "-report" : "";
     return `observatory-${session}-${stamp}${suffix}.${EXPORT_FORMATS[format].extension}`;
 }
 
 export function downloadText(fileName: string, content: string, format: ExportFormat, host: DownloadHost = browserDownloadHost()): SaveResult {
     const url = host.createObjectURL(new Blob([content], { type: EXPORT_FORMATS[format].mime }));
-    host.clickDownload(url, fileName);
+    try {
+        host.clickDownload(url, fileName);
+    } catch (err) {
+        host.revokeObjectURL(url);
+        throw err;
+    }
     host.setTimeout(() => host.revokeObjectURL(url), 1000);
     return { name: fileName, via: "download" };
 }

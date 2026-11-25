@@ -68,7 +68,9 @@ export class FindingsController {
             if (!this.byId.has(finding.id)) {
                 this.byId.set(finding.id, finding);
             }
-            this.severityCounts[finding.severity] += 1;
+            if (Object.hasOwn(this.severityCounts, finding.severity)) {
+                this.severityCounts[finding.severity] += 1;
+            }
         }
         this.filtered = null;
         this.version += 1;
@@ -92,9 +94,11 @@ export class FindingsController {
             this.version += 1;
         }
         if (!this.filtered) {
-            const min = SEVERITY_RANK[this.filter.minSeverity];
-            const kinds = this.filter.kinds;
-            this.filtered = this.findings.filter((finding) => SEVERITY_RANK[finding.severity] >= min && (kinds.length === 0 || kinds.includes(finding.kind)));
+            const min = SEVERITY_RANK[this.filter.minSeverity] ?? 0;
+            const kindSet = this.filter.kinds.length > 0 ? new Set(this.filter.kinds) : null;
+            this.filtered = this.findings.filter(
+                (finding) => (SEVERITY_RANK[finding.severity] ?? 0) >= min && (kindSet === null || kindSet.has(finding.kind)),
+            );
         }
         return this.filtered;
     }
@@ -144,7 +148,9 @@ export class FindingsController {
         }
         this.version += 1;
         this.host.highlightEvents(finding.evidenceEventIds);
-        this.host.selectEvent(finding.evidenceEventIds[0]!);
+        if (finding.evidenceEventIds.length > 0) {
+            this.host.selectEvent(finding.evidenceEventIds[0]!);
+        }
     }
 
     inspectEvidence(eventId: string): void {

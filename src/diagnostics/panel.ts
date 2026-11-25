@@ -96,9 +96,11 @@ export function renderFindingsPanel(controller: FindingsController, opts: Findin
     const list = h("ul", { class: "diag-findings", "aria-label": "Diagnostic findings" });
     for (const f of visible) {
         const isSel = selected?.id === f.id;
+        const sevClass = Object.hasOwn(SEVERITY_LABEL, f.severity) ? f.severity : "info";
+        const sevLabel = SEVERITY_LABEL[sevClass];
         const attrs: Record<string, string> = {
             type: "button",
-            class: `diag-finding sev-${f.severity}${isSel ? " selected" : ""}`,
+            class: `diag-finding sev-${sevClass}${isSel ? " selected" : ""}`,
             "aria-expanded": isSel ? "true" : "false",
         };
         if (isSel) {
@@ -108,7 +110,7 @@ export function renderFindingsPanel(controller: FindingsController, opts: Findin
         const btn = h(
             "button",
             attrs,
-            h("span", { class: `sev-label sev-${f.severity}`, text: SEVERITY_LABEL[f.severity] }),
+            h("span", { class: `sev-label sev-${sevClass}`, text: sevLabel }),
             h("span", { class: "mono", text: ` ${opts.relativeTime(f.startNs)} ` }),
             h("span", { class: "diag-kind", text: f.kind }),
             h("span", { class: "diag-summary", text: ` ${f.summary}` }),

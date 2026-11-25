@@ -39,7 +39,8 @@ export interface RenderedExport {
 
 /** Renders one export format for the given events / range. */
 export function renderExport(format: ExportFormat, input: ReportInput): RenderedExport {
-    const at = input.generatedAt ?? new Date();
+    const rawAt = input.generatedAt;
+    const at = rawAt instanceof Date && Number.isFinite(rawAt.getTime()) ? rawAt : new Date();
     const withStamp = { ...input, generatedAt: at };
     const sessionId = input.events[0]?.session_id;
     const fileName = suggestedFileName(format, sessionId, at);
@@ -95,5 +96,6 @@ export async function exportWithConfirmation(
     if (assessment.sensitive && !(await confirm(assessment))) {
         return null;
     }
-    return exportSession(format, input, { ...options, acknowledgeSensitive: assessment.sensitive });
+    const out = renderExport(format, input);
+    return saveText(out.fileName, out.content, format, options);
 }

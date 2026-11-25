@@ -1,4 +1,5 @@
 import type { ObservatoryEvent } from "../../protocol/events";
+import { createIdentityKeys } from "../../query/identity";
 import type { Detector, Finding } from "../types";
 import { groupBy, makeFinding, num, pct, str } from "../util";
 import { episodes, scopeKey, severityFor } from "./shared";
@@ -16,7 +17,7 @@ interface UsageSample {
 function usage(e: ObservatoryEvent): UsageSample | null {
     const used = num(e, ...USED_KEYS);
     const limit = num(e, ...LIMIT_KEYS);
-    if (used === null || limit === null || limit <= 0) {
+    if (used === null || limit === null || used < 0 || limit <= 0) {
         return null;
     }
     return { event: e, fraction: used / limit, used, limit };
@@ -38,7 +39,9 @@ export const detectBudgetPressure: Detector = (events, config) => {
         if (e.event_type !== "guard.budget_pressure") {
             continue;
         }
-        const fraction = num(e, "used_fraction", "fraction");
+        const rawFraction = num(e, "used_fraction", "fraction");
+        const derived = rawFraction === null ? usage(e) : null;
+        const fraction = rawFraction !== null && rawFraction >= 0 ? rawFraction : (derived?.fraction ?? null);
         const budget = str(e, "budget") ?? "unspecified";
         const severity = fraction === null ? "warning" : (severityFor(fraction, warnFraction, criticalFraction) ?? "info");
         const facts: Record<string, number | string> = { budget };
@@ -57,6 +60,10 @@ export const detectBudgetPressure: Detector = (events, config) => {
         );
     }
 
+    if (!Number.isFinite(warnFraction) || warnFraction <= 0) {
+        return findings;
+    }
+
     const samples: UsageSample[] = [];
     for (const e of events) {
         if (e.event_type.startsWith("guard.")) {
@@ -67,7 +74,9 @@ export const detectBudgetPressure: Detector = (events, config) => {
             samples.push(s);
         }
     }
-    for (const [scope, series] of groupBy(samples, (s) => scopeKey(s.event))) {
+    const idKeys = createIdentityKeys();
+    for (const [, series] of groupBy(samples, (s) => `${idKeys.stream(s.event)}\0${scopeKey(s.event)}`)) {
+        const scope = scopeKey(series[0]!.event);
         for (const ep of episodes(series, (s) => s.fraction >= warnFraction)) {
             const peak = ep.reduce((a, b) => (b.fraction > a.fraction ? b : a));
             const severity = severityFor(peak.fraction, warnFraction, criticalFraction) ?? "warning";
