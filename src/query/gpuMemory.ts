@@ -6,6 +6,10 @@
 import type { ObservatoryEvent } from "../protocol/events";
 import { producerInstance } from "./attributes";
 
+export type GpuDeviceClass = "discrete" | "integrated-uma" | "unknown";
+export type GpuMemoryMode = "discrete-gddr" | "integrated-uma" | "hybrid-uma" | "unknown";
+export type GpuWeightsEvidence = "reported" | "observed-vram" | "none";
+
 export interface GpuMemorySample {
     eventId: string;
     monoNs: number;
@@ -22,6 +26,18 @@ export interface GpuMemorySample {
     status: string | null;
     /** Observed sample-counter reset; no PID is supplied by this producer. */
     epoch: number;
+    /** Optional per-GPU & UMA semantics (populated by gpuMemorySample / deriveGpuMemory). */
+    deviceId?: string | null;
+    gpuClass?: GpuDeviceClass;
+    memoryMode?: GpuMemoryMode;
+    isIntegratedUma?: boolean | null;
+    umaMode?: boolean | null;
+    memoryKind?: string | null;
+    /** True when shared memory on this sample reflects intentional UMA / hybrid UMA pooling rather than discrete GDDR spill. */
+    umaIntentionalShared?: boolean;
+    dedicatedTotalBytes?: number | null;
+    sharedTotalBytes?: number | null;
+    effectiveTotalBytes?: number | null;
 }
 
 export interface GpuContextChange {
@@ -57,6 +73,16 @@ export interface GpuBackendMetrics {
     fittedCtx: number | null;
     contextChanges: GpuContextChange[];
     warnings: GpuWarning[];
+    /** Optional per-GPU identity & UMA pool semantics (populated by deriveGpuMemory). */
+    deviceId?: string | null;
+    deviceName?: string | null;
+    gpuClass?: GpuDeviceClass;
+    memoryMode?: GpuMemoryMode;
+    isIntegratedUma?: boolean | null;
+    umaMode?: boolean | null;
+    dedicatedTotalBytes?: number | null;
+    sharedTotalBytes?: number | null;
+    effectiveTotalBytes?: number | null;
 }
 
 export interface GpuMetrics {
@@ -71,8 +97,180 @@ function text(value: unknown): string | null {
     return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function trimmedText(value: unknown): string | null {
+    if (typeof value !== "string") {
+        return null;
+    }
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+}
+
+function backendDeviceId(event: ObservatoryEvent): string | null {
+    const a = event.attributes;
+    return trimmedText(event.device_id) ?? trimmedText(a.device_id) ?? trimmedText(a.gpu_device_id) ?? trimmedText(a.device);
+}
+
+const HYBRID_UMA_TOKENS = new Set(["hybrid", "hybrid_uma", "hybrid-uma", "hybrid_pool", "hybrid-pool", "combined_uma", "combined-uma", "mixed"]);
+const INTEGRATED_UMA_TOKENS = new Set([
+    "uma",
+    "integrated_uma",
+    "integrated-uma",
+    "integrated",
+    "unified",
+    "unified_memory",
+    "unified-memory",
+    "gtt",
+    "shared_uma",
+    "shared-uma",
+    "igpu",
+    "apu",
+]);
+const DISCRETE_GDDR_TOKENS = new Set(["discrete", "discrete_gddr", "discrete-gddr", "gddr", "dgpu", "dedicated", "vram"]);
+
+function parseUmaModeAttr(value: unknown): { enabled: boolean | null; hybrid: boolean } {
+    if (typeof value === "boolean") {
+        return { enabled: value, hybrid: false };
+    }
+    const raw = trimmedText(value);
+    if (raw === null) {
+        return { enabled: null, hybrid: false };
+    }
+    const norm = raw.toLowerCase();
+    if (HYBRID_UMA_TOKENS.has(norm)) {
+        return { enabled: true, hybrid: true };
+    }
+    if (norm === "on" || norm === "true" || INTEGRATED_UMA_TOKENS.has(norm)) {
+        return { enabled: true, hybrid: false };
+    }
+    if (norm === "off" || norm === "false" || DISCRETE_GDDR_TOKENS.has(norm)) {
+        return { enabled: false, hybrid: false };
+    }
+    return { enabled: null, hybrid: false };
+}
+
+function parseMemoryKindAttr(a: Record<string, unknown>): { memoryKind: string | null; kindMode: GpuMemoryMode } {
+    const candidates = [a.memory_kind, a.gpu_memory_kind, a.memory_mode, a.pool_kind, a.gpu_class, a.device_class, a.kind];
+    let firstRaw: string | null = null;
+    for (const candidate of candidates) {
+        const raw = trimmedText(candidate);
+        if (raw === null) {
+            continue;
+        }
+        if (firstRaw === null) {
+            firstRaw = raw;
+        }
+        const norm = raw.toLowerCase();
+        if (HYBRID_UMA_TOKENS.has(norm)) {
+            return { memoryKind: raw, kindMode: "hybrid-uma" };
+        }
+        if (INTEGRATED_UMA_TOKENS.has(norm)) {
+            return { memoryKind: raw, kindMode: "integrated-uma" };
+        }
+        if (DISCRETE_GDDR_TOKENS.has(norm)) {
+            return { memoryKind: raw, kindMode: "discrete-gddr" };
+        }
+    }
+    return { memoryKind: firstRaw, kindMode: "unknown" };
+}
+
+interface SampleMemorySemantics {
+    gpuClass: GpuDeviceClass;
+    memoryMode: GpuMemoryMode;
+    isIntegratedUma: boolean | null;
+    umaMode: boolean | null;
+    memoryKind: string | null;
+    umaIntentionalShared: boolean;
+    explicitDiscrete: boolean;
+    explicitDiscreteSpilled: boolean;
+}
+
+function parseSampleMemorySemantics(a: Record<string, unknown>): SampleMemorySemantics {
+    const isIntegratedUma = typeof a.is_integrated_uma === "boolean" ? a.is_integrated_uma : null;
+    const umaParsed = parseUmaModeAttr(a.uma_mode);
+    const { memoryKind, kindMode } = parseMemoryKindAttr(a);
+    const explicitHybridFlag = a.hybrid_uma === true || a.is_hybrid_uma === true || a.hybrid_pool === true || a.combined_pool_active === true;
+    const explicitHybrid = explicitHybridFlag || umaParsed.hybrid || kindMode === "hybrid-uma";
+    const explicitDiscreteSpilled = typeof a.discrete_spilled === "boolean";
+
+    if (isIntegratedUma === true) {
+        return {
+            gpuClass: "integrated-uma",
+            memoryMode: explicitHybrid ? "hybrid-uma" : "integrated-uma",
+            isIntegratedUma: true,
+            umaMode: umaParsed.enabled ?? true,
+            memoryKind,
+            umaIntentionalShared: true,
+            explicitDiscrete: false,
+            explicitDiscreteSpilled,
+        };
+    }
+    if (explicitHybrid && umaParsed.enabled !== false) {
+        return {
+            gpuClass: isIntegratedUma === false ? "discrete" : "unknown",
+            memoryMode: "hybrid-uma",
+            isIntegratedUma,
+            umaMode: true,
+            memoryKind,
+            umaIntentionalShared: true,
+            explicitDiscrete: false,
+            explicitDiscreteSpilled,
+        };
+    }
+    if (umaParsed.enabled === true) {
+        return {
+            gpuClass: isIntegratedUma === false ? "discrete" : "integrated-uma",
+            memoryMode: isIntegratedUma === false ? "hybrid-uma" : "integrated-uma",
+            isIntegratedUma,
+            umaMode: true,
+            memoryKind,
+            umaIntentionalShared: true,
+            explicitDiscrete: false,
+            explicitDiscreteSpilled,
+        };
+    }
+    if (kindMode === "integrated-uma" && isIntegratedUma !== false && umaParsed.enabled !== false) {
+        return {
+            gpuClass: "integrated-uma",
+            memoryMode: "integrated-uma",
+            isIntegratedUma: true,
+            umaMode: umaParsed.enabled ?? true,
+            memoryKind,
+            umaIntentionalShared: true,
+            explicitDiscrete: false,
+            explicitDiscreteSpilled,
+        };
+    }
+    if (isIntegratedUma === false || kindMode === "discrete-gddr" || umaParsed.enabled === false) {
+        return {
+            gpuClass: "discrete",
+            memoryMode: "discrete-gddr",
+            isIntegratedUma: isIntegratedUma ?? false,
+            umaMode: umaParsed.enabled ?? false,
+            memoryKind,
+            umaIntentionalShared: false,
+            explicitDiscrete: true,
+            explicitDiscreteSpilled,
+        };
+    }
+    return {
+        gpuClass: "unknown",
+        memoryMode: "unknown",
+        isIntegratedUma: null,
+        umaMode: null,
+        memoryKind,
+        umaIntentionalShared: false,
+        explicitDiscrete: false,
+        explicitDiscreteSpilled,
+    };
+}
+
 export function isGpuEvent(event: ObservatoryEvent): boolean {
     return event.event_type === "backend.gpu_memory.sample" || event.event_type === "backend.warning";
+}
+
+/** True for any event that can affect `deriveGpuMemory` (backend samples/warnings plus GPU device/pool context). */
+export function isGpuBackendIndexEvent(event: ObservatoryEvent): boolean {
+    return isGpuEvent(event) || isNodeGpuDeviceEvent(event);
 }
 
 /** Nulls, disabled/failed probes and unsampled zero placeholders are never measurements. */
@@ -93,14 +291,31 @@ export function gpuMemorySample(event: ObservatoryEvent): GpuMemorySample | null
     const baseline = a.shared_baseline_bytes === undefined ? 0 : sharedBaselineBytes;
     const sum = spillThresholdBytes === null || baseline === null ? null : spillThresholdBytes + baseline;
     const spillLimitBytes = sum !== null && Number.isSafeInteger(sum) ? sum : null;
-    const spilled = !usable
-        ? null
-        : typeof a.spilled === "boolean"
-          ? a.spilled
-          : sharedBytes !== null && spillLimitBytes !== null
-            ? sharedBytes > spillLimitBytes
-            : null;
+    const semantics = parseSampleMemorySemantics(a);
+    let spilled: boolean | null;
+    if (!usable) {
+        spilled = null;
+    } else if (typeof a.discrete_spilled === "boolean") {
+        spilled = a.discrete_spilled;
+    } else if (semantics.umaIntentionalShared) {
+        // Intentional UMA / hybrid UMA shared allocations are primary unified memory, not discrete GDDR spill.
+        spilled = false;
+    } else if (typeof a.spilled === "boolean") {
+        spilled = a.spilled;
+    } else if (sharedBytes !== null && spillLimitBytes !== null) {
+        spilled = sharedBytes > spillLimitBytes;
+    } else {
+        spilled = null;
+    }
     const ctx = nonnegative(a.fitted_ctx);
+    const dedicatedTotalBytes = nonnegative(a.dedicated_total_bytes);
+    const sharedTotalBytes = nonnegative(a.shared_total_bytes);
+    const effectiveTotalBytes =
+        mibToBytes(a.effective_vram_mib) ??
+        nonnegative(a.effective_total_bytes) ??
+        (semantics.memoryMode === "integrated-uma"
+            ? (safeAdd(dedicatedTotalBytes, sharedTotalBytes) ?? sharedTotalBytes ?? dedicatedTotalBytes)
+            : dedicatedTotalBytes);
     return {
         eventId: event.event_id,
         monoNs: event.mono_ns,
@@ -115,25 +330,241 @@ export function gpuMemorySample(event: ObservatoryEvent): GpuMemorySample | null
         sampleCount,
         status,
         epoch: 0,
+        deviceId: backendDeviceId(event),
+        gpuClass: semantics.gpuClass,
+        memoryMode: semantics.memoryMode,
+        isIntegratedUma: semantics.isIntegratedUma,
+        umaMode: semantics.umaMode,
+        memoryKind: semantics.memoryKind,
+        umaIntentionalShared: semantics.umaIntentionalShared,
+        dedicatedTotalBytes,
+        sharedTotalBytes,
+        effectiveTotalBytes,
     };
 }
 
+interface SampleFlags {
+    usable: boolean;
+    explicitDiscrete: boolean;
+    explicitDiscreteSpilled: boolean;
+}
+
 interface BackendWork {
+    nodeScopeKey: string;
     metrics: GpuBackendMetrics;
+    sampleFlags: SampleFlags[];
     warnings: Map<string, GpuWarning>;
     warningCounts: Map<string, number>;
     sampleCount: number | null;
     epoch: number;
+    activeDevices: string[];
+}
+
+function matchSingleDeviceToken(token: string, devices: readonly NodeGpuDeviceMetrics[]): NodeGpuDeviceMetrics | null {
+    const norm = token.trim().toLowerCase();
+    if (norm.length === 0) {
+        return null;
+    }
+    const exact = devices.find((d) => d.deviceId.toLowerCase() === norm || d.name.toLowerCase() === norm);
+    if (exact) {
+        return exact;
+    }
+    const gpuIdx = /^gpu:(\d+)$/.exec(norm);
+    if (gpuIdx) {
+        const idx = Number(gpuIdx[1]);
+        return idx >= 0 && idx < devices.length ? (devices[idx] ?? null) : null;
+    }
+    const apiIdx = /^(vulkan|rocm|cuda|metal|hip)(\d+)$/.exec(norm);
+    if (apiIdx) {
+        const api = apiIdx[1]!;
+        const idx = Number(apiIdx[2]);
+        const filtered = devices.filter((d) => {
+            const hint = d.backendHint?.toLowerCase() ?? null;
+            const vendor = d.vendor?.toLowerCase() ?? null;
+            if (api === "cuda") {
+                return hint === "cuda" || vendor === "nvidia";
+            }
+            if (api === "rocm" || api === "hip") {
+                return hint === "rocm" || hint === "hip" || vendor === "amd";
+            }
+            if (api === "metal") {
+                return hint === "metal" || vendor === "apple";
+            }
+            // Vulkan enumerates every Vulkan-capable GPU on the host.
+            return hint === null || hint === "vulkan" || hint === "rocm" || hint === "cuda";
+        });
+        return idx >= 0 && idx < filtered.length ? (filtered[idx] ?? null) : null;
+    }
+    return null;
+}
+
+function resolveMatchingDevices(deviceRef: string, devices: readonly NodeGpuDeviceMetrics[]): NodeGpuDeviceMetrics[] {
+    if (devices.length === 0) {
+        return [];
+    }
+    const exact = matchSingleDeviceToken(deviceRef, devices);
+    if (exact) {
+        return [exact];
+    }
+    if (!deviceRef.includes(",")) {
+        return [];
+    }
+    const matched: NodeGpuDeviceMetrics[] = [];
+    const seen = new Set<string>();
+    for (const part of deviceRef.split(",")) {
+        const dev = matchSingleDeviceToken(part, devices);
+        if (dev && !seen.has(dev.deviceId)) {
+            seen.add(dev.deviceId);
+            matched.push(dev);
+        }
+    }
+    return matched;
+}
+
+function enrichBackendFromNode(work: BackendWork, node: NodeGpuMetrics | undefined): void {
+    const b = work.metrics;
+    const devices = node?.devices ?? [];
+    const deviceId = b.deviceId ?? null;
+
+    let matchedDevices: NodeGpuDeviceMetrics[] = [];
+    if (deviceId !== null && devices.length > 0) {
+        matchedDevices = resolveMatchingDevices(deviceId, devices);
+    }
+
+    let inferredMode: GpuMemoryMode = "unknown";
+    let inferredClass: GpuDeviceClass = "unknown";
+    let inferredIsUma: boolean | null = null;
+    let inferredName: string | null = null;
+    let inferredDedicatedTotal: number | null = null;
+    let inferredSharedTotal: number | null = null;
+    let inferredEffectiveTotal: number | null = null;
+
+    if (matchedDevices.length === 1) {
+        const dev = matchedDevices[0]!;
+        inferredName = dev.name;
+        inferredClass = dev.gpuClass;
+        inferredIsUma = dev.isIntegratedUma;
+        inferredMode = dev.gpuClass === "integrated-uma" ? "integrated-uma" : dev.gpuClass === "discrete" ? "discrete-gddr" : "unknown";
+        inferredDedicatedTotal = dev.latest?.dedicatedTotalBytes ?? null;
+        inferredSharedTotal = dev.latest?.sharedTotalBytes ?? null;
+        inferredEffectiveTotal = dev.latest?.effectiveTotalBytes ?? null;
+    } else if (matchedDevices.length >= 2) {
+        const hasDiscrete = matchedDevices.some((d) => d.gpuClass === "discrete");
+        const hasUma = matchedDevices.some((d) => d.gpuClass === "integrated-uma");
+        if (hasDiscrete && hasUma) {
+            inferredMode = "hybrid-uma";
+            inferredEffectiveTotal = node?.combinedPool?.combinedTotalBytes ?? null;
+        } else if (hasUma && !hasDiscrete) {
+            inferredMode = "integrated-uma";
+            inferredClass = "integrated-uma";
+            inferredIsUma = true;
+            inferredEffectiveTotal = node?.combinedPool?.umaTotalBytes ?? null;
+        } else if (hasDiscrete && !hasUma) {
+            inferredMode = "discrete-gddr";
+            inferredClass = "discrete";
+            inferredIsUma = false;
+            inferredEffectiveTotal = node?.combinedPool?.discreteTotalBytes ?? null;
+        }
+    } else if (deviceId === null && devices.length > 0) {
+        const discreteDevices = devices.filter((d) => d.gpuClass === "discrete");
+        const umaDevices = devices.filter((d) => d.gpuClass === "integrated-uma");
+        if (umaDevices.length > 0 && discreteDevices.length === 0) {
+            // Pure integrated UMA host (no discrete GPU present).
+            inferredMode = "integrated-uma";
+            inferredClass = "integrated-uma";
+            inferredIsUma = true;
+            if (devices.length === 1) {
+                const only = devices[0]!;
+                inferredName = only.name;
+                inferredDedicatedTotal = only.latest?.dedicatedTotalBytes ?? null;
+                inferredSharedTotal = only.latest?.sharedTotalBytes ?? null;
+                inferredEffectiveTotal = only.latest?.effectiveTotalBytes ?? null;
+            } else {
+                inferredEffectiveTotal = node?.combinedPool?.umaTotalBytes ?? null;
+            }
+        } else if (discreteDevices.length > 0 && umaDevices.length > 0) {
+            // Hybrid discrete + UMA host: treat process-wide samples as hybrid-UMA ONLY when
+            // the UMA device is actively participating in the pool (never mask pure-discrete spills).
+            const explicitActive = work.activeDevices.flatMap((token) => resolveMatchingDevices(token, devices));
+            const activeIncludesUma = explicitActive.some((d) => d.gpuClass === "integrated-uma");
+            const activePool = node?.combinedPool;
+            const umaCarrying = umaDevices.some((d) => d.carryingModelWeights);
+            if (activeIncludesUma || activePool?.bothCarryingWeights === true || umaCarrying) {
+                inferredMode = "hybrid-uma";
+                inferredEffectiveTotal = activePool?.combinedTotalBytes ?? null;
+            }
+        } else if (discreteDevices.length > 0 && umaDevices.length === 0) {
+            inferredMode = "discrete-gddr";
+            inferredClass = "discrete";
+            inferredIsUma = false;
+            if (devices.length === 1) {
+                const only = devices[0]!;
+                inferredName = only.name;
+                inferredDedicatedTotal = only.latest?.dedicatedTotalBytes ?? null;
+                inferredSharedTotal = only.latest?.sharedTotalBytes ?? null;
+                inferredEffectiveTotal = only.latest?.effectiveTotalBytes ?? null;
+            }
+        }
+    }
+
+    if (b.deviceName == null && inferredName !== null) {
+        b.deviceName = inferredName;
+    }
+
+    const inferredUmaIntentional = inferredMode === "integrated-uma" || inferredMode === "hybrid-uma";
+    for (let i = 0; i < b.samples.length; i += 1) {
+        const sample = b.samples[i]!;
+        const flags = work.sampleFlags[i]!;
+        if ((sample.memoryMode ?? "unknown") === "unknown" && inferredMode !== "unknown" && !flags.explicitDiscrete) {
+            sample.memoryMode = inferredMode;
+            if ((sample.gpuClass ?? "unknown") === "unknown" && inferredClass !== "unknown") {
+                sample.gpuClass = inferredClass;
+            }
+            if (sample.isIntegratedUma == null && inferredIsUma !== null) {
+                sample.isIntegratedUma = inferredIsUma;
+            }
+            if (inferredUmaIntentional) {
+                sample.umaMode = sample.umaMode ?? true;
+                sample.umaIntentionalShared = true;
+                if (flags.usable && !flags.explicitDiscreteSpilled) {
+                    sample.spilled = false;
+                }
+            }
+        }
+        if (sample.dedicatedTotalBytes == null && inferredDedicatedTotal !== null) {
+            sample.dedicatedTotalBytes = inferredDedicatedTotal;
+        }
+        if (sample.sharedTotalBytes == null && inferredSharedTotal !== null) {
+            sample.sharedTotalBytes = inferredSharedTotal;
+        }
+        if (sample.effectiveTotalBytes == null && inferredEffectiveTotal !== null) {
+            sample.effectiveTotalBytes = inferredEffectiveTotal;
+        }
+    }
+
+    const latest = b.latest ?? b.samples.at(-1) ?? null;
+    b.memoryMode = latest?.memoryMode ?? (inferredMode !== "unknown" ? inferredMode : "unknown");
+    b.gpuClass = latest?.gpuClass ?? (inferredClass !== "unknown" ? inferredClass : "unknown");
+    b.isIntegratedUma = latest?.isIntegratedUma ?? inferredIsUma;
+    b.umaMode = latest?.umaMode ?? (b.memoryMode === "integrated-uma" || b.memoryMode === "hybrid-uma" ? true : b.memoryMode === "discrete-gddr" ? false : null);
+    b.dedicatedTotalBytes = latest?.dedicatedTotalBytes ?? inferredDedicatedTotal;
+    b.sharedTotalBytes = latest?.sharedTotalBytes ?? inferredSharedTotal;
+    b.effectiveTotalBytes = latest?.effectiveTotalBytes ?? inferredEffectiveTotal;
 }
 
 /**
  * First/last seen and warning counts describe retained telemetry, not wall-clock
  * polling. Backend process IDs are not in this contract: scope by producer
- * instance, node and backend, falling back to session when instance is unknown.
+ * instance, node, backend and device_id (when present), falling back to session
+ * when instance is unknown.
  */
 export function deriveGpuMemory(events: Iterable<ObservatoryEvent>): GpuMetrics {
     const backends = new Map<string, BackendWork>();
+    const nodeEvents: ObservatoryEvent[] = [];
     for (const event of events) {
+        if (isNodeGpuDeviceEvent(event)) {
+            nodeEvents.push(event);
+        }
         if (!isGpuEvent(event)) {
             continue;
         }
@@ -144,23 +575,61 @@ export function deriveGpuMemory(events: Iterable<ObservatoryEvent>): GpuMetrics 
         }
         const instanceId = producerInstance(event);
         const backend = text(a.backend);
-        const key = JSON.stringify([event.producer.name, event.producer.node_id, instanceId, instanceId === null ? event.session_id : null, backend]);
+        const deviceId = backendDeviceId(event);
+        const sessionFallback = instanceId === null ? event.session_id : null;
+        const nodeScopeKey = JSON.stringify([event.producer.name, event.producer.node_id, instanceId, sessionFallback]);
+        const key = JSON.stringify([event.producer.name, event.producer.node_id, instanceId, sessionFallback, backend, deviceId]);
         let work = backends.get(key);
         if (!work) {
             work = {
+                nodeScopeKey,
                 metrics: {
-                    key, backend, producer: event.producer.name, nodeId: event.producer.node_id,
-                    instanceId, synthetic: event.producer.synthetic === true, samples: [], latest: null,
-                    fittedCtx: null, contextChanges: [], warnings: [],
+                    key,
+                    backend,
+                    producer: event.producer.name,
+                    nodeId: event.producer.node_id,
+                    instanceId,
+                    synthetic: event.producer.synthetic === true,
+                    samples: [],
+                    latest: null,
+                    fittedCtx: null,
+                    contextChanges: [],
+                    warnings: [],
+                    deviceId,
+                    deviceName: null,
+                    gpuClass: "unknown",
+                    memoryMode: "unknown",
+                    isIntegratedUma: null,
+                    umaMode: null,
+                    dedicatedTotalBytes: null,
+                    sharedTotalBytes: null,
+                    effectiveTotalBytes: null,
                 },
-                warnings: new Map(), warningCounts: new Map(), sampleCount: null, epoch: 0,
+                sampleFlags: [],
+                warnings: new Map(),
+                warningCounts: new Map(),
+                sampleCount: null,
+                epoch: 0,
+                activeDevices: [],
             };
             backends.set(key, work);
         }
         const b = work.metrics;
         b.synthetic ||= event.producer.synthetic === true;
+        const sampleName = trimmedText(a.device_name) ?? trimmedText(a.gpu_name) ?? trimmedText(a.name);
+        if (sampleName !== null) {
+            b.deviceName = sampleName;
+        }
+        const activeDevs = stringList(a.active_devices);
+        const eventDevs = stringList(a.devices);
+        if (activeDevs.length > 0) {
+            work.activeDevices = activeDevs;
+        } else if (eventDevs.length > 0) {
+            work.activeDevices = eventDevs;
+        }
         const sample = gpuMemorySample(event);
         if (sample) {
+            const semantics = parseSampleMemorySemantics(a);
             if (sample.sampleCount !== null) {
                 if (work.sampleCount !== null && sample.sampleCount < work.sampleCount) {
                     work.epoch += 1;
@@ -169,6 +638,13 @@ export function deriveGpuMemory(events: Iterable<ObservatoryEvent>): GpuMetrics 
             }
             sample.epoch = work.epoch;
             b.samples.push(sample);
+            const sampleStatus = text(a.status);
+            const sampleUsable = (sampleStatus === null || sampleStatus === "ok") && sample.sampleCount !== 0;
+            work.sampleFlags.push({
+                usable: sampleUsable,
+                explicitDiscrete: semantics.explicitDiscrete,
+                explicitDiscreteSpilled: semantics.explicitDiscreteSpilled,
+            });
             b.latest = sample;
             if (Object.hasOwn(a, "fitted_ctx")) {
                 const previous = b.contextChanges.at(-1);
@@ -208,6 +684,17 @@ export function deriveGpuMemory(events: Iterable<ObservatoryEvent>): GpuMetrics 
             }
         }
     }
+    if (backends.size > 0) {
+        const nodeMap = new Map<string, NodeGpuMetrics>();
+        if (nodeEvents.length > 0) {
+            for (const node of deriveNodeGpuMemory(nodeEvents).nodes) {
+                nodeMap.set(node.key, node);
+            }
+        }
+        for (const work of backends.values()) {
+            enrichBackendFromNode(work, nodeMap.get(work.nodeScopeKey));
+        }
+    }
     return { backends: [...backends.values()].map((w) => w.metrics) };
 }
 
@@ -223,9 +710,6 @@ const MIB = 1024 * 1024;
 export const GPU_WEIGHT_ACTIVITY_THRESHOLD_BYTES = 512 * MIB;
 /** Minimum VRAM growth above a device's initial sample treated as observed model-weight load. */
 export const GPU_WEIGHT_GROWTH_THRESHOLD_BYTES = 256 * MIB;
-
-export type GpuDeviceClass = "discrete" | "integrated-uma" | "unknown";
-export type GpuWeightsEvidence = "reported" | "observed-vram" | "none";
 
 export interface NodeGpuDeviceSample {
     eventId: string;
@@ -398,10 +882,10 @@ export function nodeGpuDeviceSample(event: ObservatoryEvent): NodeGpuDeviceSampl
             candidateFree !== null && (effectiveTotalBytes === null || candidateFree <= effectiveTotalBytes) ? candidateFree : null;
         if (usedVramMibBytes !== null && (effectiveTotalBytes === null || usedVramMibBytes <= effectiveTotalBytes)) {
             effectiveUsedBytes = usedVramMibBytes;
-        } else if (genericUsedBytes !== null && (effectiveTotalBytes === null || genericUsedBytes <= effectiveTotalBytes)) {
-            effectiveUsedBytes = genericUsedBytes;
         } else if (effectiveTotalBytes !== null && effectiveFreeBytes !== null && effectiveTotalBytes >= effectiveFreeBytes) {
             effectiveUsedBytes = effectiveTotalBytes - effectiveFreeBytes;
+        } else if (genericUsedBytes !== null && (effectiveTotalBytes === null || genericUsedBytes <= effectiveTotalBytes)) {
+            effectiveUsedBytes = genericUsedBytes;
         } else {
             effectiveUsedBytes = null;
         }

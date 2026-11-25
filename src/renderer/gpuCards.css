@@ -47,9 +47,38 @@
     border: 1px solid var(--color-border);
 }
 
+.gpu-status-uma {
+    color: var(--color-text);
+    border: 1px solid color-mix(in srgb, var(--semantic-attention) 60%, var(--color-border));
+    background: color-mix(in srgb, var(--semantic-attention) 14%, var(--color-elevated));
+}
+
+.gpu-status-hybrid {
+    color: var(--color-textSuccess);
+    border: 1px solid color-mix(in srgb, var(--semantic-healthy) 60%, var(--color-border));
+    background: color-mix(in srgb, var(--semantic-healthy) 12%, var(--color-elevated));
+}
+
 .gpu-spill-detail {
     color: var(--color-textError);
     font-size: var(--font-size-sm);
+}
+
+.gpu-pool-note {
+    color: var(--color-muted);
+    font-size: var(--font-size-sm);
+}
+
+.gpu-card-discrete-gddr {
+    border-left: 3px solid var(--semantic-token);
+}
+
+.gpu-card-integrated-uma {
+    border-left: 3px solid var(--semantic-attention);
+}
+
+.gpu-card-hybrid-uma {
+    border-left: 3px solid var(--semantic-healthy);
 }
 
 .gpu-context {
@@ -80,6 +109,7 @@
 
 .gpu-legend-dedicated::before,
 .gpu-legend-shared::before,
+.gpu-legend-uma-shared::before,
 .gpu-legend-threshold::before {
     content: "";
     display: inline-block;
@@ -91,6 +121,7 @@
 
 .gpu-legend-dedicated::before { border-color: var(--color-accent); }
 .gpu-legend-shared::before { border-color: var(--color-warning); }
+.gpu-legend-uma-shared::before { border-color: var(--semantic-attention); }
 .gpu-legend-threshold::before { border-color: var(--color-error); }
 .gpu-legend-threshold::before { border-top-style: dashed; }
 
@@ -102,9 +133,11 @@
 
 .gpu-chart-dedicated { stroke: var(--color-accent); }
 .gpu-chart-shared { stroke: var(--color-warning); }
+.gpu-chart-uma-shared { stroke: var(--semantic-attention); }
 .gpu-chart-threshold { stroke: var(--color-error); stroke-dasharray: 4 3; }
 .gpu-chart-dot-dedicated { fill: var(--color-accent); }
 .gpu-chart-dot-shared { fill: var(--color-warning); }
+.gpu-chart-dot-uma-shared { fill: var(--semantic-attention); }
 .gpu-chart-dot-threshold { fill: var(--color-error); }
 
 .gpu-warning-scroll {
@@ -147,6 +180,7 @@
 .gpu-mix-pill,
 .gpu-device-pill,
 .gpu-class-badge,
+.gpu-mode-badge,
 .gpu-weights-badge,
 .gpu-pool-badge {
     display: inline-flex;
@@ -162,16 +196,24 @@
     color: var(--color-muted);
 }
 
-.gpu-class-discrete {
+.gpu-class-discrete,
+.gpu-mode-discrete-gddr {
     color: var(--color-link);
     border-color: color-mix(in srgb, var(--semantic-token) 55%, var(--color-border));
     background: color-mix(in srgb, var(--semantic-token) 12%, var(--color-elevated));
 }
 
-.gpu-class-integrated-uma {
+.gpu-class-integrated-uma,
+.gpu-mode-integrated-uma {
     color: var(--color-text);
     border-color: color-mix(in srgb, var(--semantic-attention) 60%, var(--color-border));
     background: color-mix(in srgb, var(--semantic-attention) 16%, var(--color-elevated));
+}
+
+.gpu-mode-hybrid-uma {
+    color: var(--color-textSuccess);
+    border-color: color-mix(in srgb, var(--semantic-healthy) 55%, var(--color-border));
+    background: color-mix(in srgb, var(--semantic-healthy) 12%, var(--color-elevated));
 }
 
 .gpu-weights-badge {
