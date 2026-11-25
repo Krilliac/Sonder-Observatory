@@ -4,7 +4,7 @@ import { isOrdered, onPrefixExtended } from "../replay/lookup";
 import {
     deriveGpuMemory,
     deriveNodeGpuMemory,
-    isGpuEvent,
+    isGpuBackendIndexEvent,
     isNodeGpuDeviceEvent,
     type GpuMetrics,
     type MultiGpuMetrics,
@@ -65,7 +65,7 @@ export function gpuMemoryAt(events: readonly ObservatoryEvent[], count = events.
     }
     let index = backendIndexes.get(events);
     if (!index) {
-        index = new SparseEventIndex(events, isGpuEvent, deriveGpuMemory, { backends: [] });
+        index = new SparseEventIndex(events, isGpuBackendIndexEvent, deriveGpuMemory, { backends: [] });
         backendIndexes.set(events, index);
     }
     return index.at(limit);

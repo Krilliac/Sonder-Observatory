@@ -2,6 +2,7 @@ import type {
     CombinedGpuPool,
     GpuBackendMetrics,
     GpuDeviceClass,
+    GpuMemoryMode,
     GpuMemorySample,
     GpuMetrics,
     GpuWarning,
@@ -40,6 +41,28 @@ export interface GpuCardModel {
     warnings: GpuWarning[];
     contextChangeCount: number;
     contextChanges: { fittedCtx: number | null; fitOutcome: string | null }[];
+    deviceId?: string | null;
+    deviceName?: string | null;
+    gpuClass?: GpuDeviceClass;
+    memoryMode?: GpuMemoryMode;
+    modeLabel?: string | null;
+    umaIntentionalShared?: boolean;
+    dedicatedTotalBytes?: number | null;
+    sharedTotalBytes?: number | null;
+    effectiveTotalBytes?: number | null;
+}
+
+export function gpuMemoryModeLabel(mode: GpuMemoryMode): string | null {
+    switch (mode) {
+        case "discrete-gddr":
+            return "Discrete GDDR";
+        case "integrated-uma":
+            return "Integrated UMA";
+        case "hybrid-uma":
+            return "Hybrid Discrete + UMA";
+        default:
+            return null;
+    }
 }
 
 export const GPU_WARNING_EXPLANATIONS: Record<string, string> = {
@@ -61,8 +84,8 @@ export function gpuWarningExplanation(warning: Pick<GpuWarning, "code" | "messag
         : warning.message ?? "Backend reported a GPU warning.";
 }
 
-function identity(backend: GpuBackendMetrics): string {
-    return [backend.backend, backend.producer, backend.nodeId, backend.instanceId].filter(Boolean).join(" · ");
+function identity(backend: GpuBackendMetrics, deviceId: string | null): string {
+    return [backend.backend, deviceId, backend.producer, backend.nodeId, backend.instanceId].filter(Boolean).join(" · ");
 }
 
 function chartPoint(sample: GpuMemorySample): GpuChartPoint {
@@ -83,10 +106,16 @@ export function gpuCardModels(metrics: GpuMetrics): GpuCardModel[] {
         .map((backend) => {
             const latest = backend.latest ?? backend.samples.at(-1) ?? null;
             const hasTelemetry = (latest?.dedicatedBytes ?? null) !== null || (latest?.sharedBytes ?? null) !== null;
+            const deviceId = backend.deviceId ?? latest?.deviceId ?? null;
+            const deviceName = backend.deviceName ?? null;
+            const memoryMode: GpuMemoryMode = latest?.memoryMode ?? backend.memoryMode ?? "unknown";
+            const gpuClass: GpuDeviceClass = latest?.gpuClass ?? backend.gpuClass ?? "unknown";
+            const umaIntentionalShared = latest?.umaIntentionalShared ?? (memoryMode === "integrated-uma" || memoryMode === "hybrid-uma");
+            const title = deviceName ?? (deviceId ? `GPU ${deviceId}` : "GPU");
             return {
                 key: backend.key,
-                title: "GPU",
-                identity: identity(backend),
+                title,
+                identity: identity(backend, deviceId),
                 synthetic: backend.synthetic,
                 hasTelemetry,
                 latestDedicatedBytes: latest?.dedicatedBytes ?? null,
@@ -100,6 +129,15 @@ export function gpuCardModels(metrics: GpuMetrics): GpuCardModel[] {
                 warnings: backend.warnings,
                 contextChangeCount: Math.max(0, backend.contextChanges.length - 1),
                 contextChanges: backend.contextChanges.slice(-8).map((change) => ({ fittedCtx: change.fittedCtx, fitOutcome: change.fitOutcome })),
+                deviceId,
+                deviceName,
+                gpuClass,
+                memoryMode,
+                modeLabel: gpuMemoryModeLabel(memoryMode),
+                umaIntentionalShared,
+                dedicatedTotalBytes: latest?.dedicatedTotalBytes ?? backend.dedicatedTotalBytes ?? null,
+                sharedTotalBytes: latest?.sharedTotalBytes ?? backend.sharedTotalBytes ?? null,
+                effectiveTotalBytes: latest?.effectiveTotalBytes ?? backend.effectiveTotalBytes ?? null,
             };
         });
 }
@@ -109,10 +147,12 @@ const CHART_HEIGHT = 160;
 const PAD_X = 45;
 const PAD_Y = 20;
 
-function valueMax(points: readonly GpuChartPoint[]): number {
+function valueMax(points: readonly GpuChartPoint[], includeThreshold = true): number {
     return Math.max(
         1,
-        ...points.flatMap((point) => [point.dedicatedBytes, point.sharedBytes, point.spillLimitBytes].filter((v): v is number => v !== null)),
+        ...points.flatMap((point) =>
+            [point.dedicatedBytes, point.sharedBytes, includeThreshold ? point.spillLimitBytes : null].filter((v): v is number => v !== null),
+        ),
     );
 }
 
@@ -147,43 +187,63 @@ function svgText(text: string, attrs: Record<string, string | number>): SVGEleme
 }
 
 /** The actual SVG paths, separated from DOM creation for renderer tests. */
-export function gpuChartPaths(points: readonly GpuChartPoint[]): { dedicated: string; shared: string; threshold: string; maxBytes: number } {
-    const maxBytes = valueMax(points);
+export function gpuChartPaths(
+    points: readonly GpuChartPoint[],
+    options: { includeThreshold?: boolean } = {},
+): { dedicated: string; shared: string; threshold: string; maxBytes: number } {
+    const includeThreshold = options.includeThreshold ?? true;
+    const maxBytes = valueMax(points, includeThreshold);
     return {
         dedicated: pathFor(points, "dedicatedBytes", maxBytes),
         shared: pathFor(points, "sharedBytes", maxBytes),
-        threshold: pathFor(points, "spillLimitBytes", maxBytes),
+        threshold: includeThreshold ? pathFor(points, "spillLimitBytes", maxBytes) : "",
         maxBytes,
     };
 }
 
+function showSpillThresholdFor(model: GpuCardModel): boolean {
+    const mode = model.memoryMode ?? "unknown";
+    return model.spilled === true || (mode !== "integrated-uma" && mode !== "hybrid-uma");
+}
+
 function chart(model: GpuCardModel): SVGElement | null {
     if (model.points.length === 0 || !model.points.some((p) => p.dedicatedBytes !== null || p.sharedBytes !== null)) return null;
-    const paths = gpuChartPaths(model.points);
+    const mode = model.memoryMode ?? "unknown";
+    const showThreshold = showSpillThresholdFor(model);
+    const isUmaLike = mode === "integrated-uma" || mode === "hybrid-uma";
+    const paths = gpuChartPaths(model.points, { includeThreshold: showThreshold });
     const max = paths.maxBytes;
     const first = model.points[0]!.monoNs;
     const last = model.points.at(-1)!.monoNs;
     const span = Math.max(1, last - first);
     const pointX = (point: GpuChartPoint) => PAD_X + ((point.monoNs - first) / span) * (CHART_WIDTH - PAD_X * 2);
     const pointY = (value: number) => CHART_HEIGHT - PAD_Y - (value / max) * (CHART_HEIGHT - PAD_Y * 2);
+    const sharedSeriesClass = isUmaLike && model.spilled !== true ? "gpu-chart-uma-shared" : "gpu-chart-shared";
+    const sharedDotClass = isUmaLike && model.spilled !== true ? "gpu-chart-dot-uma-shared" : "gpu-chart-dot-shared";
+    const ariaLabel =
+        mode === "integrated-uma"
+            ? `Integrated UMA GPU carveout and shared GTT memory, 0 to ${fmtBytes(max)}, over ${((last - first) / 1e9).toFixed(3)} seconds`
+            : mode === "hybrid-uma" && !showThreshold
+              ? `Hybrid discrete GDDR and iGPU UMA shared memory, 0 to ${fmtBytes(max)}, over ${((last - first) / 1e9).toFixed(3)} seconds`
+              : `GPU dedicated and shared memory, 0 to ${fmtBytes(max)}, over ${((last - first) / 1e9).toFixed(3)} seconds; dashed line is the shared spill limit`;
     const el = svg("svg", {
         class: "gpu-chart",
         viewBox: `0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`,
         role: "img",
-        "aria-label": `GPU dedicated and shared memory, 0 to ${fmtBytes(max)}, over ${((last - first) / 1e9).toFixed(3)} seconds; dashed line is the shared spill limit`,
+        "aria-label": ariaLabel,
     });
     el.append(
         svg("path", { class: "gpu-chart-dedicated", d: paths.dedicated, "aria-hidden": "true" }),
-        svg("path", { class: "gpu-chart-shared", d: paths.shared, "aria-hidden": "true" }),
-        svg("path", { class: "gpu-chart-threshold", d: paths.threshold, "aria-hidden": "true" }),
+        svg("path", { class: sharedSeriesClass, d: paths.shared, "aria-hidden": "true" }),
+        ...(showThreshold ? [svg("path", { class: "gpu-chart-threshold", d: paths.threshold, "aria-hidden": "true" })] : []),
         svgText(fmtBytes(max), { class: "gpu-chart-axis-label", x: 2, y: PAD_Y - 5 }),
         svgText("0 B", { class: "gpu-chart-axis-label", x: 2, y: CHART_HEIGHT - PAD_Y + 4 }),
         svgText("0 s", { class: "gpu-chart-axis-label", x: PAD_X, y: CHART_HEIGHT - 2 }),
         svgText(`${((last - first) / 1e9).toFixed(3)} s`, { class: "gpu-chart-axis-label", x: CHART_WIDTH - PAD_X, y: CHART_HEIGHT - 2, "text-anchor": "end" }),
         ...model.points.flatMap((point) => [
             point.dedicatedBytes === null ? null : svg("circle", { class: "gpu-chart-dot-dedicated", cx: pointX(point), cy: pointY(point.dedicatedBytes), r: 2.5 }),
-            point.sharedBytes === null ? null : svg("circle", { class: "gpu-chart-dot-shared", cx: pointX(point), cy: pointY(point.sharedBytes), r: 2.5 }),
-            point.spillLimitBytes === null ? null : svg("circle", { class: "gpu-chart-dot-threshold", cx: pointX(point), cy: pointY(point.spillLimitBytes), r: 2 }),
+            point.sharedBytes === null ? null : svg("circle", { class: sharedDotClass, cx: pointX(point), cy: pointY(point.sharedBytes), r: 2.5 }),
+            !showThreshold || point.spillLimitBytes === null ? null : svg("circle", { class: "gpu-chart-dot-threshold", cx: pointX(point), cy: pointY(point.spillLimitBytes), r: 2 }),
         ].filter((item): item is SVGElement => item !== null)),
     );
     return el;
@@ -209,37 +269,150 @@ function warningTable(warnings: readonly GpuWarning[]): HTMLElement {
     return h("div", { class: "gpu-warning-scroll", role: "region", "aria-label": "Backend warnings in retained telemetry", tabindex: "0" }, table);
 }
 
+/** Calm informational pool note for integrated UMA / hybrid UMA cards (never an error banner). */
+export function gpuPoolDetail(model: GpuCardModel): string | null {
+    if (!model.hasTelemetry || model.spilled === true) {
+        return null;
+    }
+    if (model.memoryMode === "integrated-uma") {
+        return "Intentional unified memory pool (GTT) — shared system RAM is primary GPU memory, not VRAM spill.";
+    }
+    if (model.memoryMode === "hybrid-uma") {
+        return "Hybrid discrete GDDR + iGPU UMA pool — shared system RAM hosts intentional iGPU allocations.";
+    }
+    return null;
+}
+
 /** Text rendered on the card; absent data never reads as a zero measurement. */
 export function gpuCardText(model: GpuCardModel): { status: string; memory: string; spillDetail: string | null } {
-    const status = model.spilled === true ? "SPILL" : model.spilled === false ? "No spill reported" : "Spill state unavailable";
-    const memory = model.hasTelemetry
-        ? `${model.latestDedicatedBytes === null ? "unknown" : fmtBytes(model.latestDedicatedBytes)} dedicated · ${model.latestSharedBytes === null ? "unknown" : fmtBytes(model.latestSharedBytes)} shared`
-        : "no GPU telemetry";
+    const mode = model.memoryMode ?? "unknown";
+    const isUma = mode === "integrated-uma";
+    const isHybrid = mode === "hybrid-uma";
+    const isDiscrete = mode === "discrete-gddr";
+
+    let status: string;
+    if (model.spilled === true) {
+        status = "SPILL";
+    } else if (isUma) {
+        status = model.hasTelemetry ? "UMA Unified Pool" : "UMA state unavailable";
+    } else if (isHybrid) {
+        status = model.hasTelemetry ? "Hybrid UMA Pool" : "Hybrid pool state unavailable";
+    } else if (model.spilled === false) {
+        status = "No spill reported";
+    } else {
+        status = "Spill state unavailable";
+    }
+
+    let memory: string;
+    if (!model.hasTelemetry) {
+        memory = "no GPU telemetry";
+    } else {
+        const d = model.latestDedicatedBytes;
+        const s = model.latestSharedBytes;
+        const dText = d === null ? "unknown" : fmtBytes(d);
+        const sText = s === null ? "unknown" : fmtBytes(s);
+        if (isUma) {
+            const sumUsed = d !== null && s !== null ? d + s : null;
+            const effectiveUsed = sumUsed !== null ? (Number.isSafeInteger(sumUsed) ? sumUsed : null) : (s ?? d);
+            const effectiveTotal = model.effectiveTotalBytes ?? null;
+            if (effectiveUsed !== null && effectiveTotal !== null) {
+                memory = `${fmtBytes(effectiveUsed)} / ${fmtBytes(effectiveTotal)} UMA pool · ${dText} carveout · ${sText} shared GTT`;
+            } else if (effectiveUsed !== null && d !== null && s !== null) {
+                memory = `${fmtBytes(effectiveUsed)} effective UMA · ${dText} carveout · ${sText} shared GTT`;
+            } else {
+                memory = `${dText} carveout · ${sText} shared GTT`;
+            }
+        } else if (isHybrid) {
+            const combinedTotal = model.effectiveTotalBytes ?? null;
+            memory =
+                combinedTotal !== null
+                    ? `${dText} dedicated GDDR · ${sText} UMA shared · ${fmtBytes(combinedTotal)} combined pool`
+                    : `${dText} dedicated GDDR · ${sText} UMA shared`;
+        } else if (isDiscrete) {
+            const dedicatedTotal = model.dedicatedTotalBytes ?? null;
+            memory =
+                d !== null && dedicatedTotal !== null
+                    ? `${dText} / ${fmtBytes(dedicatedTotal)} dedicated GDDR · ${sText} shared`
+                    : `${dText} dedicated GDDR · ${sText} shared`;
+        } else {
+            memory = `${dText} dedicated · ${sText} shared`;
+        }
+    }
+
     const spillDetail = model.spilled === true ? "overflow in shared system RAM; decode 2-15x slower" : null;
     return { status, memory, spillDetail };
 }
 
 function card(model: GpuCardModel): HTMLElement {
+    const mode = model.memoryMode ?? "unknown";
     const { status, memory, spillDetail } = gpuCardText(model);
-    const statusClass = model.spilled === true ? "gpu-status-spill" : "gpu-status-ok";
+    const poolDetail = gpuPoolDetail(model);
+    const showThreshold = showSpillThresholdFor(model);
+    const isUmaLike = mode === "integrated-uma" || mode === "hybrid-uma";
+    const statusClass =
+        model.spilled === true
+            ? "gpu-status-spill"
+            : mode === "integrated-uma"
+              ? "gpu-status-uma"
+              : mode === "hybrid-uma"
+                ? "gpu-status-hybrid"
+                : "gpu-status-ok";
     const plot = chart(model);
+    const dedicatedLegend = mode === "integrated-uma" ? "BIOS carveout" : mode === "discrete-gddr" || mode === "hybrid-uma" ? "Dedicated GDDR" : "Dedicated";
+    const sharedLegend =
+        mode === "integrated-uma"
+            ? "Shared GTT (UMA)"
+            : mode === "hybrid-uma"
+              ? "UMA shared (GTT)"
+              : mode === "discrete-gddr"
+                ? "Shared (spill)"
+                : "Shared";
+    const sharedLegendClass = isUmaLike && model.spilled !== true ? "gpu-legend-uma-shared" : "gpu-legend-shared";
+    const cardAttrs: Record<string, string> = {
+        class: `gpu-card gpu-card-${mode} card`,
+        "data-gpu-key": model.key,
+        "data-gpu-mode": mode,
+        "data-gpu-spilled": model.spilled === true ? "true" : "false",
+    };
+    if (model.deviceId) {
+        cardAttrs["data-gpu-device"] = model.deviceId;
+    }
     return h(
         "article",
-        { class: "gpu-card card", "data-gpu-key": model.key },
-        h("header", { class: "gpu-card-header" }, h("div", {}, h("h3", { text: model.title }), h("p", { class: "gpu-identity", text: model.identity || "backend identity unavailable" })), model.synthetic ? h("span", { class: "tag tag-synthetic", text: "synthetic" }) : null),
+        cardAttrs,
+        h(
+            "header",
+            { class: "gpu-card-header" },
+            h(
+                "div",
+                {},
+                h(
+                    "div",
+                    { class: "gpu-node-title-row" },
+                    h("h3", { text: model.title }),
+                    model.deviceId ? h("span", { class: "gpu-device-pill mono", text: model.deviceId }) : null,
+                    model.modeLabel ? h("span", { class: `gpu-mode-badge gpu-mode-${mode}`, text: model.modeLabel }) : null,
+                ),
+                h("p", { class: "gpu-identity", text: model.identity || "backend identity unavailable" }),
+            ),
+            model.synthetic ? h("span", { class: "tag tag-synthetic", text: "synthetic" }) : null,
+        ),
         h("div", { class: "gpu-summary" },
             h("div", { class: "gpu-memory-value", text: memory }),
             h("div", { class: `gpu-status ${statusClass}`, text: status, role: "status" }),
             spillDetail ? h("div", { class: "gpu-spill-detail", text: spillDetail }) : null,
+            poolDetail ? h("div", { class: "gpu-pool-note", text: poolDetail }) : null,
             h("div", { class: "gpu-context", text: `Fitted context: ${model.fittedCtx === null ? "not reported" : model.fittedCtx.toLocaleString()}` }),
-            model.latestSpillLimitBytes !== null ? h("div", { class: "gpu-context", text: `Spill limit: ${fmtBytes(model.latestSpillLimitBytes)} (reported baseline + threshold)` }) : null,
+            showThreshold && model.latestSpillLimitBytes !== null
+                ? h("div", { class: "gpu-context", text: `Spill limit: ${fmtBytes(model.latestSpillLimitBytes)} (reported baseline + threshold)` })
+                : null,
         ),
         plot,
         model.points.length > 0 ? h("div", { class: "gpu-chart-meta", text: `last ${model.points.length} of ${model.totalSamples} retained samples · backend-reported${model.latestWallTime ? ` · last sample ${model.latestWallTime}` : ""}` }) : null,
         plot ? h("div", { class: "gpu-chart-legend", "aria-label": "Chart legend" },
-            h("span", { class: "gpu-legend-dedicated", text: "Dedicated" }),
-            h("span", { class: "gpu-legend-shared", text: "Shared" }),
-            h("span", { class: "gpu-legend-threshold", text: "Spill limit" }),
+            h("span", { class: "gpu-legend-dedicated", text: dedicatedLegend }),
+            h("span", { class: sharedLegendClass, text: sharedLegend }),
+            showThreshold ? h("span", { class: "gpu-legend-threshold", text: "Spill limit" }) : null,
         ) : null,
         model.contextChangeCount > 0 ? h("div", { class: "gpu-context-changes", text: `${model.contextChangeCount} fitted context change${model.contextChangeCount === 1 ? "" : "s"}` }) : null,
         model.warnings.length > 0 ? h("p", { class: "evidence", text: "Warnings: reported occurrences and first/last observations in retained telemetry; absence of repeats does not mean resolved." }) : null,
