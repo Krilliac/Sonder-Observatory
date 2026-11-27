@@ -148,6 +148,13 @@ function streamOfEvent(event: ObservatoryEvent): string {
     return typeof named === "string" ? named : "";
 }
 
+/** Limits on producer-supplied cursor material (stream names and event ids). */
+export const MAX_CURSOR_STREAMS = 8;
+export const MAX_CURSOR_STREAM_NAME_CHARS = 64;
+export const MAX_CURSOR_ID_CHARS = 256;
+export const MAX_CURSOR_HEADER_CHARS = 1024;
+const CURSOR_STREAM_NAME = /^[A-Za-z0-9._-]*$/;
+
 /** Producer instance an event id belongs to: the text before its last '-'. */
 function cursorInstance(id: string): string {
     const dash = id.lastIndexOf("-");
@@ -657,11 +664,23 @@ export class LiveIngestClient {
      * a producer restart and are dropped.
      */
     private recordCursor(id: string, stream: string): void {
+        if (
+            id.length > MAX_CURSOR_ID_CHARS ||
+            stream.length > MAX_CURSOR_STREAM_NAME_CHARS ||
+            !CURSOR_STREAM_NAME.test(stream)
+        ) {
+            return;
+        }
         const instance = cursorInstance(id);
         for (const [name, held] of this.cursors) {
             if (cursorInstance(held) !== instance) {
                 this.cursors.delete(name);
             }
+        }
+        // The default stream is never refused; named streams leave it a slot.
+        const namedLimit = this.cursors.has("") ? MAX_CURSOR_STREAMS : MAX_CURSOR_STREAMS - 1;
+        if (stream !== "" && !this.cursors.has(stream) && this.cursors.size >= namedLimit) {
+            return;
         }
         this.cursors.set(stream, id);
         if (this.cursors.size === 1) {
@@ -670,7 +689,8 @@ export class LiveIngestClient {
         }
         const named = [...this.cursors.keys()].filter((name) => name !== "").sort();
         const ordered = this.cursors.has("") ? ["", ...named] : named;
-        this.statusValue.lastEventId = ordered.map((name) => this.cursors.get(name)!).join(",");
+        const joined = ordered.map((name) => this.cursors.get(name)!).join(",");
+        this.statusValue.lastEventId = joined.length <= MAX_CURSOR_HEADER_CHARS ? joined : this.cursors.get(ordered[0]!)!;
     }
 
     private ingest(text: string, sseId: string | null, trackSourceCursor: boolean): void {
