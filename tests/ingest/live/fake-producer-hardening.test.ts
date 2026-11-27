@@ -66,17 +66,24 @@ describe("legacy fake producer (scripts/fake-producer.mjs)", () => {
         }
     });
 
-    function start(args: string[]): Promise<{ child: ChildProcess; out: string; code: number | null }> {
+    function start(args: string[]): Promise<{ child: ChildProcess; out: string; code: number | null; url: string | null }> {
         const script = fileURLToPath(new URL("../../../scripts/fake-producer.mjs", import.meta.url));
         const child = spawn(process.execPath, [script, ...args], { stdio: ["ignore", "pipe", "pipe"] });
         children.push(child);
         let out = "";
         return new Promise((resolve) => {
-            const done = (code: number | null) => resolve({ child, out, code });
+            let settled = false;
+            const done = (code: number | null, url: string | null = null) => {
+                if (!settled) {
+                    settled = true;
+                    resolve({ child, out, code, url });
+                }
+            };
             child.stdout!.on("data", (d: Buffer) => {
                 out += d.toString();
-                if (out.includes("fake producer: ws://")) {
-                    done(null);
+                const match = out.match(/fake producer: (ws:\/\/\S+) .*\r?\n/);
+                if (match) {
+                    done(null, match[1]!);
                 }
             });
             child.stderr!.on("data", (d: Buffer) => {
@@ -108,10 +115,10 @@ describe("legacy fake producer (scripts/fake-producer.mjs)", () => {
     }, 20_000);
 
     it("refuses a cross-origin page but accepts the Observatory origin and non-browser clients", async () => {
-        const port = 20_000 + Math.floor(Math.random() * 20_000);
-        const r = await start(["--port", String(port)]);
+        const r = await start(["--port", "0"]);
         expect(r.code).toBeNull();
-        const url = `ws://127.0.0.1:${port}`;
+        expect(r.url).toMatch(/^ws:\/\/127\.0\.0\.1:[1-9]\d*$/);
+        const url = r.url!;
         expect(await connect(url, "https://evil.example")).toBe("refused");
         expect(await connect(url, "http://127.0.0.1:5173")).toBe("open");
         expect(await connect(url)).toBe("open");
