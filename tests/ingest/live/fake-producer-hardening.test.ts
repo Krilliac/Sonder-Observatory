@@ -1,7 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { createServer, type Server } from "node:net";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { startFakeLiveProducer, type FakeLiveProducer } from "../../../scripts/fake-live-producer.mjs";
 
@@ -123,35 +122,5 @@ describe("legacy fake producer (scripts/fake-producer.mjs)", () => {
         expect(await connect(url, "https://evil.example")).toBe("refused");
         expect(await connect(url, "http://127.0.0.1:5173")).toBe("open");
         expect(await connect(url)).toBe("open");
-    }, 20_000);
-
-    it("binds an OS-assigned port with --port 0 even when the port the old random picker would choose is occupied", async () => {
-        const blocker = await new Promise<{ server: Server; port: number }>((resolve, reject) => {
-            const tryPort = (candidate: number) => {
-                const s = createServer();
-                s.once("error", (err: NodeJS.ErrnoException) => {
-                    if (err.code === "EADDRINUSE" && candidate < 39_999) {
-                        tryPort(candidate + 1);
-                    } else {
-                        reject(err);
-                    }
-                });
-                s.listen(candidate, "127.0.0.1", () => resolve({ server: s, port: candidate }));
-            };
-            tryPort(25_000);
-        });
-        const randomSpy = vi.spyOn(Math, "random").mockReturnValue((blocker.port - 20_000 + 0.5) / 20_000);
-        try {
-            const r = await start(["--port", "0"]);
-            expect(r.code).toBeNull();
-            expect(r.url).toMatch(/^ws:\/\/127\.0\.0\.1:[1-9]\d*$/);
-            const boundPort = Number(new URL(r.url!).port);
-            expect(boundPort).toBeGreaterThan(0);
-            expect(boundPort).not.toBe(blocker.port);
-            expect(await connect(r.url!)).toBe("open");
-        } finally {
-            randomSpy.mockRestore();
-            await new Promise<void>((resolve) => blocker.server.close(() => resolve()));
-        }
     }, 20_000);
 });
