@@ -49,6 +49,8 @@ export interface Inference3DInput {
     nowNs: number | null;
     /** Health backends per producer instance id (live connections). */
     health: ReadonlyMap<string, readonly HealthBackend[]>;
+    /** Declared telemetry level per producer instance id (live connections). */
+    declaredLevels?: ReadonlyMap<string, string>;
     /** Changes whenever `health` changes (cheap memo key). */
     healthStamp: string;
     /** Formats a mono_ns relative to the session start. */
@@ -275,7 +277,7 @@ export class Inference3DPanel {
             this.byIdSource = input.all;
             this.byId = new Map(input.all.map((e) => [e.event_id, e]));
         }
-        const model = derivePipeline(input.visible, { nowNs: input.nowNs, health: input.health });
+        const model = derivePipeline(input.visible, { nowNs: input.nowNs, health: input.health, declaredLevels: input.declaredLevels });
         this.model = model;
         this.rows = buildEntityRows(model, input.visible, input.relativeTime);
         if (this.selected && !this.rows.has(this.selected)) {

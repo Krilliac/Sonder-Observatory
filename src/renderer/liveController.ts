@@ -260,15 +260,21 @@ export class LiveController {
     }
 
     /** Health backends per producer instance (live connections that fetched their health link). */
-    healthByInstance(): { map: Map<string, readonly HealthBackend[]>; stamp: string } {
+    healthByInstance(): { map: Map<string, readonly HealthBackend[]>; levels: Map<string, string>; stamp: string } {
         const map = new Map<string, readonly HealthBackend[]>();
+        const levels = new Map<string, string>();
         for (const c of this.activeConnections) {
             const instance = c.identity?.instance_id;
             if (instance && c.health) {
                 map.set(instance, c.health.backends);
             }
+            const declared = c.discovery?.sampling_level ?? c.health?.telemetryLevel ?? null;
+            if (instance && declared) {
+                levels.set(instance, declared);
+            }
         }
-        return { map, stamp: [...map.entries()].map(([k, v]) => `${k}:${v.map((b) => `${b.name}=${b.capabilities.join("+")}`).join(",")}`).join(";") };
+        const stamp = [...map.entries()].map(([k, v]) => `${k}:${v.map((b) => `${b.name}=${b.capabilities.join("+")}`).join(",")}`).join(";");
+        return { map, levels, stamp: `${stamp}|${[...levels.entries()].map(([k, v]) => `${k}=${v}`).join(";")}` };
     }
 
     /** Active live node hardware & residency snapshots for Overview and live panels. */

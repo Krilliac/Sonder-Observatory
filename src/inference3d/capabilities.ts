@@ -6,8 +6,9 @@
  * `model.load.*.backend`), the capabilities that backend advertises
  * (`backend.registered.capabilities`, or `/v1/sonder/health`
  * `backends[].capabilities` when the live client fetched it), the sampler
- * (`request.started.sampler`), the telemetry level (`sampling.level`) and the
- * declared text capture policy. Sonder-Inference capability names are listed
+ * (`request.started.sampler`), the telemetry level (the declared discovery
+ * `sampling_level`, then health `telemetry.level`, else the highest
+ * `sampling.level` seen on events) and the declared text capture policy. Sonder-Inference capability names are listed
  * in its docs/BACKENDS.md (`token_logits`, `layer_telemetry`, …).
  */
 import { PANEL_LABELS, PANEL_ORDER, type Availability, type PanelAvailability, type PanelId, type ProducerCapabilities } from "./model";
@@ -25,7 +26,10 @@ export interface StreamFacts {
     /** backend.registered: backend -> capabilities. */
     registered: Map<string, string[]>;
     samplers: Set<string>;
+    /** Highest `sampling.level` seen on events (device samples are metrics-level, so this can understate the setting). */
     level: string | null;
+    /** Level the producer declares (discovery `sampling_level` / health `telemetry.level`); wins over `level`. */
+    declaredLevel: string | null;
     textCapture: string | null;
     requests: number;
     layerEvents: number;
@@ -51,6 +55,7 @@ export function emptyFacts(stream: string, producer: string, nodeId: string): St
         registered: new Map(),
         samplers: new Set(),
         level: null,
+        declaredLevel: null,
         textCapture: null,
         requests: 0,
         layerEvents: 0,
@@ -73,6 +78,11 @@ export function higherLevel(current: string | null, next: unknown): string | nul
         return current;
     }
     return current === null || LEVEL_RANK[next]! > LEVEL_RANK[current]! ? next : current;
+}
+
+/** The producer's declared level when it is a known level, else the highest level seen on events. */
+export function effectiveLevel(f: Pick<StreamFacts, "level" | "declaredLevel">): string | null {
+    return f.declaredLevel !== null && f.declaredLevel in LEVEL_RANK ? f.declaredLevel : f.level;
 }
 
 /** `text_capture` values that mean plaintext is recorded (protocol "full", Sonder-Inference "on"). */
@@ -134,7 +144,8 @@ export function producerCapabilities(f: StreamFacts, health?: readonly { name: s
         : `${who} capabilities are not advertised on this stream (no backend.registered event or health data)`;
     const panels: PanelAvailability[] = [];
     const runtime = isRuntime(f.role, f.producer);
-    const level = f.level ?? "unknown";
+    const effLevel = effectiveLevel(f);
+    const level = effLevel ?? "unknown";
 
     for (const id of PANEL_ORDER) {
         if (id === "pipeline") {
@@ -164,15 +175,15 @@ export function producerCapabilities(f: StreamFacts, health?: readonly { name: s
                         panel(
                             id,
                             "unavailable",
-                            `${who} does not expose layer telemetry (needs a backend advertising ${code("layer_telemetry")} and ${code("--telemetry-level deep")}; no Sonder Inference backend advertises it yet)`,
+                            `${who} does not expose layer telemetry (no ${code("layer_telemetry")} capability advertised)${effLevel === "deep" ? "" : ` and telemetry level is ${code(level)}, not ${code("deep")}`}; layer data needs a backend advertising ${code("layer_telemetry")}${effLevel === "deep" ? "" : ` at ${code("--telemetry-level deep")}`}; no Sonder Inference backend advertises it yet`,
                         ),
                     );
-                } else if (has === true && f.level !== "deep") {
+                } else if (has === true && effLevel !== "deep") {
                     panels.push(
                         panel(
                             id,
                             "unavailable",
-                            `${who} advertises ${code("layer_telemetry")} but events arrive at level ${code(level)}; restart with ${code("--telemetry-level deep")}`,
+                            `${who} advertises ${code("layer_telemetry")} but the telemetry level is ${code(level)}; restart with ${code("--telemetry-level deep")}`,
                         ),
                     );
                 } else if (has === true) {
@@ -197,7 +208,15 @@ export function producerCapabilities(f: StreamFacts, health?: readonly { name: s
                 }
                 const logits = allHave(r, "token_logits");
                 const backendSampler = f.samplers.has("backend") && !f.samplers.has("sonder");
-                if (logits === false || (logits === null && backendSampler)) {
+                if (id === "alternatives" && f.probabilityEvents > 0 && logits !== true) {
+                    panels.push(
+                        panel(
+                            id,
+                            "unavailable",
+                            `${who} emits token probabilities but no ${code("inference.sampling.candidates")} events${logits === false ? ` (it does not advertise ${code("token_logits")})` : ""}`,
+                        ),
+                    );
+                } else if (logits === false || (logits === null && backendSampler)) {
                     const sampler = backendSampler ? "; the backend samples, so output arrives as unit `chunk`" : "";
                     panels.push(panel(id, "unavailable", `${who} does not expose token logits${sampler}`));
                 } else if (id === "alternatives" && (logits === true || f.samplers.has("sonder"))) {
@@ -247,7 +266,7 @@ export function producerCapabilities(f: StreamFacts, health?: readonly { name: s
         backends: r.backends,
         backendCapabilities: r.caps,
         samplers: [...f.samplers].sort(),
-        level: f.level,
+        level: effLevel,
         textCapture: f.textCapture,
         panels,
     };

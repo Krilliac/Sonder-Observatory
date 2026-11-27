@@ -21,7 +21,7 @@ export interface ViewTabsHooks {
     getSelectedId(): string | null;
     isFollow(): boolean;
     describeSource(): string;
-    healthByInstance(): { map: Map<string, readonly HealthBackend[]>; stamp: string };
+    healthByInstance(): { map: Map<string, readonly HealthBackend[]>; levels: Map<string, string>; stamp: string };
     setHighlighted(ids: readonly string[]): void;
     selectEventById(id: string): void;
     selectEvent(event: ObservatoryEvent): void;
@@ -193,6 +193,7 @@ export class ViewTabsController {
                 visible,
                 nowNs: cursor.events.length > 0 ? cursor.originNs + cursor.position : null,
                 health: health.map,
+                declaredLevels: health.levels,
                 healthStamp: health.stamp,
                 relativeTime: (ns) => fmtRelNs(ns - cursor.originNs),
             });
