@@ -336,7 +336,13 @@ export function renderProbabilities(container: HTMLElement, model: PipelineModel
                 ? h("ul", { class: "i3d-prob-list", "aria-label": "Sampled token probability" }, bar("probability", latest.probability, "prob-sampled"))
                 : null,
             latest.probability !== null
-                ? h("p", { class: "muted small", text: `log-probability ${Math.log(latest.probability).toFixed(3)} (derived: ln p)` })
+                ? h("p", {
+                      class: "muted small",
+                      text:
+                          latest.probability > 0
+                              ? `log-probability ${Math.log(latest.probability).toFixed(3)} (derived: ln p)`
+                              : "log-probability -inf (derived: ln p)",
+                  })
                 : null,
             h("h4", { text: "Top alternatives" }),
             alternatives

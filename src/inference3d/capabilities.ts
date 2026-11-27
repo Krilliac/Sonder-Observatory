@@ -32,6 +32,8 @@ export interface StreamFacts {
     declaredLevel: string | null;
     textCapture: string | null;
     requests: number;
+    completedRequests: number;
+    completedProbsWithoutAlts: number;
     layerEvents: number;
     operatorEvents: number;
     probabilityEvents: number;
@@ -58,6 +60,8 @@ export function emptyFacts(stream: string, producer: string, nodeId: string): St
         declaredLevel: null,
         textCapture: null,
         requests: 0,
+        completedRequests: 0,
+        completedProbsWithoutAlts: 0,
         layerEvents: 0,
         operatorEvents: 0,
         probabilityEvents: 0,
@@ -228,7 +232,14 @@ export function producerCapabilities(f: StreamFacts, health?: readonly { name: s
                 const logits = anyHave(r, ["token_logits"]);
                 const logprobs = anyHave(r, ["logprobs"]);
                 const probCap = anyHave(r, ["token_logits", "logprobs"]);
-                const belowStandard = effLevel !== null && LEVEL_RANK[effLevel]! < LEVEL_RANK.standard!;
+                const declared = f.declaredLevel !== null && f.declaredLevel in LEVEL_RANK ? f.declaredLevel : null;
+                const seenBelowStandard = effLevel !== null && LEVEL_RANK[effLevel]! < LEVEL_RANK.standard!;
+                const noTokenEvents =
+                    f.tokenUnitEvents === 0 && f.chunkEvents === 0 && f.probabilityEvents === 0 && f.alternativeEvents === 0;
+                const belowStandard =
+                    declared !== null
+                        ? LEVEL_RANK[declared]! < LEVEL_RANK.standard!
+                        : seenBelowStandard && f.completedRequests > 0 && noTokenEvents;
                 const backendSampler = f.samplers.has("backend") && !f.samplers.has("sonder");
                 if (id === "alternatives") {
                     if (logprobs === true) {
@@ -238,6 +249,14 @@ export function producerCapabilities(f: StreamFacts, health?: readonly { name: s
                                     id,
                                     "unavailable",
                                     `${who} advertises ${code("logprobs")} but the telemetry level is ${code(level)}; restart with ${code("--telemetry-level standard")} or higher`,
+                                ),
+                            );
+                        } else if (f.completedProbsWithoutAlts > 0) {
+                            panels.push(
+                                panel(
+                                    id,
+                                    "unavailable",
+                                    `no alternatives emitted for this request (${who} emitted token probabilities without ${code("inference.sampling.candidates")} events)`,
                                 ),
                             );
                         } else {

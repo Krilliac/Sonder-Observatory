@@ -39,8 +39,11 @@ export const RATE_WINDOW_MS = 5000;
 export const MAX_CHUNKS = 160;
 /** Most recent token-candidate events kept for the probability panels. */
 export const MAX_TOKENS = 40;
+/** Maximum alternative candidates kept per token after sorting by probability. */
+export const MAX_ALTERNATIVES = 16;
 /** Finished requests kept in the scene; active ones are always kept. */
 export const MAX_FINISHED = 120;
+const MAX_PROBABILITY = 1 + 1e-6;
 const MAX_EVIDENCE = 60;
 const EVIDENCE_HEAD = 5;
 const MAX_STAGE_TRANSITIONS = 64;
@@ -58,6 +61,15 @@ export interface DeriveOptions {
 
 function num(v: unknown): number | null {
     return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/** Valid probability in [0, 1] (allowing floating-point overshoot up to 1 + 1e-6, clamped to 1). */
+function prob(v: unknown): number | null {
+    const n = num(v);
+    if (n === null || n < 0 || n > MAX_PROBABILITY) {
+        return null;
+    }
+    return n === 0 ? 0 : Math.min(1, n);
 }
 
 function int(v: unknown): number | null {
@@ -144,6 +156,8 @@ interface RequestWork {
     parentConflict: boolean;
     runId: string | null;
     runConflict: boolean;
+    probabilityEvents: number;
+    alternativeEvents: number;
 }
 
 function modelFor(
@@ -452,6 +466,8 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
                     parentConflict: false,
                     runId: null,
                     runConflict: false,
+                    probabilityEvents: 0,
+                    alternativeEvents: 0,
                 };
                 requests.set(activeKey, w);
                 if (!latest) {
@@ -552,6 +568,7 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
             if (allowed) {
                 f.textEvents += 1;
             }
+            const probability = prob(e.attributes.probability);
             chunks.push({
                 id: `chunk:${e.event_id}`,
                 eventId: e.event_id,
@@ -562,7 +579,7 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
                 elapsedMs: num(e.attributes.elapsed_ms),
                 unit,
                 tokens: n,
-                probability: num(e.attributes.probability),
+                probability,
                 text: allowed ? rawText : null,
                 textWithheld: rawText !== null && !allowed,
                 ns: e.mono_ns,
@@ -570,9 +587,11 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
             if (chunks.length > MAX_CHUNKS * 2) {
                 chunks.splice(0, chunks.length - MAX_CHUNKS);
             }
-            const probability = num(e.attributes.probability);
             if (probability !== null) {
                 f.probabilityEvents += 1;
+                if (req) {
+                    req.probabilityEvents += 1;
+                }
                 const token = tokenFor(e, reqKey, req?.entity.id ?? null);
                 token.eventId = e.event_id;
                 token.id = `tok:${e.event_id}`;
@@ -594,7 +613,11 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
             if (alternatives !== null) {
                 f.alternativeEvents += 1;
                 const reqKey = rid ? (latestRequestByBase.get(scopedRequestKey(stream, rid!))?.id ?? scopedRequestKey(stream, rid!)) : null;
-                const token = tokenFor(e, reqKey, (reqKey ? requests.get(reqKey)?.entity.id : undefined) ?? null);
+                const req = reqKey ? requests.get(reqKey) : undefined;
+                if (req) {
+                    req.alternativeEvents += 1;
+                }
+                const token = tokenFor(e, reqKey, req?.entity.id ?? null);
                 token.alternatives = alternatives;
                 token.candidatesEventId = e.event_id;
                 if (token.tokenId === null) {
@@ -708,6 +731,18 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
         o.ratePerSec /= RATE_WINDOW_MS / 1000;
     }
 
+    for (const w of requests.values()) {
+        if (w.entity.state === "completed") {
+            const f = facts.get(w.entity.stream);
+            if (f) {
+                f.completedRequests += 1;
+                if (w.probabilityEvents > 0 && w.alternativeEvents === 0) {
+                    f.completedProbsWithoutAlts += 1;
+                }
+            }
+        }
+    }
+
     const capabilities = [...facts.values()]
         .sort((a, b) => a.nodeId.localeCompare(b.nodeId) || a.producer.localeCompare(b.producer) || a.stream.localeCompare(b.stream))
         .map((f) => {
@@ -757,7 +792,7 @@ function kvFor(kv: Map<string, KvPool>, stream: string, e: ObservatoryEvent): Kv
     return pool;
 }
 
-/** `inference.sampling.candidates` `candidates`: [{token_id, probability, text?}]; sorted most probable first. */
+/** `inference.sampling.candidates` `candidates`: [{token_id, probability, text?}]; sorted most probable first, capped at MAX_ALTERNATIVES. */
 function readAlternatives(value: unknown, textAllowed: boolean): Alternative[] | null {
     if (!Array.isArray(value)) {
         return null;
@@ -768,13 +803,13 @@ function readAlternatives(value: unknown, textAllowed: boolean): Alternative[] |
             continue;
         }
         const o = item as Record<string, unknown>;
-        const p = num(o.probability);
+        const p = prob(o.probability);
         if (p === null) {
             continue;
         }
         out.push({ tokenId: int(o.token_id), probability: p, text: textAllowed && typeof o.text === "string" ? o.text : null });
     }
-    return out.length > 0 ? out.sort((a, b) => b.probability - a.probability) : null;
+    return out.length > 0 ? out.sort((a, b) => b.probability - a.probability).slice(0, MAX_ALTERNATIVES) : null;
 }
 
 /** Human label of a producer stream key (name @ node). */

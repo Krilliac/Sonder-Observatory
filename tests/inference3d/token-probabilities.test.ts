@@ -351,6 +351,73 @@ describe("token probabilities and alternatives capability rules", () => {
         expect(panel(m, "probabilities").status).toBe("available");
         expect(panel(m, "alternatives").status).toBe("waiting");
     });
+
+    it("stays waiting before the first token when seen level is metrics and no level is declared (token_logits and logprobs)", () => {
+        const logitsBeforeToken = [
+            ev(0, "backend.registered", { backend: "mock", capabilities: ["token_logits"] }),
+            ev(1, "session.created", { model: "mock:tiny", backend: "mock" }),
+            ev(2, "request.started", { kind: "generate", sampler: "sonder" }, { requestId: "r-logits" }),
+            ev(3, "inference.decode.started", { ttft_ms: 4 }, { requestId: "r-logits" }),
+        ];
+        const mLogits = derivePipeline(logitsBeforeToken);
+        expect(caps(mLogits).level).toBe("metrics");
+        expect(panel(mLogits, "probabilities").status).toBe("waiting");
+        expect(panel(mLogits, "probabilities").reason).not.toContain("--telemetry-level standard");
+
+        const logprobsBeforeToken = [
+            ...llamaserverIdle,
+            ev(2, "request.started", { kind: "generate", sampler: "backend" }, { requestId: "r-lp" }),
+            ev(3, "inference.decode.started", { ttft_ms: 4 }, { requestId: "r-lp" }),
+        ];
+        const mLogprobs = derivePipeline(logprobsBeforeToken);
+        expect(caps(mLogprobs).level).toBe("metrics");
+        expect(panel(mLogprobs, "probabilities").status).toBe("waiting");
+        expect(panel(mLogprobs, "probabilities").reason).not.toContain("--telemetry-level standard");
+        expect(panel(mLogprobs, "alternatives").status).toBe("waiting");
+        expect(panel(mLogprobs, "alternatives").reason).not.toContain("--telemetry-level standard");
+    });
+
+    it("advises restarting at standard level once a request completes with no token-level events at seen level metrics", () => {
+        const logitsCompleted = [
+            ev(0, "backend.registered", { backend: "mock", capabilities: ["token_logits"] }),
+            ev(1, "session.created", { model: "mock:tiny", backend: "mock" }),
+            ev(2, "request.started", { kind: "generate", sampler: "sonder" }, { requestId: "r-done" }),
+            ev(3, "request.completed", { completion_tokens: 12 }, { requestId: "r-done" }),
+        ];
+        const mLogits = derivePipeline(logitsCompleted);
+        expect(panel(mLogits, "probabilities").status).toBe("unavailable");
+        expect(panel(mLogits, "probabilities").reason).toContain("--telemetry-level standard");
+
+        const logprobsCompleted = [
+            ...llamaserverIdle,
+            ev(2, "request.started", { kind: "generate", sampler: "backend" }, { requestId: "r-done" }),
+            ev(3, "request.completed", { completion_tokens: 12 }, { requestId: "r-done" }),
+        ];
+        const mLogprobs = derivePipeline(logprobsCompleted);
+        expect(panel(mLogprobs, "probabilities").status).toBe("unavailable");
+        expect(panel(mLogprobs, "probabilities").reason).toContain("--telemetry-level standard");
+        expect(panel(mLogprobs, "alternatives").status).toBe("unavailable");
+        expect(panel(mLogprobs, "alternatives").reason).toContain("--telemetry-level standard");
+    });
+
+    it("does not leave alternatives waiting after a logprobs request completes with probabilities and zero candidates", () => {
+        const events = [
+            ...llamaserverIdle,
+            ev(2, "request.started", { kind: "generate", sampler: "backend" }, { requestId: "r-no-alts" }),
+            ev(
+                3,
+                "inference.token.generated",
+                { index: 0, unit: "token", count: 1, token_id: 13, probability: 0.75, probability_basis: "post_sampling" },
+                { requestId: "r-no-alts", level: "standard" },
+            ),
+            ev(4, "request.completed", { completion_tokens: 1 }, { requestId: "r-no-alts" }),
+        ];
+        const m = derivePipeline(events);
+        expect(panel(m, "probabilities").status).toBe("available");
+        const alts = panel(m, "alternatives");
+        expect(alts.status).toBe("unavailable");
+        expect(alts.reason).toContain("no alternatives emitted for this request");
+    });
 });
 
 describe("probability_basis derivation edge cases", () => {
@@ -446,6 +513,74 @@ describe("probability_basis derivation edge cases", () => {
         expect(m.tokens[2]!.alternatives).toHaveLength(2);
         expect(m.tokens[3]!.alternatives).toBeNull();
         expect(panel(m, "alternatives").status).toBe("available");
+    });
+
+    it("drops out-of-range token and candidate probabilities (-0.5, 1.5), allows 1 + 1e-6, and keeps 0", () => {
+        const events = [
+            ev(0, "backend.registered", { backend: "llamaserver", capabilities: LLAMASERVER_CAPS }),
+            ev(1, "session.created", { model: "fake-model", backend: "llamaserver", text_capture: "off" }),
+            ev(2, "request.started", { kind: "generate", sampler: "backend" }, { requestId: "r-range" }),
+            ev(3, "inference.token.generated", { index: 0, unit: "token", count: 1, token_id: 1, probability: -0.5 }, { requestId: "r-range", level: "standard" }),
+            ev(4, "inference.token.generated", { index: 1, unit: "token", count: 1, token_id: 2, probability: 1.5 }, { requestId: "r-range", level: "standard" }),
+            ev(5, "inference.token.generated", { index: 2, unit: "token", count: 1, token_id: 3, probability: 0 }, { requestId: "r-range", level: "standard" }),
+            ev(6, "inference.token.generated", { index: 3, unit: "token", count: 1, token_id: 4, probability: 1 + 5e-7 }, { requestId: "r-range", level: "standard" }),
+            ev(
+                7,
+                "inference.sampling.candidates",
+                {
+                    index: 2,
+                    sampled_token_id: 3,
+                    candidates: [
+                        { token_id: 10, probability: -0.5 },
+                        { token_id: 11, probability: 1.5 },
+                        { token_id: 12, probability: Number.NaN },
+                        { token_id: 13, probability: 0 },
+                        { token_id: 14, probability: 0.75 },
+                        { token_id: 15, probability: 1 + 5e-7 },
+                    ],
+                },
+                { requestId: "r-range", level: "standard" },
+            ),
+        ];
+        const m = derivePipeline(events);
+        expect(m.chunks[0]!.probability).toBeNull();
+        expect(m.chunks[1]!.probability).toBeNull();
+        expect(m.chunks[2]!.probability).toBe(0);
+        expect(m.chunks[3]!.probability).toBe(1);
+
+        expect(m.tokens).toHaveLength(2);
+        expect(m.tokens[0]).toMatchObject({ index: 2, tokenId: 3, probability: 0 });
+        expect(m.tokens[0]!.alternatives).toEqual([
+            { tokenId: 15, probability: 1, text: null },
+            { tokenId: 14, probability: 0.75, text: null },
+            { tokenId: 13, probability: 0, text: null },
+        ]);
+        expect(m.tokens[1]).toMatchObject({ index: 3, tokenId: 4, probability: 1 });
+    });
+
+    it("bounds readAlternatives to at most 16 entries after sorting (tested with 20,000 candidates)", () => {
+        const total = 20_000;
+        const candidates: { token_id: number; probability: number }[] = [];
+        for (let i = 0; i < total; i++) {
+            // Put the highest probabilities near the end so slicing before sorting would fail.
+            const p = i >= total - 16 ? 0.5 + (i - (total - 16) + 1) * 0.01 : (i % 100) * 0.0001;
+            candidates.push({ token_id: i, probability: p });
+        }
+        const m = derivePipeline([
+            ev(
+                0,
+                "inference.sampling.candidates",
+                { index: 0, sampled_token_id: total - 1, candidates },
+                { requestId: "r-big", level: "standard" },
+            ),
+        ]);
+        const alts = m.tokens[0]!.alternatives!;
+        expect(alts).toHaveLength(16);
+        expect(alts[0]!.tokenId).toBe(total - 1);
+        expect(alts[15]!.tokenId).toBe(total - 16);
+        for (let i = 1; i < alts.length; i++) {
+            expect(alts[i - 1]!.probability).toBeGreaterThanOrEqual(alts[i]!.probability);
+        }
     });
 });
 
@@ -599,5 +734,37 @@ describe("renderProbabilities and entity rows display probability_basis", () => 
         const { root } = render(events, { declaredLevels: new Map([[INSTANCE, "standard"]]) });
         const notice = root.findAll((el) => el.getAttribute("data-panel") === "probabilities")[0]!;
         expect(notice.textContent).toContain("Waiting for data.");
+    });
+
+    it("renders p = 0 without log-probability -Infinity", () => {
+        const events = [
+            ev(0, "backend.registered", { backend: "llamaserver", capabilities: LLAMASERVER_CAPS }),
+            ev(1, "session.created", { model: "fake-model", backend: "llamaserver", text_capture: "off" }),
+            ev(2, "request.started", { kind: "generate", sampler: "backend" }, { requestId: "r-zero" }),
+            ev(3, "inference.token.generated", { index: 0, unit: "token", count: 1, token_id: 9, probability: 0 }, { requestId: "r-zero", level: "standard" }),
+        ];
+        const { root } = render(events);
+        expect(root.byTestId("prob-sampled")!.textContent).toContain("0.000");
+        expect(root.textContent).not.toContain("-Infinity");
+        expect(root.textContent).toContain("log-probability -inf");
+    });
+
+    it("renders no alternatives emitted for this request after a logprobs request completes without candidates", () => {
+        const events = [
+            ev(0, "backend.registered", { backend: "llamaserver", capabilities: LLAMASERVER_CAPS }),
+            ev(1, "session.created", { model: "fake-model", backend: "llamaserver", text_capture: "off" }),
+            ev(2, "request.started", { kind: "generate", sampler: "backend" }, { requestId: "r-done-no-alts" }),
+            ev(
+                3,
+                "inference.token.generated",
+                { index: 0, unit: "token", count: 1, token_id: 13, probability: 0.75, probability_basis: "post_sampling" },
+                { requestId: "r-done-no-alts", level: "standard" },
+            ),
+            ev(4, "request.completed", { completion_tokens: 1 }, { requestId: "r-done-no-alts" }),
+        ];
+        const { root } = render(events);
+        const altNotice = root.findAll((el) => el.getAttribute("data-panel") === "alternatives")[0]!;
+        expect(altNotice.textContent).not.toContain("Waiting for data.");
+        expect(altNotice.textContent).toContain("no alternatives emitted for this request");
     });
 });
