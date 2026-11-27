@@ -46,7 +46,21 @@
         "query": { "const": "last_event_id" },
         "retained_events": { "type": "integer", "minimum": 0 },
         "oldest_sequence": { "type": ["integer", "null"], "minimum": 0 },
-        "next_sequence": { "type": "integer", "minimum": 0 }
+        "next_sequence": { "type": "integer", "minimum": 0 },
+        "streams": {
+          "type": "object",
+          "description": "Optional resume windows of the named sequence streams (producer.stream), keyed by name, e.g. samples. retained_events, oldest_sequence and next_sequence above describe the default stream.",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["retained_events", "oldest_sequence", "next_sequence"],
+            "properties": {
+              "retained_events": { "type": "integer", "minimum": 0 },
+              "oldest_sequence": { "type": ["integer", "null"], "minimum": 0 },
+              "next_sequence": { "type": "integer", "minimum": 0 }
+            },
+            "additionalProperties": true
+          }
+        }
       },
       "additionalProperties": true
     },

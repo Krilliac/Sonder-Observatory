@@ -393,4 +393,163 @@ describe("conformance checks", () => {
         const noticed = await checkProducer(await badProducer({ gap: true, gapNotice: true }), options);
         expect(noticed.failures.filter((f) => f.startsWith("sse:"))).toEqual([]);
     });
+    interface TwoStreamOptions {
+        /** Samples sequences 0, 2, 3 instead of 0, 1, 2. */
+        samplesHole?: boolean;
+        /** Notice written before this sample event (the id of the sample event), if any. */
+        notice?: { before: string; text: string };
+        /** Sample events use the main id form `<instance>-<sequence>`. */
+        mainIdOnSamples?: boolean;
+        /** Name the second stream something other than "samples". */
+        streamName?: string;
+    }
+
+    /** A producer with a default stream and a samples stream, each numbered from 0. */
+    async function twoStreamProducer(opts: TwoStreamOptions): Promise<string> {
+        const instance = "two-0001";
+        const producer = { name: "two", version: "0", node_id: "n", instance_id: instance, role: "fixture", synthetic: true };
+        const sampleSeqs = opts.samplesHole ? [0, 2, 3] : [0, 1, 2];
+        const make = (stream: "main" | "samples", sequence: number) => ({
+            schema: "sonder.observatory.event/1",
+            event_id:
+                stream === "samples" && !opts.mainIdOnSamples ? `${instance}-s${sequence}` : `${instance}-${sequence}`,
+            sequence,
+            event_type: stream === "samples" ? "device.memory.sample" : "session.started",
+            wall_time: "2026-09-26T08:00:00.000Z",
+            mono_ns: 1000 + sequence * 2 + (stream === "samples" ? 1 : 0),
+            session_id: "s",
+            producer: stream === "samples" ? { ...producer, stream: opts.streamName ?? "samples" } : producer,
+            attributes: {},
+        });
+        const events = [0, 1, 2].flatMap((i) => [make("main", i), make("samples", sampleSeqs[i]!)]);
+        const cursorOf = (header: string | undefined): { main: number; samples: number } => {
+            const cursor = { main: -1, samples: -1 };
+            for (const member of (header ?? "").split(",")) {
+                const tail = member.trim().split("-").pop() ?? "";
+                if (/^s\d+$/.test(tail)) cursor.samples = Number(tail.slice(1));
+                else if (/^\d+$/.test(tail)) cursor.main = Number(tail);
+            }
+            return cursor;
+        };
+        const server = createServer((req, res) => {
+            const path = new URL(req.url ?? "/", "http://x").pathname;
+            const cors = { "Access-Control-Allow-Origin": ORIGIN, Vary: "Origin" };
+            if (req.method === "OPTIONS") {
+                res.writeHead(204, {
+                    ...cors,
+                    "Access-Control-Allow-Methods": "GET",
+                    "Access-Control-Allow-Headers": "Accept, Authorization, Cache-Control, Last-Event-ID",
+                });
+                res.end();
+            } else if (path === "/.well-known/sonder-telemetry") {
+                res.writeHead(200, { ...cors, "Content-Type": "application/json" });
+                res.end(
+                    JSON.stringify({
+                        schema: "sonder.telemetry.producer/1",
+                        producer,
+                        event_schema: "sonder.observatory.event/1",
+                        streams: [
+                            { transport: "sse", url: "/sse" },
+                            { transport: "ndjson", url: "/ndjson" },
+                        ],
+                        resume: {
+                            header: "Last-Event-ID",
+                            query: "last_event_id",
+                            retained_events: 3,
+                            oldest_sequence: 0,
+                            next_sequence: 3,
+                            streams: { samples: { retained_events: 3, oldest_sequence: 0, next_sequence: 3 } },
+                        },
+                        auth: { required: false, schemes: ["bearer"] },
+                        clock: { mono_ns: "host-monotonic" },
+                    }),
+                );
+            } else if (path === "/sse") {
+                const last = req.headers["last-event-id"];
+                const cursor = cursorOf(typeof last === "string" ? last : undefined);
+                res.writeHead(200, { ...cors, "Content-Type": "text/event-stream" });
+                res.write("retry: 2000\n\n");
+                for (const e of events) {
+                    const isSample = "stream" in e.producer;
+                    if (e.sequence <= (isSample ? cursor.samples : cursor.main)) {
+                        continue;
+                    }
+                    if (opts.notice && opts.notice.before === e.event_id) {
+                        res.write(`: ${opts.notice.text}\n\n`);
+                    }
+                    res.write(`id: ${e.event_id}\ndata: ${JSON.stringify(e)}\n\n`);
+                }
+            } else if (path === "/ndjson") {
+                res.writeHead(200, { ...cors, "Content-Type": "application/x-ndjson" });
+                res.write(events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+            } else {
+                res.writeHead(404);
+                res.end();
+            }
+        });
+        servers.push(server);
+        await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+        const address = server.address();
+        return `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
+    }
+
+    const twoStreamOptions = { origin: ORIGIN, minEvents: 6, maxStreamMs: 1500, idleMs: 200 };
+
+    it("pass against a producer with a default stream and a samples stream", async () => {
+        const report = await checkProducer(await twoStreamProducer({}), twoStreamOptions);
+        expect(report.failures).toEqual([]);
+        expect(report.sse!.events.map((e) => e.event_id)).toEqual([
+            "two-0001-0",
+            "two-0001-s0",
+            "two-0001-1",
+            "two-0001-s1",
+            "two-0001-2",
+            "two-0001-s2",
+        ]);
+        expect(report.discovery!.resume.streams!.samples!.next_sequence).toBe(3);
+    });
+
+    it("fail on a sample event with a main-form id", async () => {
+        const report = await checkProducer(await twoStreamProducer({ mainIdOnSamples: true }), twoStreamOptions);
+        expect(report.failures.join("\n")).toMatch(/event_id two-0001-0 is not <instance_id>-s<sequence> \(two-0001-s0\)/);
+    });
+
+    it("fail on a stream name other than samples", async () => {
+        const report = await checkProducer(await twoStreamProducer({ streamName: "extras" }), twoStreamOptions);
+        expect(report.failures.join("\n")).toMatch(/unknown producer.stream "extras"/);
+    });
+
+    it("fail on a hole in the samples stream without a notice, and accept the samples-form notice directly before it", async () => {
+        const broken = await checkProducer(await twoStreamProducer({ samplesHole: true }), twoStreamOptions);
+        expect(broken.failures.join("\n")).toMatch(/sse: sequence 2 follows 0 without a resume-gap or dropped notice \(stream samples\)/);
+        const noticed = await checkProducer(
+            await twoStreamProducer({ samplesHole: true, notice: { before: "two-0001-s2", text: "resume-gap s1-s1" } }),
+            twoStreamOptions,
+        );
+        expect(noticed.failures.filter((f) => f.startsWith("sse"))).toEqual([]);
+    });
+
+    it("fail when the notice for a samples hole has the default form", async () => {
+        const report = await checkProducer(
+            await twoStreamProducer({ samplesHole: true, notice: { before: "two-0001-s2", text: "resume-gap 1-1" } }),
+            twoStreamOptions,
+        );
+        expect(report.failures.join("\n")).toMatch(/sse: sequence 2 follows 0 without a resume-gap or dropped notice \(stream samples\)/);
+    });
+
+    it("fail when the notice sits before an earlier event instead of the event after the hole", async () => {
+        const report = await checkProducer(
+            await twoStreamProducer({ samplesHole: true, notice: { before: "two-0001-s0", text: "resume-gap s1-s1" } }),
+            twoStreamOptions,
+        );
+        expect(report.failures.join("\n")).toMatch(/sse: sequence 2 follows 0 without a resume-gap or dropped notice \(stream samples\)/);
+    });
+
+    it("fail on a malformed resume-gap notice", async () => {
+        const report = await checkProducer(
+            await twoStreamProducer({ samplesHole: true, notice: { before: "two-0001-s2", text: "resume-gap s1-1" } }),
+            twoStreamOptions,
+        );
+        expect(report.failures.join("\n")).toMatch(/malformed resume-gap notice "resume-gap s1-1"/);
+    });
 });

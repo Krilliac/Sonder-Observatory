@@ -41,6 +41,10 @@ export type StreamTransport = (typeof STREAM_TRANSPORTS)[number];
 
 /** Required `resume` fields, in schema order. */
 export const RESUME_FIELDS = ["header", "query", "retained_events", "oldest_sequence", "next_sequence"] as const;
+/** Optional `resume` fields: windows of the named sequence streams. */
+export const RESUME_OPTIONAL_FIELDS = ["streams"] as const;
+/** Required fields of each `resume.streams` entry. */
+export const RESUME_STREAM_FIELDS = ["retained_events", "oldest_sequence", "next_sequence"] as const;
 export const RESUME_HEADER = "Last-Event-ID";
 export const RESUME_QUERY = "last_event_id";
 
@@ -64,6 +68,14 @@ export interface DiscoveryStream {
     [extra: string]: unknown;
 }
 
+/** Resume window of one named sequence stream (`producer.stream`). */
+export interface ResumeStreamWindow {
+    retained_events: number;
+    oldest_sequence: number | null;
+    next_sequence: number;
+    [extra: string]: unknown;
+}
+
 export interface ProducerDiscovery {
     schema: typeof DISCOVERY_SCHEMA_ID;
     producer: DiscoveryProducer;
@@ -75,6 +87,8 @@ export interface ProducerDiscovery {
         retained_events: number;
         oldest_sequence: number | null;
         next_sequence: number;
+        /** Windows of the named sequence streams, keyed by `producer.stream` (e.g. "samples"). */
+        streams?: Record<string, ResumeStreamWindow>;
         [extra: string]: unknown;
     };
     auth: { required: boolean; schemes: (typeof AUTH_SCHEMES)[number][]; [extra: string]: unknown };
@@ -182,6 +196,33 @@ function checkResume(value: unknown, issues: ValidationIssue[]): void {
             issues.push({ path, message: "must be an integer >= 0" });
         } else if (key === "oldest_sequence" && field !== null && !isNonNegativeInteger(field)) {
             issues.push({ path, message: "must be an integer >= 0 or null" });
+        }
+    }
+    if (!("streams" in value)) {
+        return;
+    }
+    const streams = value.streams;
+    if (!isPlainObject(streams)) {
+        issues.push({ path: "resume.streams", message: "must be an object" });
+        return;
+    }
+    for (const [name, window] of Object.entries(streams)) {
+        const base = `resume.streams.${name}`;
+        if (!isPlainObject(window)) {
+            issues.push({ path: base, message: "must be an object" });
+            continue;
+        }
+        for (const key of RESUME_STREAM_FIELDS) {
+            const path = `${base}.${key}`;
+            if (!(key in window)) {
+                issues.push({ path, message: "is required" });
+            } else if (key === "oldest_sequence") {
+                if (window[key] !== null && !isNonNegativeInteger(window[key])) {
+                    issues.push({ path, message: "must be an integer >= 0 or null" });
+                }
+            } else if (!isNonNegativeInteger(window[key])) {
+                issues.push({ path, message: "must be an integer >= 0" });
+            }
         }
     }
 }

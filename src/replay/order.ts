@@ -1,5 +1,5 @@
 import type { ObservatoryEvent } from "../protocol/events";
-import { producerStreamKey } from "../query/identity";
+import { producerStreamKey, sequenceStreamKey } from "../query/identity";
 import { markOrdered } from "./lookup";
 
 /**
@@ -7,7 +7,9 @@ import { markOrdered } from "./lookup";
  * the event reveals the producer instance that assigned the sequence (see
  * `producerInstance`), the stream is that instance, across sessions:
  * Sonder-Inference numbers engine- and session-scoped events from one counter.
- * Otherwise the stream is session + producer name + node.
+ * Otherwise the stream is session + producer name + node. A producer may
+ * number named sequence streams (`producer.stream`) separately; that only
+ * matters for gap detection (`sequenceStreamKey`), not for this identity.
  */
 export function streamKey(event: ObservatoryEvent): string {
     return producerStreamKey(event);
@@ -70,9 +72,11 @@ export function orderEvents(input: readonly ObservatoryEvent[]): OrderedEvents {
 }
 
 export function findSequenceGaps(events: readonly ObservatoryEvent[]): SequenceGap[] {
+    // Keyed by the counter that assigned the sequence: a producer numbers each
+    // named sequence stream (producer.stream) from 0 on its own.
     const byStream = new Map<string, number[]>();
     for (const e of events) {
-        const key = streamKey(e);
+        const key = sequenceStreamKey(e);
         const list = byStream.get(key) ?? [];
         list.push(e.sequence);
         byStream.set(key, list);

@@ -301,7 +301,7 @@ export function validateEvent(value: unknown): ValidationResult {
             }
             if (typeof field !== type) {
                 addIssue({ path: `producer.${key}`, message: `must be a ${type} or null` });
-            } else if (key === "instance_id" && field === "") {
+            } else if ((key === "instance_id" || key === "stream") && field === "") {
                 addIssue({ path: `producer.${key}`, message: "must be a non-empty string" });
             }
         }

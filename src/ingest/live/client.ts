@@ -142,6 +142,18 @@ const WS_TOKEN_REFUSED = "a bearer token cannot be sent over WebSocket; use the 
 
 const MAX_REJECTED_KEPT = 1000;
 
+/** Sequence stream a producer named for an event; "" is the default stream. */
+function streamOfEvent(event: ObservatoryEvent): string {
+    const named = event.producer.stream;
+    return typeof named === "string" ? named : "";
+}
+
+/** Producer instance an event id belongs to: the text before its last '-'. */
+function cursorInstance(id: string): string {
+    const dash = id.lastIndexOf("-");
+    return dash > 0 ? id.slice(0, dash) : id;
+}
+
 /** Default estimated-byte cap for the in-flight live ingest queue (16 MiB). */
 export const DEFAULT_BUFFER_MAX_BYTES = 16 * 1024 * 1024;
 
@@ -223,6 +235,10 @@ export class LiveIngestClient {
     private capacityWaiters: (() => void)[] = [];
     private pendingRejected: RejectedLine[] = [];
     private lineCounter = 0;
+    /** Last completed event id per sequence stream ("" is the default stream). */
+    private readonly cursors = new Map<string, string>();
+    /** Stream of the last source line seen in the current SSE message. */
+    private messageStream = "";
     private gotDataSinceOpen = false;
     private generation = 0;
 
@@ -534,7 +550,7 @@ export class LiveIngestClient {
 
     // --- decoding --------------------------------------------------------------
 
-    private *decodeLine(raw: string): Generator<{ event: ObservatoryEvent } | { cursor: string | null }> {
+    private *decodeLine(raw: string): Generator<{ event: ObservatoryEvent } | { cursor: string | null; stream: string }> {
         const adapter = this.options.adapter;
         const line = ++this.lineCounter;
         let value: unknown;
@@ -547,6 +563,7 @@ export class LiveIngestClient {
         // Capture producer identity before an adapter can rewrite or fan out the event.
         const source = validateEvent(value);
         const cursor = source.ok ? source.event.event_id : null;
+        const cursorStream = source.ok ? streamOfEvent(source.event) : "";
         let values: unknown[];
         try {
             values = adapter ? normalizeAdapted(adapter(value)) : [value];
@@ -567,10 +584,13 @@ export class LiveIngestClient {
             yield { event: result.event };
         }
         // Reaching this marker means every output of this source line was consumed.
-        yield { cursor };
+        yield { cursor, stream: cursorStream };
     }
 
-    private *decode(text: string, allowWholeJson = false): Generator<{ event: ObservatoryEvent } | { cursor: string | null }> {
+    private *decode(
+        text: string,
+        allowWholeJson = false,
+    ): Generator<{ event: ObservatoryEvent } | { cursor: string | null; stream: string }> {
         if (allowWholeJson && text.includes("\n")) {
             const whole = text.trim();
             if (whole.startsWith("{") && whole.endsWith("}")) {
@@ -614,7 +634,7 @@ export class LiveIngestClient {
         }
         this.statusValue.received += 1;
         if (trackEventId) {
-            this.statusValue.lastEventId = event.event_id;
+            this.recordCursor(event.event_id, streamOfEvent(event));
         }
         this.statusValue.dropped = this.buffer.dropped;
         this.statusValue.buffered = this.buffer.size;
@@ -622,9 +642,35 @@ export class LiveIngestClient {
 
     private finishPayload(sseId: string | null): void {
         if (sseId !== null) {
-            this.statusValue.lastEventId = sseId;
+            // The stream of an SSE message is that of its last source line.
+            this.recordCursor(sseId, this.messageStream);
+            this.messageStream = "";
         }
         this.scheduleFlush();
+    }
+
+    /**
+     * Stores the last completed event id of one sequence stream and rebuilds
+     * the resume cursor sent on reconnect: the default stream's id first, then
+     * the named streams sorted by name, separated by commas. Members of
+     * another producer instance (the text before the last '-') are stale after
+     * a producer restart and are dropped.
+     */
+    private recordCursor(id: string, stream: string): void {
+        const instance = cursorInstance(id);
+        for (const [name, held] of this.cursors) {
+            if (cursorInstance(held) !== instance) {
+                this.cursors.delete(name);
+            }
+        }
+        this.cursors.set(stream, id);
+        if (this.cursors.size === 1) {
+            this.statusValue.lastEventId = id;
+            return;
+        }
+        const named = [...this.cursors.keys()].filter((name) => name !== "").sort();
+        const ordered = this.cursors.has("") ? ["", ...named] : named;
+        this.statusValue.lastEventId = ordered.map((name) => this.cursors.get(name)!).join(",");
     }
 
     private ingest(text: string, sseId: string | null, trackSourceCursor: boolean): void {
@@ -634,9 +680,12 @@ export class LiveIngestClient {
             }
             if ("event" in part) {
                 this.accept(part.event, !trackSourceCursor);
-            } else if (trackSourceCursor && sseId === null && part.cursor !== null) {
-                // HTTP drop mode consumes the whole line synchronously, including fanout.
-                this.statusValue.lastEventId = part.cursor;
+            } else if (part.cursor !== null) {
+                this.messageStream = part.stream;
+                if (trackSourceCursor && sseId === null) {
+                    // HTTP drop mode consumes the whole line synchronously, including fanout.
+                    this.recordCursor(part.cursor, part.stream);
+                }
             }
         }
         if (this.stopped) {
@@ -653,8 +702,11 @@ export class LiveIngestClient {
             }
             if ("cursor" in part) {
                 // SSE commits only at the message boundary; NDJSON at each full source line.
-                if (sseId === null && part.cursor !== null) {
-                    this.statusValue.lastEventId = part.cursor;
+                if (part.cursor !== null) {
+                    this.messageStream = part.stream;
+                    if (sseId === null) {
+                        this.recordCursor(part.cursor, part.stream);
+                    }
                 }
                 continue;
             }

@@ -52,11 +52,17 @@ export const PRODUCER_REQUIRED_FIELDS = ["name", "version", "node_id"] as const;
 /**
  * Optional producer fields the schema declares (additive, live producer
  * protocol v1): `instance_id` is a non-empty string, `role` a string
- * (known values in KNOWN_PRODUCER_ROLES) and `synthetic` a boolean. Each may
- * also be null ("not stated"); any other type is rejected (docs/DECISIONS.md,
- * "Live producer protocol v1").
+ * (known values in KNOWN_PRODUCER_ROLES), `synthetic` a boolean and `stream`
+ * a non-empty string naming a sequence stream (absent or null is the default
+ * stream). Each may also be null ("not stated"); any other type is rejected
+ * (docs/DECISIONS.md, "Live producer protocol v1" and "Sequence streams").
  */
-export const PRODUCER_OPTIONAL_FIELDS = { instance_id: "string", role: "string", synthetic: "boolean" } as const;
+export const PRODUCER_OPTIONAL_FIELDS = {
+    instance_id: "string",
+    role: "string",
+    synthetic: "boolean",
+    stream: "string",
+} as const;
 
 /** Documented producer roles; other role strings are kept, not rejected. */
 export const KNOWN_PRODUCER_ROLES = ["inference", "runtime", "fixture"] as const;
@@ -72,6 +78,13 @@ export interface Producer {
     role?: string | null;
     /** True only for synthetic data (mock backends, fixtures). */
     synthetic?: boolean | null;
+    /**
+     * Sequence stream within `instance_id`; absent or null is the default
+     * stream. `sequence` is contiguous per (instance_id, stream). The only
+     * named stream today is "samples" (periodic samples, event ids
+     * `<instance_id>-s<sequence>`).
+     */
+    stream?: string | null;
     /** Additional producer properties are allowed by the schema. */
     [extra: string]: unknown;
 }

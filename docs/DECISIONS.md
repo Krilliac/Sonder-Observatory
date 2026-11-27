@@ -381,3 +381,30 @@ one last parent by bare request ID. It draws a parent line only for one
 compatible retained Runtime entity, and withholds conflicting or ambiguous
 lineage. This changes consumer derivations only, with no producer contract,
 schema, session/run override, consent or execution-state changes.
+
+## 2026-11-26 - Sequence streams (producer.stream)
+
+Sonder-Inference emits periodic `*.sample` events at a steady rate next to
+rarer lifecycle events. With one counter and one retained ring, a long idle
+run evicted `backend.registered`, `session.*` and `model.*` from the resume
+window; keeping lifecycle events and dropping only old samples made every
+replay non-contiguous, which this contract reads as telemetry loss.
+
+Decision: an additive optional `producer.stream` (non-empty string; absent or
+null is the default stream). `sequence` is contiguous from 0 per
+(`producer.instance_id`, `producer.stream`); the `samples` stream's
+`event_id` is `<instance_id>-s<sequence>`. Resume accepts a cursor of one id
+per stream separated by commas, and a `: resume-gap s<from>-s<to>` notice names
+a samples-stream hole. Discovery gains an optional `resume.streams.<name>`
+window. The schema id stays `sonder.observatory.event/1`.
+
+Observatory keys gap detection (`findSequenceGaps`, `SessionStore`) on the
+sequence stream (`sequenceStreamKey`) while request, session, GPU and
+dropped-report identities stay on the producer instance. The live client keeps
+one resume member per stream and drops members of a replaced instance.
+Rejected: in-band gap markers (a non-envelope line on NDJSON, and consumers
+would have to persist announced ranges in recordings) and a contiguous replay
+in the shared number space (not possible while samples consume numbers).
+Landing order: Observatory first (it accepts producers with and without
+`producer.stream`), then Sonder-Inference; a new Inference against an older
+Observatory fails sample id checks and can show a false gap per connection.

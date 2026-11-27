@@ -10,7 +10,8 @@ import type { RejectedLine } from "../recording/ndjson";
 import { isSyntheticProducer, type RecordingManifest } from "../recording/sobs";
 import { deriveRequestLifecycles, type RequestLifecycle } from "./lifecycle";
 import { markOrdered, notifyPrefixExtended } from "./lookup";
-import { compareEvents, streamKey, type SequenceGap } from "./order";
+import { sequenceStreamKey } from "../query/identity";
+import { compareEvents, type SequenceGap } from "./order";
 
 export type SourceKind = "none" | "fixture" | "file" | "live";
 
@@ -439,7 +440,7 @@ export class SessionStore {
      * incrementally: a stream's gaps are the unseen numbers in [min, max].
      */
     private trackSequence(e: ObservatoryEvent): void {
-        const key = streamKey(e);
+        const key = sequenceStreamKey(e);
         const seq = e.sequence;
         const s = this.streams.get(key);
         if (s === undefined) {

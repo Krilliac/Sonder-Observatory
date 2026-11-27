@@ -11,7 +11,9 @@ import {
     DISCOVERY_SCHEMA_ID,
     RESUME_FIELDS,
     RESUME_HEADER,
+    RESUME_OPTIONAL_FIELDS,
     RESUME_QUERY,
+    RESUME_STREAM_FIELDS,
     STREAM_TRANSPORTS,
     parseDiscovery,
     validateDiscovery,
@@ -97,7 +99,13 @@ describe("producer discovery schema mirror", () => {
     it("has the same resume, auth and clock shapes", () => {
         const resume = props.resume!;
         expect([...RESUME_FIELDS]).toEqual(resume.required);
-        expect(Object.keys(resume.properties!)).toEqual(resume.required);
+        expect(Object.keys(resume.properties!)).toEqual([...resume.required!, ...RESUME_OPTIONAL_FIELDS]);
+        const streams = resume.properties!.streams!;
+        expect(streams.type).toBe("object");
+        const window = streams.additionalProperties as SchemaNode;
+        expect([...RESUME_STREAM_FIELDS]).toEqual(window.required);
+        expect(Object.keys(window.properties!)).toEqual(window.required);
+        expect(window.properties!.oldest_sequence!.type).toEqual(["integer", "null"]);
         expect(resume.properties!.header!.const).toBe(RESUME_HEADER);
         expect(resume.properties!.query!.const).toBe(RESUME_QUERY);
         expect(resume.properties!.oldest_sequence!.type).toEqual(["integer", "null"]);
@@ -151,6 +159,28 @@ describe("producer discovery schema mirror", () => {
         expect(validateDiscovery(v2)[0]!.message).toMatch(/unsupported discovery schema major/);
         const ev2 = { ...validDocument(), event_schema: "sonder.observatory.event/2" };
         expect(validateDiscovery(ev2)[0]!.message).toMatch(/unsupported event schema/);
+    });
+
+    it("accepts and validates the optional resume.streams windows", () => {
+        const doc = (streams: unknown) => {
+            const copy = validDocument();
+            copy.resume = { ...(copy.resume as Record<string, unknown>), streams };
+            return copy;
+        };
+        expect(validateDiscovery(doc({ samples: { retained_events: 4, oldest_sequence: 998, next_sequence: 1002 } }))).toEqual([]);
+        expect(validateDiscovery(doc({ samples: { retained_events: 0, oldest_sequence: null, next_sequence: 0, extra: 1 } }))).toEqual([]);
+        expect(validateDiscovery(doc({}))).toEqual([]);
+        expect(validateDiscovery(doc([])).map((i) => i.path)).toContain("resume.streams");
+        expect(validateDiscovery(doc({ samples: 3 })).map((i) => i.path)).toContain("resume.streams.samples");
+        expect(validateDiscovery(doc({ samples: { retained_events: 4, next_sequence: 5 } })).map((i) => i.path)).toContain(
+            "resume.streams.samples.oldest_sequence",
+        );
+        expect(
+            validateDiscovery(doc({ samples: { retained_events: -1, oldest_sequence: 0, next_sequence: 5 } })).map((i) => i.path),
+        ).toContain("resume.streams.samples.retained_events");
+        expect(
+            validateDiscovery(doc({ samples: { retained_events: 1, oldest_sequence: 0.5, next_sequence: 5 } })).map((i) => i.path),
+        ).toContain("resume.streams.samples.oldest_sequence");
     });
 
     it("rejects wrong types in constrained fields", () => {
