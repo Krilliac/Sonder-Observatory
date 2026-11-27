@@ -3,7 +3,7 @@
  * label DOM renderers for the 3D Inference tab.
  */
 import { h } from "../renderer/dom";
-import type { PanelAvailability, PipelineModel, ProducerCapabilities } from "./model";
+import type { PanelAvailability, PipelineModel, ProbabilityBasis, ProducerCapabilities } from "./model";
 import { STAGES } from "./model";
 import type { ProjectedLabel } from "./scene";
 
@@ -251,15 +251,25 @@ export function renderOutputFeed(
     );
 }
 
+const PROBABILITY_BASIS_LABEL: Record<ProbabilityBasis, string> = {
+    post_sampling: "post-sampling",
+    pre_sampling: "pre-sampling",
+};
+
+export function fmtProbabilityBasis(basis: ProbabilityBasis | null): string | null {
+    return basis ? PROBABILITY_BASIS_LABEL[basis] : null;
+}
+
 export function renderProbabilities(container: HTMLElement, model: PipelineModel, onSelect: (id: string) => void): void {
     const latest = model.tokens.at(-1);
     if (!latest) {
         const reasons = reasonFor(model, "probabilities");
+        const waiting = reasons.length > 0 && reasons.every((r) => r.status === "waiting");
         container.replaceChildren(
             h(
                 "div",
                 { class: "i3d-unavailable", "data-panel": "probabilities" },
-                h("strong", { text: "Not available." }),
+                h("strong", { text: waiting ? "Waiting for data." : "Not available." }),
                 h(
                     "ul",
                     {},
@@ -284,13 +294,44 @@ export function renderProbabilities(container: HTMLElement, model: PipelineModel
             h("span", { class: "i3d-prob-value", text: p.toFixed(3) }),
         );
     const tokenLabel = latest.text !== null ? JSON.stringify(latest.text) : latest.tokenId !== null ? `token ${latest.tokenId}` : "sampled token";
+    const basisLabel = fmtProbabilityBasis(latest.probabilityBasis);
     const alternatives = latest.alternatives;
     const altReasons = reasonFor(model, "alternatives");
+    const hasEarlierAlternatives = model.tokens.some((t) => t.alternatives && t.alternatives.length > 0);
     const btn = h("button", { type: "button", class: "link-button", "data-entity": latest.id, text: `Token #${latest.index ?? "?"}: ${tokenLabel}` });
     btn.addEventListener("click", () => onSelect(latest.id));
+    const header = basisLabel
+        ? h(
+              "div",
+              { class: "i3d-prob-head" },
+              btn,
+              h("span", { class: "tag i3d-prob-basis", "data-testid": "prob-basis", "data-basis": latest.probabilityBasis!, text: basisLabel }),
+          )
+        : btn;
+    const altFallback =
+        altReasons.length > 0
+            ? h(
+                  "div",
+                  { class: "i3d-unavailable", "data-panel": "alternatives" },
+                  h("strong", { text: altReasons[0]!.status === "waiting" ? "Waiting for data. " : "Not available. " }),
+                  ...richText(altReasons[0]!.text),
+              )
+            : hasEarlierAlternatives
+              ? h(
+                    "div",
+                    { class: "i3d-unavailable", "data-panel": "alternatives" },
+                    h("strong", { text: "Not emitted for this token. " }),
+                    "candidates are bounded by stride or per-request cap",
+                )
+              : h(
+                    "div",
+                    { class: "i3d-unavailable", "data-panel": "alternatives" },
+                    h("strong", { text: "Not available. " }),
+                    "the producer does not report alternatives",
+                );
     container.replaceChildren(
         ...nodes(
-            btn,
+            header,
             latest.probability !== null
                 ? h("ul", { class: "i3d-prob-list", "aria-label": "Sampled token probability" }, bar("probability", latest.probability, "prob-sampled"))
                 : null,
@@ -312,12 +353,7 @@ export function renderProbabilities(container: HTMLElement, model: PipelineModel
                               ),
                           ),
                   )
-                : h(
-                      "div",
-                      { class: "i3d-unavailable", "data-panel": "alternatives" },
-                      h("strong", { text: "Not available. " }),
-                      ...richText(altReasons[0]?.text ?? "the producer does not report alternatives"),
-                  ),
+                : altFallback,
         ),
     );
 }

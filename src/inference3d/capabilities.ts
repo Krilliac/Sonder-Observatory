@@ -9,7 +9,7 @@
  * (`request.started.sampler`), the telemetry level (the declared discovery
  * `sampling_level`, then health `telemetry.level`, else the highest
  * `sampling.level` seen on events) and the declared text capture policy. Sonder-Inference capability names are listed
- * in its docs/BACKENDS.md (`token_logits`, `layer_telemetry`, …).
+ * in its docs/BACKENDS.md (`token_logits`, `logprobs`, `layer_telemetry`, …).
  */
 import { PANEL_LABELS, PANEL_ORDER, type Availability, type PanelAvailability, type PanelId, type ProducerCapabilities } from "./model";
 
@@ -130,6 +130,25 @@ function allHave(r: Resolved, capability: string): boolean | null {
     return r.backends.every((b) => r.caps[b]!.capabilities.includes(capability));
 }
 
+/** True when any backend in use advertises any of `capabilities`; false when all caps are known and none do; null when unknown. */
+function anyHave(r: Resolved, capabilities: readonly string[]): boolean | null {
+    if (r.backends.length === 0) {
+        return null;
+    }
+    let unknown = false;
+    for (const b of r.backends) {
+        const info = r.caps[b];
+        if (!info) {
+            unknown = true;
+            continue;
+        }
+        if (capabilities.some((c) => info.capabilities.includes(c))) {
+            return true;
+        }
+    }
+    return unknown ? null : false;
+}
+
 function panel(id: PanelId, status: Availability, reason: string): PanelAvailability {
     return { panel: id, label: PANEL_LABELS[id], status, reason };
 }
@@ -206,29 +225,91 @@ export function producerCapabilities(f: StreamFacts, health?: readonly { name: s
                     );
                     break;
                 }
-                const logits = allHave(r, "token_logits");
+                const logits = anyHave(r, ["token_logits"]);
+                const logprobs = anyHave(r, ["logprobs"]);
+                const probCap = anyHave(r, ["token_logits", "logprobs"]);
+                const belowStandard = effLevel !== null && LEVEL_RANK[effLevel]! < LEVEL_RANK.standard!;
                 const backendSampler = f.samplers.has("backend") && !f.samplers.has("sonder");
-                if (id === "alternatives" && f.probabilityEvents > 0 && logits !== true) {
-                    panels.push(
-                        panel(
-                            id,
-                            "unavailable",
-                            `${who} emits token probabilities but no ${code("inference.sampling.candidates")} events${logits === false ? ` (it does not advertise ${code("token_logits")})` : ""}`,
-                        ),
-                    );
-                } else if (logits === false || (logits === null && backendSampler)) {
+                if (id === "alternatives") {
+                    if (logprobs === true) {
+                        if (belowStandard) {
+                            panels.push(
+                                panel(
+                                    id,
+                                    "unavailable",
+                                    `${who} advertises ${code("logprobs")} but the telemetry level is ${code(level)}; restart with ${code("--telemetry-level standard")} or higher`,
+                                ),
+                            );
+                        } else {
+                            panels.push(
+                                panel(
+                                    id,
+                                    "waiting",
+                                    `waiting for ${code("inference.sampling.candidates")} events (level ${code("standard")} or higher)`,
+                                ),
+                            );
+                        }
+                    } else if (f.probabilityEvents > 0 && logits !== true) {
+                        panels.push(
+                            panel(
+                                id,
+                                "unavailable",
+                                `${who} emits token probabilities but no ${code("inference.sampling.candidates")} events${probCap === false ? ` (it does not advertise ${code("token_logits")} or ${code("logprobs")})` : ""}`,
+                            ),
+                        );
+                    } else if (logits === true || f.samplers.has("sonder")) {
+                        panels.push(
+                            panel(
+                                id,
+                                "unavailable",
+                                `Sonder's sampler (${code("token_logits")}) does not emit ${code("inference.sampling.candidates")} yet; backends advertising ${code("logprobs")} emit it at level ${code("standard")} or higher`,
+                            ),
+                        );
+                    } else if (probCap === false || (probCap === null && backendSampler)) {
+                        const sampler = backendSampler ? "; the backend samples, so output arrives as unit `chunk`" : "";
+                        panels.push(panel(id, "unavailable", `${who} does not expose token logits or ${code("logprobs")}${sampler}`));
+                    } else {
+                        panels.push(
+                            panel(
+                                id,
+                                "unavailable",
+                                `not reported by this producer: ${capsUnknown}, and no ${code("inference.sampling.candidates")} events arrived`,
+                            ),
+                        );
+                    }
+                    break;
+                }
+                if (logprobs === true || logits === true || f.samplers.has("sonder")) {
+                    const source =
+                        logprobs === true && logits === true
+                            ? `advertises ${code("token_logits")} / ${code("logprobs")}`
+                            : logprobs === true
+                              ? `advertises ${code("logprobs")}`
+                              : logits === true
+                                ? `advertises ${code("token_logits")}`
+                                : "uses Sonder's sampler";
+                    if (belowStandard) {
+                        panels.push(
+                            panel(
+                                id,
+                                "unavailable",
+                                `${who} ${source} but the telemetry level is ${code(level)}; restart with ${code("--telemetry-level standard")} or higher`,
+                            ),
+                        );
+                    } else {
+                        panels.push(
+                            panel(
+                                id,
+                                "waiting",
+                                f.chunkEvents > 0
+                                    ? `waiting for inference.token.generated with unit ${code("token")} and ${code("probability")} (level ${code("standard")} or higher); streamed chunks so far carried no probabilities`
+                                    : `waiting for inference.token.generated with unit ${code("token")} (level ${code("standard")} or higher)`,
+                            ),
+                        );
+                    }
+                } else if (probCap === false || (probCap === null && backendSampler)) {
                     const sampler = backendSampler ? "; the backend samples, so output arrives as unit `chunk`" : "";
-                    panels.push(panel(id, "unavailable", `${who} does not expose token logits${sampler}`));
-                } else if (id === "alternatives" && (logits === true || f.samplers.has("sonder"))) {
-                    panels.push(
-                        panel(
-                            id,
-                            "unavailable",
-                            `Sonder Inference does not emit ${code("inference.sampling.candidates")} yet (reserved; shape proposed in docs/TELEMETRY_PROTOCOL.md)`,
-                        ),
-                    );
-                } else if (logits === true || f.samplers.has("sonder")) {
-                    panels.push(panel(id, "waiting", "waiting for inference.token.generated with unit `token` (level `standard` or higher)"));
+                    panels.push(panel(id, "unavailable", `${who} does not expose token logits or ${code("logprobs")}${sampler}`));
                 } else {
                     panels.push(panel(id, "unavailable", `not reported by this producer: ${capsUnknown}, and no token event carries a probability`));
                 }

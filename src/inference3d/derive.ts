@@ -26,6 +26,7 @@ import {
     type LayerEntity,
     type OperatorEntity,
     type PipelineModel,
+    type ProbabilityBasis,
     type RequestEntity,
     type RequestLink,
     type StageId,
@@ -65,6 +66,10 @@ function int(v: unknown): number | null {
 
 function str(v: unknown): string | null {
     return typeof v === "string" && v !== "" ? v : null;
+}
+
+function readProbabilityBasis(v: unknown): ProbabilityBasis | null {
+    return v === "post_sampling" || v === "pre_sampling" ? v : null;
 }
 
 /** Bounded evidence list: the first few ids (how it started) plus the most recent ones. */
@@ -207,6 +212,7 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
                 index,
                 tokenId: null,
                 probability: null,
+                probabilityBasis: null,
                 text: null,
                 alternatives: null,
                 ns: e.mono_ns,
@@ -570,13 +576,19 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
                 const token = tokenFor(e, reqKey, req?.entity.id ?? null);
                 token.eventId = e.event_id;
                 token.id = `tok:${e.event_id}`;
-                token.tokenId = int(e.attributes.token_id);
+                const tokenId = int(e.attributes.token_id);
+                if (tokenId !== null) {
+                    token.tokenId = tokenId;
+                }
                 token.probability = probability;
+                const basis = readProbabilityBasis(e.attributes.probability_basis);
+                if (basis !== null) {
+                    token.probabilityBasis = basis;
+                }
                 token.text = allowed ? rawText : null;
                 token.ns = e.mono_ns;
             }
         } else if (t === "inference.sampling.candidates") {
-            // Reserved in the Observatory taxonomy; attribute shape proposed in docs/TELEMETRY_PROTOCOL.md.
             const policy = streamPolicy.get(scopedSessionKey(stream, e.session_id)) ?? f.textCapture;
             const alternatives = readAlternatives(e.attributes.candidates, captureAllowsText(policy));
             if (alternatives !== null) {
@@ -585,6 +597,13 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
                 const token = tokenFor(e, reqKey, (reqKey ? requests.get(reqKey)?.entity.id : undefined) ?? null);
                 token.alternatives = alternatives;
                 token.candidatesEventId = e.event_id;
+                if (token.tokenId === null) {
+                    token.tokenId = int(e.attributes.sampled_token_id);
+                }
+                const basis = readProbabilityBasis(e.attributes.probability_basis);
+                if (basis !== null) {
+                    token.probabilityBasis = basis;
+                }
             }
         }
     }
@@ -738,7 +757,7 @@ function kvFor(kv: Map<string, KvPool>, stream: string, e: ObservatoryEvent): Kv
     return pool;
 }
 
-/** Proposed `inference.sampling.candidates` `candidates`: [{token_id, probability, text?}]; sorted most probable first. */
+/** `inference.sampling.candidates` `candidates`: [{token_id, probability, text?}]; sorted most probable first. */
 function readAlternatives(value: unknown, textAllowed: boolean): Alternative[] | null {
     if (!Array.isArray(value)) {
         return null;

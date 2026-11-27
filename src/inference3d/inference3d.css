@@ -373,6 +373,19 @@
     overflow-wrap: anywhere;
 }
 
+.i3d-prob-head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+}
+
+.i3d-prob-basis {
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--color-muted);
+}
+
 .i3d-prob-list {
     list-style: none;
     margin: var(--space-2) 0 0;

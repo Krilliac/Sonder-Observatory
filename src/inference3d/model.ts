@@ -160,6 +160,8 @@ export interface OperatorEntity {
     evidence: string[];
 }
 
+export type ProbabilityBasis = "post_sampling" | "pre_sampling";
+
 export interface Alternative {
     tokenId: number | null;
     probability: number;
@@ -177,6 +179,8 @@ export interface TokenCandidates {
     index: number | null;
     tokenId: number | null;
     probability: number | null;
+    /** Distribution basis when reported (`post_sampling` or `pre_sampling`); null for older producers. */
+    probabilityBasis: ProbabilityBasis | null;
     text: string | null;
     alternatives: Alternative[] | null;
     ns: number;
