@@ -176,30 +176,80 @@ function countLines(text: string): number {
     return text.split("\n").filter((l, i, all) => l.trim() !== "" && i < all.length - 1).length;
 }
 
-/** Checks id format, instance and contiguity over events in arrival order. */
+/** Sequence stream of an event: "" is the default stream, "samples" the named one. */
+export function sequenceStreamOf(event: ObservatoryEvent): string {
+    const named = event.producer.stream;
+    return typeof named === "string" ? named : "";
+}
+
+/**
+ * Checks id format, instance and contiguity over events in arrival order.
+ * Each sequence stream (producer.stream; absent is the default stream) is
+ * contiguous on its own: `<instance>-<sequence>` on the default stream and
+ * `<instance>-s<sequence>` on the "samples" stream. Any other stream name is
+ * a failure.
+ */
 function checkSequence(
     label: string,
     items: { event: ObservatoryEvent; gapBefore: boolean }[],
     instance: string,
     failures: string[],
 ): void {
-    let previous: number | null = null;
+    const previousByStream = new Map<string, number>();
     for (const { event, gapBefore } of items) {
-        const expectedId = `${instance}-${event.sequence}`;
+        const stream = sequenceStreamOf(event);
+        if (stream !== "" && stream !== "samples") {
+            failures.push(`${label}: unknown producer.stream ${JSON.stringify(stream)} (known: "samples")`);
+        }
+        const expectedId = `${instance}-${stream === "samples" ? "s" : ""}${event.sequence}`;
         if (event.event_id !== expectedId) {
-            failures.push(`${label}: event_id ${event.event_id} is not <instance_id>-<sequence> (${expectedId})`);
+            failures.push(
+                `${label}: event_id ${event.event_id} is not ${stream === "samples" ? "<instance_id>-s<sequence>" : "<instance_id>-<sequence>"} (${expectedId})`,
+            );
         }
         const declared = event.producer.instance_id;
         if (declared !== undefined && declared !== instance) {
             failures.push(`${label}: producer.instance_id ${String(declared)} does not match discovery (${instance})`);
         }
-        if (previous !== null && event.sequence !== previous + 1 && !gapBefore) {
+        const previous = previousByStream.get(stream);
+        if (previous !== undefined && event.sequence !== previous + 1 && !gapBefore) {
             failures.push(
-                `${label}: sequence ${event.sequence} follows ${previous} without a resume-gap or dropped notice`,
+                `${label}: sequence ${event.sequence} follows ${previous} without a resume-gap or dropped notice` +
+                    (stream === "" ? "" : ` (stream ${stream})`),
             );
         }
-        previous = event.sequence;
+        previousByStream.set(stream, event.sequence);
     }
+}
+
+/** `resume-gap <from>-<to>` is the default stream; `resume-gap s<from>-s<to>` the samples stream. */
+function parseResumeGapNotice(comment: string): string | null {
+    const match = /^resume-gap\s+(s?)(\d+)-(s?)(\d+)$/.exec(comment);
+    if (match === null || match[1] !== match[3] || Number(match[2]) > Number(match[4])) {
+        return null;
+    }
+    return match[1] === "s" ? "samples" : "";
+}
+
+/** Events of one sequence stream among the complete SSE blocks of `text`. */
+function countSseEventsOfStream(text: string, stream: string): number {
+    let count = 0;
+    for (const block of parseSseBlocks(text)) {
+        const data = block.fields.find(([n]) => n === "data");
+        if (data === undefined) {
+            continue;
+        }
+        try {
+            const value = JSON.parse(data[1]) as { producer?: { stream?: unknown } };
+            const named = value.producer?.stream;
+            if ((typeof named === "string" ? named : "") === stream) {
+                count += 1;
+            }
+        } catch {
+            // Reported by sseSample.
+        }
+    }
+    return count;
 }
 
 /** Exact-match allowlists echo the Origin (never `*`) and send `Vary: Origin`. */
@@ -296,12 +346,23 @@ function sseSample(
     const events: ObservatoryEvent[] = [];
     const comments: string[] = [];
     const items: { event: ObservatoryEvent; gapBefore: boolean }[] = [];
-    let gapPending = false;
+    // A notice excuses the next event of the stream it names; `dropped` excuses
+    // the next event of every stream. Each event clears only its own stream.
+    const pending = new Map<string, boolean>();
     for (const block of blocks) {
         for (const comment of block.comments) {
             comments.push(comment);
-            if (comment.startsWith("resume-gap") || comment.startsWith("dropped")) {
-                gapPending = true;
+            if (comment.startsWith("resume-gap")) {
+                const stream = parseResumeGapNotice(comment);
+                if (stream === null) {
+                    failures.push(`${label}: malformed resume-gap notice ${JSON.stringify(comment)}`);
+                } else {
+                    pending.set(stream, true);
+                }
+            } else if (comment.startsWith("dropped")) {
+                for (const stream of new Set(["", "samples", ...pending.keys()])) {
+                    pending.set(stream, true);
+                }
             }
         }
         const data = block.fields.filter(([n]) => n === "data").map(([, v]) => v);
@@ -331,9 +392,10 @@ function sseSample(
         if (id !== result.event.event_id) {
             failures.push(`${label}: id ${JSON.stringify(id ?? null)} differs from event_id ${result.event.event_id}`);
         }
+        const stream = sequenceStreamOf(result.event);
         events.push(result.event);
-        items.push({ event: result.event, gapBefore: gapPending });
-        gapPending = false;
+        items.push({ event: result.event, gapBefore: pending.get(stream) === true });
+        pending.set(stream, false);
     }
     checkSequence(label, items, instance, failures);
     return { sample: { events, comments }, items };
@@ -428,13 +490,17 @@ export async function checkProducer(url: string, options: ConformanceOptions): P
             if (sample.events.length === 0) {
                 failures.push("sse: no events arrived (the retained window should replay)");
             } else {
-                // 3. Resume via Last-Event-ID from the first event received.
+                // 3. Resume via Last-Event-ID from the first event received. The
+                // replay interleaves the sequence streams, so read until an
+                // event of the first event's own stream arrived and compare
+                // the first item of that stream.
                 const from = sample.events[0]!;
+                const fromStream = sequenceStreamOf(from);
                 const resumed = await readStream(
                     fetchImpl,
                     sseUrl,
                     { ...base, Accept: "text/event-stream", "Last-Event-ID": from.event_id },
-                    (t) => countSseEvents(t) >= 1,
+                    (t) => countSseEventsOfStream(t, fromStream) >= 1,
                     () => true,
                     sample.events.length > 1 ? maxMs : Math.min(maxMs, idleMs),
                     idleMs,
@@ -442,7 +508,7 @@ export async function checkProducer(url: string, options: ConformanceOptions): P
                 const resumeFailures: string[] = [];
                 const { items } = sseSample(resumed.text, instance, resumeFailures, "sse resume");
                 failures.push(...resumeFailures);
-                const firstItem = items[0];
+                const firstItem = items.find((item) => sequenceStreamOf(item.event) === fromStream);
                 if (sample.events.length > 1 && !firstItem) {
                     failures.push(`sse resume: nothing arrived after Last-Event-ID ${from.event_id}`);
                 } else if (firstItem && firstItem.event.sequence !== from.sequence + 1 && !firstItem.gapBefore) {
@@ -450,6 +516,41 @@ export async function checkProducer(url: string, options: ConformanceOptions): P
                         `sse resume: after Last-Event-ID ${from.event_id} the stream started at sequence ` +
                             `${firstItem.event.sequence}, expected ${from.sequence + 1}`,
                     );
+                }
+
+                // 3b. Two-member cursor (the last id of each stream seen): the
+                // first replayed item of each stream is cursor + 1 or has its
+                // own notice.
+                const lastByStream = new Map<string, ObservatoryEvent>();
+                for (const event of sample.events) {
+                    lastByStream.set(sequenceStreamOf(event), event);
+                }
+                if (lastByStream.size > 1) {
+                    const cursor = [...lastByStream.entries()]
+                        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+                        .map(([, event]) => event.event_id)
+                        .join(",");
+                    const both = await readStream(
+                        fetchImpl,
+                        sseUrl,
+                        { ...base, Accept: "text/event-stream", "Last-Event-ID": cursor },
+                        (t) => [...lastByStream.keys()].every((stream) => countSseEventsOfStream(t, stream) >= 1),
+                        (t) => countSseEvents(t) > 0,
+                        Math.min(maxMs, 3000),
+                        idleMs,
+                    );
+                    const bothFailures: string[] = [];
+                    const replay = sseSample(both.text, instance, bothFailures, "sse resume (two-member cursor)");
+                    failures.push(...bothFailures);
+                    for (const [stream, last] of lastByStream) {
+                        const first = replay.items.find((item) => sequenceStreamOf(item.event) === stream);
+                        if (first && first.event.sequence !== last.sequence + 1 && !first.gapBefore) {
+                            failures.push(
+                                `sse resume (two-member cursor ${cursor}): stream ${stream === "" ? "default" : stream} ` +
+                                    `started at sequence ${first.event.sequence}, expected ${last.sequence + 1}`,
+                            );
+                        }
+                    }
                 }
             }
         }

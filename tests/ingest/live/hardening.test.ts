@@ -152,6 +152,10 @@ describe("HTTP Retry-After, header validation and SSE control comments", () => {
     it("parses and tracks SSE : resume-gap and : dropped control comments", async () => {
         expect(parseSseControlComment("resume-gap 10-25")).toEqual({ kind: "resume-gap", from: 10, to: 25 });
         expect(parseSseControlComment("resume-gap 25-10")).toBeNull();
+        expect(parseSseControlComment("resume-gap s3-s9")).toEqual({ kind: "resume-gap", from: 3, to: 9, stream: "samples" });
+        expect(parseSseControlComment("resume-gap s3-9")).toBeNull();
+        expect(parseSseControlComment("resume-gap 3-s9")).toBeNull();
+        expect(parseSseControlComment("resume-gap s9-s3")).toBeNull();
         expect(parseSseControlComment("dropped 7")).toEqual({ kind: "dropped", count: 7 });
         expect(parseSseControlComment("dropped 0")).toBeNull();
         expect(parseSseControlComment("keepalive")).toBeNull();

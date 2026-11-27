@@ -266,7 +266,10 @@ and correlates their events itself; no producer relays another's telemetry.
     "query": "last_event_id",
     "retained_events": 8192,
     "oldest_sequence": 0,
-    "next_sequence": 8192
+    "next_sequence": 8192,
+    "streams": {
+      "samples": { "retained_events": 8192, "oldest_sequence": 1204, "next_sequence": 9396 }
+    }
   },
   "auth": { "required": false, "schemes": ["bearer"] },
   "clock": { "mono_ns": "host-monotonic" },
@@ -320,11 +323,26 @@ refuses discovery documents over 64 KiB; producers serve both directly.
 ### Envelope identity and clock
 
 - `event_id = <producer.instance_id>-<sequence>`; `sequence` is contiguous per
-  producer instance from 0. Events dropped before sequencing take no number.
+  (producer instance, sequence stream) from 0. Events dropped before
+  sequencing take no number.
+- **Sequence streams.** A producer may number a second stream of events apart
+  from its default stream, so that retention can differ per stream without
+  leaving holes in either (a shared number space cannot keep old lifecycle
+  events and drop old periodic samples without a hole). `producer.stream`
+  names the stream: absent or `null` is the default stream, and the only named
+  stream today is `"samples"` (periodic `*.sample` events, Sonder-Inference).
+  A `samples` event's id is `<producer.instance_id>-s<sequence>`. The
+  producer decides membership; consumers read `producer.stream` and never
+  infer it from `event_type`. Other producers (Runtime, the fake producer)
+  have one stream and send no `producer.stream`. Consumers key gap detection
+  on (instance, stream); request, session, GPU and dropped-report identities
+  stay on the producer instance alone. The schema id stays
+  `sonder.observatory.event/1` (additive optional field).
 - `producer.role` (`inference`, `runtime`, `fixture`) and `producer.synthetic`
   (true only for synthetic data such as a mock backend) are additive optional
-  envelope fields; `producer.instance_id` names the sequence stream. Each of
-  the three may be absent or `null` ("not stated"; `synthetic: null` counts
+  envelope fields; `producer.instance_id` names the producer instance (and
+  `producer.stream`, when present, the sequence stream within it). Each of
+  these may be absent or `null` ("not stated"; `synthetic: null` counts
   as not synthetic). Present with another type (for example
   `"synthetic": "true"`), the event is rejected: the v1 schema declares these
   types, which were undeclared before (see docs/DECISIONS.md).
@@ -340,22 +358,40 @@ refuses discovery documents over 64 KiB; producers serve both directly.
 
 ### Resume
 
-- `Last-Event-ID` wins over `?last_event_id=`. The id is split at its last
-  `-` into instance and sequence.
+- `Last-Event-ID` wins over `?last_event_id=`. The cursor is one event id, or
+  several separated by `,` (at most one per sequence stream, any order,
+  optional spaces), for example `tel-ab12-41,tel-ab12-s97`. Each member is
+  split at its last `-` into instance and tail; the tail is `<sequence>`
+  (default stream) or `s<sequence>` (samples stream). The rules below apply
+  to each stream independently.
 - Same instance and `seq + 1` is still retained: replay from `seq + 1`, then
   go live.
-- Same instance but older than the retained window: an SSE comment
-  `: resume-gap <from>-<to>`, then the whole window. Observatory shows the
-  sequence gap.
-- Unknown or different instance (the producer restarted), or no id: replay
-  the whole retained window, then go live. Observatory keys streams by
-  instance, so a restart shows up as a new stream, not as a gap.
-- `?since=now`: live events only.
+- Same instance but older than that stream's retained window: an SSE comment
+  `: resume-gap <from>-<to>` (default stream) or `: resume-gap s<from>-s<to>`
+  (samples stream), as its own block directly before the first replayed event
+  of that stream, then the whole window of that stream. At most one per
+  stream per connection; a fresh connection never gets one. Observatory shows
+  the sequence gap.
+- No member for a stream, a member of a different instance (the producer
+  restarted), or a malformed member: replay the whole retained window of that
+  stream, then go live. Observatory keys streams by instance, so a restart
+  shows up as a new stream, not as a gap.
+- `?since=now`: live events only, from every stream.
+- The replay interleaves the streams in original emission order. A client
+  that sends only the last id it saw (a plain EventSource) still works: the
+  other stream replays its whole window and the client drops duplicates by
+  `event_id`. Observatory sends one member per stream.
+- Discovery `resume.retained_events`, `oldest_sequence` and `next_sequence`
+  describe the default stream; `resume.streams.<name>` (optional) carries the
+  same three fields for a named stream.
+- A named stream is a sliding window with no "latest per key" guarantee: a
+  producer that wants a sample type visible to late subscribers re-emits it
+  periodically.
 
 ### Heartbeats and backpressure
 
-- Each producer keeps a bounded ring (Inference 8192, Runtime 4096 by
-  default) with a cursor or queue per subscriber. Emission is O(1), does no
+- Each producer keeps a bounded ring per sequence stream (Inference 8192 per
+  stream, Runtime 4096 by default) with a cursor or queue per subscriber. Emission is O(1), does no
   I/O, never blocks and never raises into the caller.
 - A slow subscriber loses its oldest undelivered events. The loss is per
   subscriber: it is visible to that subscriber as a sequence gap, announced on

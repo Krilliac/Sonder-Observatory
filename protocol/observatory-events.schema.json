@@ -47,6 +47,11 @@
         "synthetic": {
           "type": ["boolean", "null"],
           "description": "true only for synthetic data. null means not stated (treated as not synthetic)."
+        },
+        "stream": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "Sequence stream within producer.instance_id. Absent or null is the default stream. sequence is contiguous from 0 per (instance_id, stream); a named stream's event_id is <instance_id>-s<sequence> (the 's' prefix is the 'samples' stream form). The producer decides membership; consumers never infer it from event_type."
         }
       },
       "additionalProperties": true

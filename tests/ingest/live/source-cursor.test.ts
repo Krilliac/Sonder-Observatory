@@ -111,6 +111,64 @@ it("preserves the synchronous WebSocket adapted event-id cursor", async () => {
     expect(resumes).toEqual([null, "source-0:derived:1"]);
 });
 
+function streamed(instance: string, stream: "main" | "samples", sequence: number): ObservatoryEvent {
+    const samples = stream === "samples";
+    return {
+        schema: "sonder.observatory.event/1", event_id: `${instance}-${samples ? "s" : ""}${sequence}`, sequence,
+        event_type: samples ? "device.memory.sample" : "synthetic.cursor", wall_time: "2026-10-04T00:00:00.000Z",
+        mono_ns: 1000 + sequence * 2 + (samples ? 1 : 0), session_id: "cursor-session",
+        producer: { name: "synthetic-cursor", version: "1", node_id: "local", synthetic: true, instance_id: instance, ...(samples ? { stream: "samples" } : {}) },
+        attributes: {},
+    };
+}
+
+describe("per-stream resume cursors", () => {
+    const wire = (kind: HttpKind, event: ObservatoryEvent) => kind === "sse"
+        ? `id: ${event.event_id}\ndata: ${JSON.stringify(event)}\n\n` : JSON.stringify(event) + "\n";
+
+    async function resumesFor(kind: HttpKind, first: ObservatoryEvent[], second?: ObservatoryEvent[]) {
+        vi.useFakeTimers();
+        const resumes: (string | null)[] = [];
+        const client = start({
+            url: `http://127.0.0.1:8766/${kind}`, httpBackpressure: "pause",
+            maxRetries: 1, backoff: { initialMs: 1, maxMs: 1, jitter: 0 }, bufferCapacity: 64, flushIntervalMs: 1,
+            fetch: async (_url, init) => {
+                resumes.push(new Headers(init?.headers).get("Last-Event-ID"));
+                const body = resumes.length === 1 ? first.map((e) => wire(kind, e)).join("")
+                    : resumes.length === 2 && second ? second.map((e) => wire(kind, e)).join("") : "";
+                return new Response(body, { headers: { "Content-Type": contentType(kind) } });
+            },
+            sink: { append: () => {} },
+        });
+        await vi.advanceTimersByTimeAsync(200);
+        return { resumes, client };
+    }
+
+    it.each(["sse", "ndjson"] as const)("reconnects with one member per stream over %s", async (kind) => {
+        const { resumes, client } = await resumesFor(kind, [
+            streamed("inst", "main", 4), streamed("inst", "samples", 8), streamed("inst", "main", 5), streamed("inst", "samples", 9),
+        ]);
+        expect(resumes[0]).toBeNull();
+        expect(resumes[1]).toBe("inst-5,inst-s9");
+        expect(client.status.lastEventId).toBe("inst-5,inst-s9");
+    });
+
+    it.each(["sse", "ndjson"] as const)("drops stale members when a new producer instance appears over %s", async (kind) => {
+        const { resumes } = await resumesFor(
+            kind,
+            [streamed("old", "main", 5), streamed("old", "samples", 9)],
+            [streamed("new", "samples", 0)],
+        );
+        expect(resumes[1]).toBe("old-5,old-s9");
+        expect(resumes[2]).toBe("new-s0");
+    });
+
+    it.each(["sse", "ndjson"] as const)("a single-stream producer still sends the bare id over %s", async (kind) => {
+        const { resumes } = await resumesFor(kind, [streamed("inst", "main", 4), streamed("inst", "main", 5)]);
+        expect(resumes[1]).toBe("inst-5");
+    });
+});
+
 describe("real HTTP drop-mode fanout stress", () => {
     it.each(["sse", "ndjson"] as const)("bounds 16 concurrent %s clients and resumes from completed producer cursors", async (kind) => {
         const count = 128;

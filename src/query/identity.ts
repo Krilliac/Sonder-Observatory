@@ -37,6 +37,20 @@ export function producerStreamKey(event: ObservatoryEvent): string {
         : tupleKey("stream-session", event.session_id, event.producer.name, event.producer.node_id);
 }
 
+/**
+ * Identity of the counter that assigned `event.sequence`: the producer stream
+ * plus, when the producer names one (`producer.stream`), that sequence stream.
+ * A producer numbers each of its sequence streams contiguously from 0, so gap
+ * detection must key on this, not on `producerStreamKey`. Request, session,
+ * GPU and dropped-report keys keep using `producerStreamKey`: a samples-stream
+ * event still belongs to the same producer.
+ */
+export function sequenceStreamKey(event: ObservatoryEvent): string {
+    const base = producerStreamKey(event);
+    const named = event.producer.stream;
+    return typeof named === "string" && named !== "" ? tupleKey("stream-seq", base, named) : base;
+}
+
 /** Presence/empty-ID rules belong to each caller, not this string composer. */
 export function scopedRequestKey(stream: string, requestId: string): string {
     return tupleKey("request", stream, requestId);
@@ -99,7 +113,13 @@ export function streamNameAndNode(stream: string): { name: string; nodeId: strin
     } catch {
         return null;
     }
-    if (!Array.isArray(fields) || fields.length !== 4 || !fields.every((v: unknown) => typeof v === "string")) {
+    if (!Array.isArray(fields) || !fields.every((v: unknown) => typeof v === "string")) {
+        return null;
+    }
+    if (fields.length === 3 && fields[0] === "stream-seq") {
+        return streamNameAndNode(fields[1] as string);
+    }
+    if (fields.length !== 4) {
         return null;
     }
     if (fields[0] === "stream-instance") {

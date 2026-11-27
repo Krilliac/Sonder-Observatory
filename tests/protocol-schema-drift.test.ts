@@ -82,6 +82,7 @@ describe("protocol schema mirror", () => {
             expect(props[key]!.type, `producer.${key}`).toEqual([type, "null"]);
         }
         expect(props.instance_id!.minLength).toBe(1);
+        expect(props.stream!.minLength).toBe(1);
     });
 
     it("rejects producer optional fields of the wrong type", () => {
@@ -100,6 +101,10 @@ describe("protocol schema mirror", () => {
         expect(event({ instance_id: "rt-0123456789ab", role: "runtime", synthetic: false })).toBe(true);
         expect(event({ role: "some-future-role" })).toBe(true);
         expect(event({ instance_id: null, role: null, synthetic: null })).toBe(true);
+        expect(event({ stream: "samples" })).toBe(true);
+        expect(event({ stream: null })).toBe(true);
+        expect(event({ stream: "" })).toBe(false);
+        expect(event({ stream: 3 })).toBe(false);
         expect(event({ instance_id: "" })).toBe(false);
         expect(event({ instance_id: 7 })).toBe(false);
         expect(event({ role: 1 })).toBe(false);

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { relatedEvents } from "../src/inspector/related";
+import { producerStreamKey, sequenceStreamKey, streamNameAndNode } from "../src/query/identity";
 import { ReplayCursor, upperBound } from "../src/replay/controller";
 import { compareEvents, findSequenceGaps, orderEvents } from "../src/replay/order";
 import { SessionStore } from "../src/replay/session";
@@ -44,6 +45,59 @@ describe("replay ordering", () => {
         const gaps = findSequenceGaps(events);
         expect(gaps).toHaveLength(1);
         expect(gaps[0]).toMatchObject({ from: 2, to: 3 });
+    });
+
+    describe("named sequence streams (producer.stream)", () => {
+        const base = { name: "sonder-inference", version: "1", node_id: "n", instance_id: "tel-a" };
+        const main = (sequence: number) =>
+            makeEvent({ event_id: `tel-a-${sequence}`, sequence, mono_ns: sequence * 2, producer: base });
+        const sample = (sequence: number) =>
+            makeEvent({
+                event_id: `tel-a-s${sequence}`,
+                sequence,
+                mono_ns: sequence * 2 + 1,
+                event_type: "device.memory.sample",
+                producer: { ...base, stream: "samples" },
+            });
+
+        it("two streams sharing numbers give no gaps", () => {
+            const events = [main(0), sample(0), main(1), sample(1), main(2), sample(2)];
+            expect(findSequenceGaps(events)).toEqual([]);
+            expect(orderEvents(events).gaps).toEqual([]);
+            const store = new SessionStore();
+            store.append(events);
+            expect(store.gaps).toEqual([]);
+        });
+
+        it("reports a hole in the samples stream once, under its own key", () => {
+            const events = [main(0), sample(0), main(1), sample(3), main(2), sample(4)];
+            const gaps = findSequenceGaps(events);
+            expect(gaps).toHaveLength(1);
+            expect(gaps[0]).toMatchObject({ from: 1, to: 2 });
+            expect(gaps[0]!.stream).toContain("stream-seq");
+            const store = new SessionStore();
+            store.append(events);
+            expect(store.gaps).toEqual(gaps);
+            // A late arrival that fills the hole is tracked incrementally.
+            store.append([sample(1), sample(2)]);
+            expect(store.gaps).toEqual([]);
+        });
+
+        it("a single-stream fixture reports the same gaps as before", () => {
+            const events = [main(0), main(1), main(4)];
+            const gaps = findSequenceGaps(events);
+            expect(gaps).toHaveLength(1);
+            expect(gaps[0]).toMatchObject({ from: 2, to: 3 });
+            expect(gaps[0]!.stream).not.toContain("stream-seq");
+            expect(findSequenceGaps([main(0), sample(0)])).toEqual([]);
+        });
+
+        it("sample events still belong to their producer for request and session keys", () => {
+            expect(producerStreamKey(sample(0))).toBe(producerStreamKey(main(0)));
+            expect(sequenceStreamKey(sample(0))).not.toBe(sequenceStreamKey(main(0)));
+            expect(sequenceStreamKey(main(0))).toBe(producerStreamKey(main(0)));
+            expect(streamNameAndNode(sequenceStreamKey(sample(0)))).toEqual({ name: "sonder-inference", nodeId: "n" });
+        });
     });
 });
 

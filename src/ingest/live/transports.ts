@@ -9,7 +9,8 @@ import { LineSplitter, MAX_LINE_CHARS, MAX_SSE_FIELD_CHARS, SseParser } from "./
 
 /** Producer-announced live stream notices carried in SSE comments (live protocol v1). */
 export type SseServerNotice =
-    | { kind: "resume-gap"; from: number; to: number }
+    /** `stream` is "samples" for the `s<from>-s<to>` form; absent for the default stream. */
+    | { kind: "resume-gap"; from: number; to: number; stream?: string }
     | { kind: "dropped"; count: number };
 
 export interface TransportCallbacks {
@@ -77,17 +78,21 @@ export function isValidHttpHeaderValue(value: string): boolean {
 
 /**
  * Parses Sonder live-protocol v1 SSE comments:
- * - `: resume-gap <from>-<to>`
+ * - `: resume-gap <from>-<to>` (default stream) and
+ *   `: resume-gap s<from>-s<to>` (samples stream; both numbers carry the prefix)
  * - `: dropped <n>`
  */
 export function parseSseControlComment(comment: string): SseServerNotice | null {
     const trimmed = comment.trim();
-    const gap = /^resume-gap\s+(\d+)-(\d+)$/.exec(trimmed);
+    const gap = /^resume-gap\s+(s?)(\d+)-(s?)(\d+)$/.exec(trimmed);
     if (gap) {
-        const from = Number(gap[1]);
-        const to = Number(gap[2]);
+        if (gap[1] !== gap[3]) {
+            return null;
+        }
+        const from = Number(gap[2]);
+        const to = Number(gap[4]);
         if (Number.isSafeInteger(from) && Number.isSafeInteger(to) && from <= to) {
-            return { kind: "resume-gap", from, to };
+            return gap[1] === "s" ? { kind: "resume-gap", from, to, stream: "samples" } : { kind: "resume-gap", from, to };
         }
         return null;
     }
