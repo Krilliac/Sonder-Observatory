@@ -71,7 +71,7 @@ Optional correlation IDs:
 - `inference.prefill.completed`
 - `inference.decode.started`
 - `inference.token.generated`
-- `inference.sampling.candidates` (optional/high volume)
+- `inference.sampling.candidates` (standard level; bounded per request)
 - `inference.decode.completed`
 - `inference.speculation.draft`
 - `inference.speculation.accepted`
@@ -83,8 +83,10 @@ Optional correlation IDs:
 what one event is:
 
 - `"token"`: exactly `count` tokens (default 1). Only these events are token
-  counts (Sonder-Inference emits them when it samples tokens itself, with
-  `token_id` and `probability`).
+  counts. Sonder-Inference emits them with `token_id` and `probability` when it
+  samples tokens itself, and for backend-sampled tokens whose probabilities the
+  backend reports (`llamaserver`), which also adds `probability_basis`
+  (`"post_sampling"` or `"pre_sampling"`).
 - `"chunk"` (or any other non-`token` unit): a piece of backend-streamed text
   whose token count is unknown. Hidden reasoning ("thinking") tokens produce no
   chunk at all, so the number of chunk events says nothing about how many
@@ -169,6 +171,18 @@ first output to the end of the request), never by session wall time.
 - `recording.rotated`
 - `recording.completed`
 
+## 3D Inference: sampling candidates (implemented by Sonder-Inference)
+
+Status: **implemented by Sonder-Inference** for backend-sampled token
+probabilities on backends advertising `logprobs` (`llamaserver`; see
+Sonder-Inference `docs/TELEMETRY.md`, "Backend-sampled token probabilities").
+Sonder's own sampler (`token_logits`) does not emit
+`inference.sampling.candidates` yet.
+
+| Event | Level | Attributes (envelope carries `request_id`, `model_instance_id`, `device_id`) |
+| --- | --- | --- |
+| `inference.sampling.candidates` | standard | per backend-sampled token with a reported probability and at least one alternative, bounded per request (`token_probability_top_k` default 5, max 10; `token_candidates_stride` default 1; `token_candidates_max_events` default 256 per request): `index` int (same as the `inference.token.generated` `index`), `sampled_token_id` int, optional `probability_basis` str (`post_sampling` / `pre_sampling`, matching `inference.token.generated.probability_basis`), `candidates` arr of `{token_id int, probability num, text str (only with text capture)}`, most probable first. Older producers that omit `probability_basis` remain supported. |
+
 ## 3D Inference: reserved and proposed events
 
 Status: **reserved / not yet emitted by Sonder Inference** (its
@@ -187,20 +201,24 @@ visualization").
 | `backend.layer.exited` | deep | `layer` int (0-based), `layer_count` int, `phase` str (`prefill` / `decode`), `step` int (generated-token index; 0 for prefill), `duration_ms` num; optional `tokens` int (tokens processed in this pass), `activation_rms` num, `attention_entropy` num (nats). Only values the backend measures. |
 | `backend.layer.entered` | deep | optional; same `layer`, `phase`, `step`. Observatory counts it as layer activity only. |
 | `backend.operator.completed` | deep | `operator` str (backend's own name, e.g. `attention`, `mlp`, `rms_norm`), `layer` int or null, `phase` str, `step` int, `duration_ms` num |
-| `inference.sampling.candidates` | deep | per sampled token, only on backends with `token_logits` (Sonder's sampler): `index` int (same as the `inference.token.generated` `index`), `sampled_token_id` int, `candidates` arr of `{token_id int, probability num, text str (only with text capture)}`, most probable first, probabilities as the sampler chain saw them (same basis as `inference.token.generated.probability`) |
 
 What Observatory reads to explain an absent panel, per producer: the backend
 named by `session.created.backend` / `model.load.*.backend`; its
 capabilities from `backend.registered.capabilities` or, for live
 connections, the discovery `links.health` document (`backends[].capabilities`,
-same origin only); `request.started.sampler`; and the highest
-`sampling.level` seen. Layer planes need a backend advertising
-`layer_telemetry` plus `--telemetry-level deep`; token probabilities need
-`token_logits` (`unit: "token"` events carry `probability`); top
-alternatives need `inference.sampling.candidates`. Sonder-Inference v0.1
+same origin only); `request.started.sampler`; and the declared telemetry level
+(discovery `sampling_level`, then health `telemetry.level`, else the highest
+`sampling.level` seen). Layer planes need a backend advertising
+`layer_telemetry` plus `--telemetry-level deep`; token probabilities work when
+probability-bearing `inference.token.generated` events arrive or a backend
+advertises `logprobs` or `token_logits` at `standard` level or above; top
+alternatives work when `inference.sampling.candidates` events arrive (emitted
+at `standard` level or above by `logprobs` backends). Sonder-Inference
 backends advertise: `ollama` streaming, remote_process; `llamacpp`
-tokenization, streaming, batched_prefill, deterministic; `mock` optionally
-token_logits (docs/BACKENDS.md there).
+tokenization, streaming, batched_prefill, deterministic; `llamaserver`
+streaming, remote_process, embeddings, tool_calling, multimodal, logprobs
+(plus speculative_decode, prefix_reuse, reranking in native mode); `mock`
+optionally token_logits (docs/BACKENDS.md there).
 
 ## Text and sensitive payloads
 

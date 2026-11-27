@@ -8,7 +8,7 @@ import { streamLabel } from "./derive";
 import { requestLabel, requestLabelsAt } from "./labels";
 import type { PipelineModel } from "./model";
 import { STAGES } from "./model";
-import { fmtBytes, fmtMs, fmtRate } from "./panelViews";
+import { fmtBytes, fmtMs, fmtProbabilityBasis, fmtRate } from "./panelViews";
 
 export interface EntityRow {
     id: string;
@@ -124,12 +124,14 @@ export function buildEntityRows(
         });
     }
     if (latest) {
+        const probState = latest.probability !== null ? `p ${latest.probability.toFixed(3)}` : "no probability";
+        const basisLabel = fmtProbabilityBasis(latest.probabilityBasis);
         add({
             id: latest.id,
             kind: "token",
             label: `#${latest.index ?? "?"}`,
             where: requestLabel(latest.requestEntityId, requestLabels),
-            state: latest.probability !== null ? `p ${latest.probability.toFixed(3)}` : "no probability",
+            state: basisLabel ? `${probState} · ${basisLabel}` : probState,
             measures: latest.alternatives ? `${latest.alternatives.length} alternatives` : "no alternatives",
             evidence: latest.candidatesEventId ? [latest.eventId, latest.candidatesEventId] : [latest.eventId],
         });
