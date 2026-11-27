@@ -49,6 +49,8 @@ export interface DeriveOptions {
     nowNs?: number | null;
     /** Health backends per producer instance id (live client, `/v1/sonder/health`). */
     health?: ReadonlyMap<string, readonly HealthBackend[]>;
+    /** Declared telemetry level per producer instance id (discovery `sampling_level`, else health `telemetry.level`). */
+    declaredLevels?: ReadonlyMap<string, string>;
     /** Most recent finished requests to keep (default MAX_FINISHED). */
     maxFinished?: number;
 }
@@ -689,7 +691,10 @@ export function derivePipeline(events: readonly ObservatoryEvent[], options: Der
 
     const capabilities = [...facts.values()]
         .sort((a, b) => a.nodeId.localeCompare(b.nodeId) || a.producer.localeCompare(b.producer) || a.stream.localeCompare(b.stream))
-        .map((f) => producerCapabilities(f, f.instanceId ? options.health?.get(f.instanceId) : undefined));
+        .map((f) => {
+            f.declaredLevel = (f.instanceId ? options.declaredLevels?.get(f.instanceId) : undefined) ?? null;
+            return producerCapabilities(f, f.instanceId ? options.health?.get(f.instanceId) : undefined);
+        });
 
     return {
         nowNs,
