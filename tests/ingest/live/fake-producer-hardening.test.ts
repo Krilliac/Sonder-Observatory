@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { createServer, type Server } from "node:net";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { startFakeLiveProducer, type FakeLiveProducer } from "../../../scripts/fake-live-producer.mjs";
 
@@ -66,17 +67,24 @@ describe("legacy fake producer (scripts/fake-producer.mjs)", () => {
         }
     });
 
-    function start(args: string[]): Promise<{ child: ChildProcess; out: string; code: number | null }> {
+    function start(args: string[]): Promise<{ child: ChildProcess; out: string; code: number | null; url: string | null }> {
         const script = fileURLToPath(new URL("../../../scripts/fake-producer.mjs", import.meta.url));
         const child = spawn(process.execPath, [script, ...args], { stdio: ["ignore", "pipe", "pipe"] });
         children.push(child);
         let out = "";
         return new Promise((resolve) => {
-            const done = (code: number | null) => resolve({ child, out, code });
+            let settled = false;
+            const done = (code: number | null, url: string | null = null) => {
+                if (!settled) {
+                    settled = true;
+                    resolve({ child, out, code, url });
+                }
+            };
             child.stdout!.on("data", (d: Buffer) => {
                 out += d.toString();
-                if (out.includes("fake producer: ws://")) {
-                    done(null);
+                const match = out.match(/fake producer: (ws:\/\/\S+) .*\r?\n/);
+                if (match) {
+                    done(null, match[1]!);
                 }
             });
             child.stderr!.on("data", (d: Buffer) => {
@@ -108,12 +116,42 @@ describe("legacy fake producer (scripts/fake-producer.mjs)", () => {
     }, 20_000);
 
     it("refuses a cross-origin page but accepts the Observatory origin and non-browser clients", async () => {
-        const port = 20_000 + Math.floor(Math.random() * 20_000);
-        const r = await start(["--port", String(port)]);
+        const r = await start(["--port", "0"]);
         expect(r.code).toBeNull();
-        const url = `ws://127.0.0.1:${port}`;
+        expect(r.url).toMatch(/^ws:\/\/127\.0\.0\.1:[1-9]\d*$/);
+        const url = r.url!;
         expect(await connect(url, "https://evil.example")).toBe("refused");
         expect(await connect(url, "http://127.0.0.1:5173")).toBe("open");
         expect(await connect(url)).toBe("open");
+    }, 20_000);
+
+    it("binds an OS-assigned port with --port 0 even when the port the old random picker would choose is occupied", async () => {
+        const blocker = await new Promise<{ server: Server; port: number }>((resolve, reject) => {
+            const tryPort = (candidate: number) => {
+                const s = createServer();
+                s.once("error", (err: NodeJS.ErrnoException) => {
+                    if (err.code === "EADDRINUSE" && candidate < 39_999) {
+                        tryPort(candidate + 1);
+                    } else {
+                        reject(err);
+                    }
+                });
+                s.listen(candidate, "127.0.0.1", () => resolve({ server: s, port: candidate }));
+            };
+            tryPort(25_000);
+        });
+        const randomSpy = vi.spyOn(Math, "random").mockReturnValue((blocker.port - 20_000 + 0.5) / 20_000);
+        try {
+            const r = await start(["--port", "0"]);
+            expect(r.code).toBeNull();
+            expect(r.url).toMatch(/^ws:\/\/127\.0\.0\.1:[1-9]\d*$/);
+            const boundPort = Number(new URL(r.url!).port);
+            expect(boundPort).toBeGreaterThan(0);
+            expect(boundPort).not.toBe(blocker.port);
+            expect(await connect(r.url!)).toBe("open");
+        } finally {
+            randomSpy.mockRestore();
+            await new Promise<void>((resolve) => blocker.server.close(() => resolve()));
+        }
     }, 20_000);
 });

@@ -43,6 +43,10 @@ if (!isLoopbackHost(host)) {
     console.error(`refusing to bind ${host}: this producer has no authentication and binds loopback only (use fake-live-producer.mjs --token-file for a LAN listener)`);
     process.exit(2);
 }
+if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    console.error("--port must be an integer between 0 and 65535");
+    process.exit(2);
+}
 if (!Number.isInteger(maxConnections) || maxConnections <= 0) {
     console.error("--max-connections must be a positive integer");
     process.exit(2);
@@ -103,7 +107,9 @@ const wss = new WebSocketServer({
     },
 });
 wss.on("listening", () => {
-    console.log(`fake producer: ws://${host}:${port} replaying ${events.length} events from ${file} at ${speed}x${loop ? " (loop)" : ""}`);
+    const addr = wss.address();
+    const boundPort = typeof addr === "object" && addr !== null ? addr.port : port;
+    console.log(`fake producer: ws://${host}:${boundPort} replaying ${events.length} events from ${file} at ${speed}x${loop ? " (loop)" : ""}`);
 });
 wss.on("connection", (socket, request) => {
     console.log(`client connected from ${request.socket.remoteAddress}`);
