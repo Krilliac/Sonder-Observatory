@@ -62,10 +62,17 @@ for data, or not applicable (Runtime). The reason is derived from what the
 producer declares (src/inference3d/capabilities.ts): the backend its
 sessions/models name, that backend's capabilities from
 `backend.registered` or the live health document, `request.started.sampler`,
-the highest `sampling.level`, and the text-capture policy. Example for an
-Ollama-backed Sonder Inference: "backend `ollama` does not expose layer
-telemetry (needs a backend advertising `layer_telemetry` and
-`--telemetry-level deep`; no Sonder Inference backend advertises it yet)".
+the telemetry level, and the text-capture policy. The level is taken in this
+order: discovery `sampling_level`, then health `telemetry.level`, then the
+highest `sampling.level` seen on events. Example for an Ollama-backed Sonder
+Inference declaring `standard`: "backend `ollama` does not expose layer
+telemetry (no `layer_telemetry` capability advertised) and telemetry level is
+`standard`, not `deep`; layer data needs a backend advertising
+`layer_telemetry` at `--telemetry-level deep`; no Sonder Inference backend
+advertises it yet". When token probabilities arrive without
+`inference.sampling.candidates` events, Top alternatives says the backend
+emits probabilities but no candidates events (and that it does not advertise
+`token_logits` when that is known).
 When layers are absent the scene collapses to the stage pipeline and says so
 in a notice above the canvas. The event shapes are in
 [TELEMETRY_PROTOCOL.md](../TELEMETRY_PROTOCOL.md) "3D Inference: reserved and

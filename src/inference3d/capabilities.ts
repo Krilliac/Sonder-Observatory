@@ -6,8 +6,9 @@
  * `model.load.*.backend`), the capabilities that backend advertises
  * (`backend.registered.capabilities`, or `/v1/sonder/health`
  * `backends[].capabilities` when the live client fetched it), the sampler
- * (`request.started.sampler`), the telemetry level (`sampling.level`) and the
- * declared text capture policy. Sonder-Inference capability names are listed
+ * (`request.started.sampler`), the telemetry level (the declared discovery
+ * `sampling_level`, then health `telemetry.level`, else the highest
+ * `sampling.level` seen on events) and the declared text capture policy. Sonder-Inference capability names are listed
  * in its docs/BACKENDS.md (`token_logits`, `layer_telemetry`, …).
  */
 import { PANEL_LABELS, PANEL_ORDER, type Availability, type PanelAvailability, type PanelId, type ProducerCapabilities } from "./model";
@@ -174,7 +175,7 @@ export function producerCapabilities(f: StreamFacts, health?: readonly { name: s
                         panel(
                             id,
                             "unavailable",
-                            `${who} does not expose layer telemetry (no ${code("layer_telemetry")} capability advertised)${effLevel === "deep" ? "" : ` and telemetry level is ${code(level)}, not ${code("deep")}`}; layer data needs a backend advertising ${code("layer_telemetry")}${effLevel === "deep" ? "" : ` at ${code("--telemetry-level deep")}`}`,
+                            `${who} does not expose layer telemetry (no ${code("layer_telemetry")} capability advertised)${effLevel === "deep" ? "" : ` and telemetry level is ${code(level)}, not ${code("deep")}`}; layer data needs a backend advertising ${code("layer_telemetry")}${effLevel === "deep" ? "" : ` at ${code("--telemetry-level deep")}`}; no Sonder Inference backend advertises it yet`,
                         ),
                     );
                 } else if (has === true && effLevel !== "deep") {
@@ -182,7 +183,7 @@ export function producerCapabilities(f: StreamFacts, health?: readonly { name: s
                         panel(
                             id,
                             "unavailable",
-                            `${who} advertises ${code("layer_telemetry")} but events arrive at level ${code(level)}; restart with ${code("--telemetry-level deep")}`,
+                            `${who} advertises ${code("layer_telemetry")} but the telemetry level is ${code(level)}; restart with ${code("--telemetry-level deep")}`,
                         ),
                     );
                 } else if (has === true) {

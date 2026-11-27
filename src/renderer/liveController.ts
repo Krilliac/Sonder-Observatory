@@ -273,7 +273,7 @@ export class LiveController {
                 levels.set(instance, declared);
             }
         }
-        const stamp = [...map.entries()].map(([k, v]) => `${k}:${v.map((b) => `${b.name}=${b.capabilities.join("+")}`).join(",")}@${levels.get(k) ?? ""}`).join(";");
+        const stamp = [...map.entries()].map(([k, v]) => `${k}:${v.map((b) => `${b.name}=${b.capabilities.join("+")}`).join(",")}`).join(";");
         return { map, levels, stamp: `${stamp}|${[...levels.entries()].map(([k, v]) => `${k}=${v}`).join(";")}` };
     }
 

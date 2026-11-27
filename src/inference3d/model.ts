@@ -224,7 +224,7 @@ export interface ProducerCapabilities {
     backendCapabilities: Record<string, { capabilities: string[]; source: "backend.registered" | "health" }>;
     /** `request.started.sampler` values seen (`sonder` or `backend`). */
     samplers: string[];
-    /** Highest `sampling.level` seen on this stream. */
+    /** Telemetry level: the producer's declared level (discovery `sampling_level`, then health `telemetry.level`) when known, else the highest `sampling.level` seen on this stream. */
     level: string | null;
     textCapture: string | null;
     panels: PanelAvailability[];
